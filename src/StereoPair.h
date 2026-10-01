@@ -122,6 +122,14 @@ struct SubmitResult {
 // (SideBySide) / top (TopBottom), the VR-player convention.
 enum class StereoLayout { SideBySide = 0, TopBottom = 1 };
 
+// Monoscopic packing (Stereo Packing = Mono): the left eye streams as a plain
+// single frame and never enters the pairer. Right-eye renders are dropped, and
+// so are filmstrip thumbnails — a tiny thumbnail frame would resize the stream.
+inline bool monoPackingStreams(int eye, bool isThumbnail)
+{
+    return eye != kEyeRight && !isThumbnail;
+}
+
 inline void packedDims(const FrameMeta& eyeMeta, StereoLayout layout, int* outWidth, int* outHeight)
 {
     if (layout == StereoLayout::SideBySide) {

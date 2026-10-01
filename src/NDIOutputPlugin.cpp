@@ -188,7 +188,8 @@ static void ndiWinLog(const char* fmt, ...)
 // Stereo Parameters (issue #6)
 #define kParamStereoPacking "stereoPacking"
 #define kParamStereoPackingLabel "Stereo Packing"
-#define kParamStereoPackingHint "How a stereo pair is arranged in the single outgoing NDI frame when the timeline renders both eyes (Stereo 3D palette at Vision: Stereo): Side-by-Side (left eye left) or Top-Bottom (left eye top). Mono timelines are unaffected."
+#define kParamStereoPackingHint "How the stream carries a stereo timeline (Stereo 3D palette at Vision: Stereo). Side-by-Side (left eye left) or Top-Bottom (left eye top) pack both eyes into one NDI frame. Mono streams only the left eye as a plain single frame, for monoscopic 360 receivers; right-eye renders are skipped. Mono timelines stream mono under every setting."
+#define kStereoPackingMono 2 // Stereo Packing choice index: 0 = Side-by-Side, 1 = Top-Bottom, 2 = Mono
 
 #define kParamStereoStatus "stereoStatus"
 #define kParamStereoStatusLabel "Stream Status"
@@ -745,7 +746,8 @@ struct NDIInstanceData {
     int renderEye;             // ndi_stereo::kEyeLeft / kEyeRight
     double renderTime;         // kOfxPropTime — the pairing key
     bool renderIsThumbnail;
-    int stereoPacking;         // 0 = Side-by-Side, 1 = Top-Bottom
+    int stereoPacking;         // 0 = Side-by-Side, 1 = Top-Bottom, 2 = Mono (kStereoPackingMono)
+    bool renderStreams;        // false = this render skips NDI (Mono packing: right eye / thumbnail)
 
     // Projection normalization (issue #7). The loaded entries swap under
     // stmapMutex on parameter changes (main thread) while render threads copy
@@ -861,6 +863,10 @@ struct SenderHub {
     ndi_stereo::FrameMeta lastPackedMeta;
     std::string status;               // last stream-status string, for change detection
     unsigned long long lastLoggedDrops = 0;
+    // A right-eye render has arrived at some point (any instance). Only the
+    // Mono packing status wording uses it — the pairer never sees right-eye
+    // frames in that mode, so its own stereo latch can't tell.
+    std::atomic<bool> rightEyeSeen{false};
 };
 
 static std::mutex gHubRegistryMutex;
@@ -1066,20 +1072,25 @@ static std::string hubComposeStatusLocked(SenderHub* hub, NDIInstanceData* data)
         return "No NDI sender — name '" + hub->name + "' unavailable (in use?)";
     }
     std::string status;
-    switch (hub->pairer.mode()) {
-        case ndi_stereo::StreamMode::Stereo:
-            status = data->stereoPacking == 1 ? "Stereo (Top-Bottom)" : "Stereo (Side-by-Side)";
-            break;
-        case ndi_stereo::StreamMode::LeftOnly:
-            status = "Stereo degraded: right eye stalled — left eye in both halves (canvas held)";
-            break;
-        case ndi_stereo::StreamMode::RightOnly:
-            status = "Stereo degraded: left eye stalled — right eye in both halves (canvas held)";
-            break;
-        case ndi_stereo::StreamMode::Mono:
-        default:
-            status = "Mono";
-            break;
+    if (data->stereoPacking == kStereoPackingMono) {
+        status = hub->rightEyeSeen.load(std::memory_order_relaxed) ? "Mono (left eye of stereo pair)"
+                                                                   : "Mono";
+    } else {
+        switch (hub->pairer.mode()) {
+            case ndi_stereo::StreamMode::Stereo:
+                status = data->stereoPacking == 1 ? "Stereo (Top-Bottom)" : "Stereo (Side-by-Side)";
+                break;
+            case ndi_stereo::StreamMode::LeftOnly:
+                status = "Stereo degraded: right eye stalled — left eye in both halves (canvas held)";
+                break;
+            case ndi_stereo::StreamMode::RightOnly:
+                status = "Stereo degraded: left eye stalled — right eye in both halves (canvas held)";
+                break;
+            case ndi_stereo::StreamMode::Mono:
+            default:
+                status = "Mono";
+                break;
+        }
     }
     const bool metadataMode = (data->projectionMode == 2);
     switch (data->projStatus.load(std::memory_order_relaxed)) {
@@ -1199,6 +1210,25 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
     meta.width = s.width;
     meta.height = s.height;
     meta.format = s.format;
+
+    if (data->stereoPacking == kStereoPackingMono) {
+        // Mono packing bypasses the pairer: the left eye goes out as-is.
+        // render() already skips right-eye/thumbnail renders; this catches
+        // pump items enqueued before the setting changed.
+        if (ndi_stereo::monoPackingStreams(s.eye, s.isThumbnail)) {
+            const auto sendT0 = std::chrono::steady_clock::now();
+            hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync);
+            if (timers) timers->sendMs = msSince(sendT0);
+        } else {
+            // No send: close any in-flight async window (see the Hold/Drop
+            // case below).
+            const auto flushT0 = std::chrono::steady_clock::now();
+            hubFlushAsyncLocked(hub);
+            if (timers) timers->flushMs = msSince(flushT0);
+        }
+        hubUpdateStatusLocked(hub, data);
+        return;
+    }
 
     const uint64_t nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -2005,7 +2035,7 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
         return kOfxStatFailed;
     }
 
-    if (!ensureNDIReady(data)) {
+    if (!data->renderStreams || !ensureNDIReady(data)) {
         return kOfxStatOK;
     }
 
@@ -2489,6 +2519,7 @@ static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandl
     myData->renderEye = ndi_stereo::kEyeLeft;
     myData->renderTime = 0.0;
     myData->renderIsThumbnail = false;
+    myData->renderStreams = true;
     myData->stereoPacking = 0;
     myData->statusParamDirty = false;
 
@@ -2722,6 +2753,14 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     }
     myData->renderIsThumbnail = (hasThumbnail && thumbnailValue != 0);
 
+    // Mono packing: right-eye and thumbnail renders skip the whole NDI path
+    // (no conversion, no readback); the host-output passthrough still runs.
+    if (myData->renderEye == ndi_stereo::kEyeRight && myData->hub) {
+        myData->hub->rightEyeSeen.store(true, std::memory_order_relaxed);
+    }
+    myData->renderStreams = (myData->stereoPacking != kStereoPackingMono) ||
+                            ndi_stereo::monoPackingStreams(myData->renderEye, myData->renderIsThumbnail);
+
     // Select this render's warp map (issue #7): only when Equirect is chosen
     // (read fresh, like every param) and the last refresh validated the maps.
     // Thumbnails stay passthrough — a filmstrip thumb warped to map
@@ -2870,7 +2909,9 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
         memcpy(dstData, srcData, height * dstRowBytes);
 
         // Send to NDI (downscale + vertical flip handled inside)
-        sendCPUFrameToNDI(myData, srcData, width, height, srcRowBytes);
+        if (myData->renderStreams) {
+            sendCPUFrameToNDI(myData, srcData, width, height, srcRowBytes);
+        }
     }
 
     // Release images
@@ -3041,6 +3082,7 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     gPropHost->propSetString(stereoPackingProps, kOfxParamPropHint, 0, kParamStereoPackingHint);
     gPropHost->propSetString(stereoPackingProps, kOfxParamPropChoiceOption, 0, "Side-by-Side");
     gPropHost->propSetString(stereoPackingProps, kOfxParamPropChoiceOption, 1, "Top-Bottom");
+    gPropHost->propSetString(stereoPackingProps, kOfxParamPropChoiceOption, 2, "Mono");
     gPropHost->propSetInt(stereoPackingProps, kOfxParamPropDefault, 0, 0); // Side-by-Side
     gPropHost->propSetInt(stereoPackingProps, kOfxParamPropAnimates, 0, 0);
     gPropHost->propSetString(stereoPackingProps, kOfxParamPropParent, 0, "stereoGroup");

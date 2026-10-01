@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Mono option in Stereo Packing** (Side-by-Side / Top-Bottom / **Mono**). On a stereo timeline, Mono streams only the left eye as a plain single frame for monoscopic 360 receivers. It skips the eye pairer, and right-eye and thumbnail renders skip the NDI path entirely, with no conversion or readback. Stream Status reads "Mono (left eye of stereo pair)". Mono timelines are unchanged under every setting.
+
 ### Removed
 - **HDR output.** The plugin is built on the Standard NDI SDK, so it now streams SDR only: 8-bit UYVY, Rec.709. The **HDR Settings** group (Enable HDR, Color Space, Transfer Function, Max CLL/FALL) is gone, along with the P216 16-bit wire format, its Metal and CUDA kernels, and the `ndi_color_info` metadata. Projects saved with HDR enabled now load and stream SDR.
 

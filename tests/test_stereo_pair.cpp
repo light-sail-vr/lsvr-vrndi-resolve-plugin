@@ -558,6 +558,15 @@ int main()
         expectTrue(std::memcmp(out.data(), tbExpect, 16) == 0, "pack: UYVY TB plane layout");
     }
 
+    // --- Mono packing: only the left eye streams; right-eye renders and
+    // thumbnails never reach the wire (a thumbnail would resize the stream). ---
+    {
+        expectTrue(monoPackingStreams(kEyeLeft, false), "mono packing: left eye streams");
+        expectTrue(!monoPackingStreams(kEyeRight, false), "mono packing: right eye dropped");
+        expectTrue(!monoPackingStreams(kEyeLeft, true), "mono packing: left-eye thumbnail dropped");
+        expectTrue(!monoPackingStreams(kEyeRight, true), "mono packing: right-eye thumbnail dropped");
+    }
+
     if (failures) {
         std::fprintf(stderr, "%d test(s) FAILED\n", failures);
         return 1;
