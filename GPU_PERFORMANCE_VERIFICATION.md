@@ -48,7 +48,6 @@ The logs will show timing differences between GPU and CPU:
 **Expected Performance Improvement:**
 - 1080p: 3-5x faster with GPU
 - 4K: 5-10x faster with GPU
-- HDR: 2-4x faster with GPU
 
 ### 3. System GPU Monitoring
 
@@ -91,12 +90,7 @@ Look for the **"Plugin Version"** field in the NDI Output plugin interface:
 - GPU acceleration benefits increase with resolution
 - Monitor timing logs for performance differences
 
-#### **Test 2: HDR vs SDR**
-- Enable/disable HDR in plugin settings
-- Both should show GPU acceleration logs
-- HDR conversion uses different Metal kernel
-
-#### **Test 3: GPU Toggle**
+#### **Test 2: GPU Toggle**
 - Disable "GPU Acceleration" in plugin settings
 - Should see CPU fallback logs
 - Re-enable to confirm GPU acceleration returns
@@ -137,7 +131,6 @@ Look for the **"Plugin Version"** field in the NDI Output plugin interface:
 #### **Expected Results:**
 - **1080p RGBA→UYVY:** 3-5x speedup
 - **4K RGBA→UYVY:** 5-10x speedup
-- **HDR 16-bit conversion:** 2-4x speedup
 
 ### 9. Visual Confirmation Methods
 

@@ -50,7 +50,7 @@ The `tests/fixtures/*.exr` files were written by ffmpeg's OpenEXR encoder (32×1
 make test-metal
 ```
 
-GPU kernel correctness tests: runs the fused downscale+convert Metal kernels (UYVY and P216) and their STMap-warp variants (v1.7.0) on a synthetic frame — through both the blocking calls and the non-blocking slot-ring submit path (v1.6.0) — and compares against the CPU references (`ndi_stream::downscaleRGBABox`, `ndi_stmap::warpRGBABox`, plus the converters). An identity STMap must reproduce the plain downscale kernels byte-for-byte. Needs a Metal device (any Mac; skips cleanly without one), but still no Resolve or NDI SDK. The kernels are compiled from source at runtime, so this is the only pre-Resolve check that catches shader errors — run it whenever `src/MetalGPUAcceleration.mm` changes.
+GPU kernel correctness tests: runs the fused downscale+convert Metal kernels (UYVY) and their STMap-warp variants (v1.7.0) on a synthetic frame — through both the blocking calls and the non-blocking slot-ring submit path (v1.6.0) — and compares against the CPU references (`ndi_stream::downscaleRGBABox`, `ndi_stmap::warpRGBABox`, plus the converters). An identity STMap must reproduce the plain downscale kernels byte-for-byte. Needs a Metal device (any Mac; skips cleanly without one), but still no Resolve or NDI SDK. The kernels are compiled from source at runtime, so this is the only pre-Resolve check that catches shader errors — run it whenever `src/MetalGPUAcceleration.mm` changes.
 
 ```bash
 make bench

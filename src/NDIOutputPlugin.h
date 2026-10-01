@@ -2,7 +2,7 @@
 
 #include "ofxsImageEffect.h"
 
-// Forward declarations for HDR support
+// Forward declarations for the NDI frame types
 struct NDIlib_video_frame_v2_t;
 struct NDIlib_metadata_frame_t;
 

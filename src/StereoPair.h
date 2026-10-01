@@ -47,8 +47,8 @@ constexpr int kEyeLeft = 0;
 constexpr int kEyeRight = 1;
 
 // Wire formats the send paths produce. The pairer treats payloads as opaque
-// bytes; the format only has to match between mates and drive plane layout.
-enum class WireFormat { UYVY8 = 0, P216 = 1, RGBA8 = 2 };
+// bytes; the format only has to match between mates and set the row size.
+enum class WireFormat { UYVY8 = 0, RGBA8 = 2 };
 
 // Tuning, derived from the probe findings:
 // - the reorder window must cover ≥5 frames (in-eye time reversal at 8K);
@@ -122,6 +122,14 @@ struct SubmitResult {
 // (SideBySide) / top (TopBottom), the VR-player convention.
 enum class StereoLayout { SideBySide = 0, TopBottom = 1 };
 
+// Monoscopic packing (Stereo Packing = Mono): the left eye streams as a plain
+// single frame and never enters the pairer. Right-eye renders are dropped, and
+// so are filmstrip thumbnails — a tiny thumbnail frame would resize the stream.
+inline bool monoPackingStreams(int eye, bool isThumbnail)
+{
+    return eye != kEyeRight && !isThumbnail;
+}
+
 inline void packedDims(const FrameMeta& eyeMeta, StereoLayout layout, int* outWidth, int* outHeight)
 {
     if (layout == StereoLayout::SideBySide) {
@@ -134,65 +142,36 @@ inline void packedDims(const FrameMeta& eyeMeta, StereoLayout layout, int* outWi
 }
 
 // Payload size of one frame of this format, matching what the send paths
-// produce: UYVY interleaved 2 B/px; RGBA 4 B/px; P216 planar 16-bit Y plane
-// then interleaved-UV plane (4:2:2), 2 B/px per plane.
+// produce: UYVY interleaved 2 B/px; RGBA 4 B/px. Both are single-plane.
 inline size_t wireFrameBytes(const FrameMeta& m)
 {
     const size_t pixels = static_cast<size_t>(m.width) * static_cast<size_t>(m.height);
     switch (m.format) {
         case WireFormat::RGBA8: return pixels * 4;
-        case WireFormat::P216:  return pixels * 4;
         case WireFormat::UYVY8: default: return pixels * 2;
     }
 }
 
 // Pack two same-meta eye frames into one packed frame. `out` must hold
-// 2 * wireFrameBytes(eyeMeta). Planar formats pack per plane — the packed
-// frame is [packed plane 0][packed plane 1], never interleaved across planes,
-// which is exactly the layout NDI expects when handed the doubled dimensions.
+// 2 * wireFrameBytes(eyeMeta). Side-by-side interleaves the eyes' rows;
+// top-bottom concatenates the two frames.
 inline void packStereoFrame(const FrameMeta& eyeMeta, StereoLayout layout,
                             const uint8_t* left, const uint8_t* right, uint8_t* out)
 {
-    struct Plane { size_t rowBytes; int rows; };
-    Plane planes[2];
-    int planeCount = 1;
-    const size_t w = static_cast<size_t>(eyeMeta.width);
-    switch (eyeMeta.format) {
-        case WireFormat::RGBA8:
-            planes[0] = {w * 4, eyeMeta.height};
-            break;
-        case WireFormat::P216:
-            planes[0] = {w * 2, eyeMeta.height}; // Y
-            planes[1] = {w * 2, eyeMeta.height}; // interleaved UV
-            planeCount = 2;
-            break;
-        case WireFormat::UYVY8:
-        default:
-            planes[0] = {w * 2, eyeMeta.height};
-            break;
-    }
-
-    const uint8_t* srcL = left;
-    const uint8_t* srcR = right;
-    uint8_t* dst = out;
-    for (int p = 0; p < planeCount; ++p) {
-        const size_t rowBytes = planes[p].rowBytes;
-        const int rows = planes[p].rows;
-        if (layout == StereoLayout::SideBySide) {
-            for (int r = 0; r < rows; ++r) {
-                std::memcpy(dst, srcL + r * rowBytes, rowBytes);
-                dst += rowBytes;
-                std::memcpy(dst, srcR + r * rowBytes, rowBytes);
-                dst += rowBytes;
-            }
-        } else {
-            std::memcpy(dst, srcL, rowBytes * rows);
-            dst += rowBytes * rows;
-            std::memcpy(dst, srcR, rowBytes * rows);
-            dst += rowBytes * rows;
+    const size_t rowBytes = static_cast<size_t>(eyeMeta.width) *
+                            (eyeMeta.format == WireFormat::RGBA8 ? 4 : 2);
+    const int rows = eyeMeta.height;
+    if (layout == StereoLayout::SideBySide) {
+        uint8_t* dst = out;
+        for (int r = 0; r < rows; ++r) {
+            std::memcpy(dst, left + r * rowBytes, rowBytes);
+            dst += rowBytes;
+            std::memcpy(dst, right + r * rowBytes, rowBytes);
+            dst += rowBytes;
         }
-        srcL += rowBytes * rows;
-        srcR += rowBytes * rows;
+    } else {
+        std::memcpy(out, left, rowBytes * rows);
+        std::memcpy(out + rowBytes * rows, right, rowBytes * rows);
     }
 }
 

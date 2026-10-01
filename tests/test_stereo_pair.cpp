@@ -537,8 +537,6 @@ int main()
                   "pack: UYVY frame bytes = w*h*2");
         expectInt(static_cast<long long>(wireFrameBytes(meta(2, 2, WireFormat::RGBA8))), 16,
                   "pack: RGBA frame bytes = w*h*4");
-        expectInt(static_cast<long long>(wireFrameBytes(meta(2, 2, WireFormat::P216))), 16,
-                  "pack: P216 frame bytes = w*h*4 (Y + interleaved UV, 16-bit)");
     }
 
     {
@@ -560,30 +558,13 @@ int main()
         expectTrue(std::memcmp(out.data(), tbExpect, 16) == 0, "pack: UYVY TB plane layout");
     }
 
+    // --- Mono packing: only the left eye streams; right-eye renders and
+    // thumbnails never reach the wire (a thumbnail would resize the stream). ---
     {
-        // Planar format (P216, 2×2): each plane packs independently — the
-        // packed frame is [packed Y][packed UV], never interleaved across
-        // planes. Eye frame = 8 bytes Y then 8 bytes UV.
-        const FrameMeta m = meta(2, 2, WireFormat::P216);
-        std::vector<uint8_t> left = payload(0, 16);    // Y 0..7, UV 8..15
-        std::vector<uint8_t> right = payload(100, 16); // Y 100..107, UV 108..115
-        std::vector<uint8_t> out(32, 0xEE);
-
-        packStereoFrame(m, StereoLayout::SideBySide, left.data(), right.data(), out.data());
-        const uint8_t sbsExpect[32] = {
-            0, 1, 2, 3, 100, 101, 102, 103,      // packed Y row 0
-            4, 5, 6, 7, 104, 105, 106, 107,      // packed Y row 1
-            8, 9, 10, 11, 108, 109, 110, 111,    // packed UV row 0
-            12, 13, 14, 15, 112, 113, 114, 115}; // packed UV row 1
-        expectTrue(std::memcmp(out.data(), sbsExpect, 32) == 0, "pack: P216 SbS per-plane layout");
-
-        packStereoFrame(m, StereoLayout::TopBottom, left.data(), right.data(), out.data());
-        const uint8_t tbExpect[32] = {
-            0, 1, 2, 3, 4, 5, 6, 7,              // packed Y = L Y…
-            100, 101, 102, 103, 104, 105, 106, 107, // …then R Y
-            8, 9, 10, 11, 12, 13, 14, 15,        // packed UV = L UV…
-            108, 109, 110, 111, 112, 113, 114, 115}; // …then R UV
-        expectTrue(std::memcmp(out.data(), tbExpect, 32) == 0, "pack: P216 TB per-plane layout");
+        expectTrue(monoPackingStreams(kEyeLeft, false), "mono packing: left eye streams");
+        expectTrue(!monoPackingStreams(kEyeRight, false), "mono packing: right eye dropped");
+        expectTrue(!monoPackingStreams(kEyeLeft, true), "mono packing: left-eye thumbnail dropped");
+        expectTrue(!monoPackingStreams(kEyeRight, true), "mono packing: right-eye thumbnail dropped");
     }
 
     if (failures) {

@@ -26,14 +26,6 @@ bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context,
                                    int width, 
                                    int height);
 
-// Convert RGBA float to 16-bit RGBA for HDR using Metal
-bool metal_gpu_convert_rgba_to_hdr(MetalGPUContextRef context,
-                                  const float* rgbaData,
-                                  unsigned short* hdrData,
-                                  int width,
-                                  int height,
-                                  float scale);
-
 // ---------------------------------------------------------------------------
 // GPU-native fast path (issue #5): the host hands the frame as an id<MTLBuffer>
 // of tightly-packed float RGBA. These fuse box-downscale (divisor 1/2/4) +
@@ -53,16 +45,6 @@ bool metal_gpu_buffer_downscale_to_uyvy(MetalGPUContextRef context,
                                         int divisor,
                                         int outWidth, int outHeight,
                                         unsigned char* uyvyOut);
-
-// Fused downscale + RGBA float → P216 (planar Y then interleaved UV, 16-bit,
-// BT.2100 limited range). p216Out receives outWidth*outHeight*2 uint16 values.
-bool metal_gpu_buffer_downscale_to_p216(MetalGPUContextRef context,
-                                        void* commandQueue,
-                                        void* srcMetalBuffer,
-                                        int srcWidth, int srcHeight, int srcRowFloats,
-                                        int divisor,
-                                        int outWidth, int outHeight,
-                                        unsigned short* p216Out);
 
 // ---------------------------------------------------------------------------
 // STMap warp variants (issue #7): same fused structure, but each output pixel
@@ -85,15 +67,6 @@ bool metal_gpu_buffer_warp_to_uyvy(MetalGPUContextRef context,
                                    int divisor,
                                    int outWidth, int outHeight,
                                    unsigned char* uyvyOut);
-
-bool metal_gpu_buffer_warp_to_p216(MetalGPUContextRef context,
-                                   void* commandQueue,
-                                   void* srcMetalBuffer,
-                                   int srcWidth, int srcHeight, int srcRowFloats,
-                                   void* mapMetalBuffer, int mapWidth, int mapHeight,
-                                   int divisor,
-                                   int outWidth, int outHeight,
-                                   unsigned short* p216Out);
 
 // ---------------------------------------------------------------------------
 // Non-blocking fast path (issue #5, v1.6.0): same fused kernels, but the
@@ -137,7 +110,6 @@ metal_submit_status metal_gpu_downscale_submit(MetalGPUContextRef context,
                                                int srcWidth, int srcHeight, int srcRowFloats,
                                                int divisor,
                                                int outWidth, int outHeight,
-                                               bool p216,
                                                metal_downscale_done_fn done, void* user);
 
 // Non-blocking STMap warp: identical contract to metal_gpu_downscale_submit
@@ -151,7 +123,6 @@ metal_submit_status metal_gpu_warp_submit(MetalGPUContextRef context,
                                           void* mapMetalBuffer, int mapWidth, int mapHeight,
                                           int divisor,
                                           int outWidth, int outHeight,
-                                          bool p216,
                                           metal_downscale_done_fn done, void* user);
 
 void metal_gpu_downscale_release(MetalGPUContextRef context, void* slot);

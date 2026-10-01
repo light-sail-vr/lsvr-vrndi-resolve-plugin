@@ -415,7 +415,7 @@ int main()
                 ++sim.pending;
                 if (metal_gpu_downscale_submit(ctx, nullptr, srcBuf, SRC_W, SRC_H,
                                                rowFloatsInt, DIVISOR, outW, outH,
-                                               false, onDone, tag) != METAL_SUBMIT_OK) {
+                                               onDone, tag) != METAL_SUBMIT_OK) {
                     --sim.pending;
                     delete tag;
                     ++dropped;
