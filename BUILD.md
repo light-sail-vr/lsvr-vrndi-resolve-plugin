@@ -15,11 +15,11 @@ Canonical instructions for building, installing, and verifying the NDI Output OF
    ```bash
    xcode-select --install
    ```
-2. **NDI Advanced SDK for Apple**, installed at its default location:
+2. **NDI SDK for Apple** (the Standard, royalty-free SDK — **not** NDI Advanced, which is a commercial license), installed at its default location:
    ```
-   /Library/NDI Advanced SDK for Apple/
+   /Library/NDI SDK for Apple/
    ```
-   Download from [ndi.video/for-developers](https://ndi.video/for-developers/). The Makefile references this path directly — no symlink needed (older docs mentioned `/Library/NDI_Advanced_SDK`; nothing uses it anymore).
+   Download from [ndi.video/for-developers](https://ndi.video/for-developers/). The Makefile links `lib/macOS/libndi.dylib` from this path; for a non-default location pass it with the quotes kept: `make dev NDI_SDK_PATH='"/path/to/NDI SDK for Apple"'` (the same override applies to `make install`). `package_release.sh` reads `NDI_SDK_PATH` from the environment (no extra quotes).
 3. **DaVinci Resolve** 17+ (developed against Resolve 20/21, Studio).
 
 ### Build
@@ -56,7 +56,7 @@ GPU kernel correctness tests: runs the fused downscale+convert Metal kernels (UY
 make bench
 ```
 
-Pipeline timing harness ([tests/bench_pipeline.mm](tests/bench_pipeline.mm)): reproduces the plugin's per-pair GPU-convert → pack → NDI-send pattern at production 8K dimensions outside Resolve, with an in-process receiver forcing real encode, and reports per-stage timings plus sustained pairs/s. Needs a Metal device **and** the NDI Advanced SDK. Creates NDI source `NDI_BENCH_PIPELINE` (never the production name). Built for the issue #5 performance diagnosis; re-run it when touching the send path or the fused kernels to catch throughput regressions before a Resolve session.
+Pipeline timing harness ([tests/bench_pipeline.mm](tests/bench_pipeline.mm)): reproduces the plugin's per-pair GPU-convert → pack → NDI-send pattern at production 8K dimensions outside Resolve, with an in-process receiver forcing real encode, and reports per-stage timings plus sustained pairs/s. Needs a Metal device **and** the NDI SDK. Creates NDI source `NDI_BENCH_PIPELINE` (never the production name). Built for the issue #5 performance diagnosis; re-run it when touching the send path or the fused kernels to catch throughput regressions before a Resolve session.
 
 ### Install
 
@@ -67,7 +67,7 @@ sudo make install
 This does three things (all required):
 1. Removes any previous bundle from `/Library/OFX/Plugins/`
 2. Copies the new `NDIOutput.ofx.bundle` there
-3. Runs `install_name_tool` to rewrite the NDI dylib reference from `@rpath/libndi_advanced.dylib` to its absolute path — without this, Resolve can't resolve the NDI library and the plugin won't load
+3. Runs `install_name_tool` to rewrite the NDI dylib reference from `@rpath/libndi.dylib` to its absolute path — without this, Resolve can't resolve the NDI library and the plugin won't load
 
 Then **restart DaVinci Resolve** — OFX plugins are only scanned at startup; there is no hot reload.
 
@@ -101,7 +101,7 @@ Two scripts turn a working tree into a public release:
 ./scripts/publish_github_release.sh   # tag + draft GitHub release with the artifacts
 ```
 
-`package_release.sh` produces a **universal (arm64 + x86_64), macOS 13+ binary** with `libndi_advanced.dylib` bundled inside `Contents/Frameworks/` (`@loader_path` reference) — end users need **no NDI SDK**, unlike the dev flow where `make install` points the plugin at the SDK's dylib by absolute path. It signs the bundle with the Developer ID **Application** cert (hardened runtime, timestamps), builds a `productbuild` pkg installing to `/Library/OFX/Plugins` (bundle relocation disabled), signs that with the Developer ID **Installer** cert, then notarizes and staples via `notarytool`. Output: `NDIOutput-<V>-macOS.pkg` (installer), `NDIOutput-<V>-macOS.zip` (bare signed bundle for manual installs), `SHA256SUMS.txt`. The NDI attribution file `libndi_licenses.txt` ships inside `Contents/Resources/` and the installer readme carries the required ndi.video link (NDI SDK distribution terms).
+`package_release.sh` produces a **universal (arm64 + x86_64), macOS 13+ binary** with `libndi.dylib` (Standard NDI SDK) bundled inside `Contents/Frameworks/` (`@loader_path` reference) — end users need **no NDI SDK**, unlike the dev flow where `make install` points the plugin at the SDK's dylib by absolute path. It signs the bundle with the Developer ID **Application** cert (hardened runtime, timestamps), builds a `productbuild` pkg installing to `/Library/OFX/Plugins` (bundle relocation disabled), signs that with the Developer ID **Installer** cert, then notarizes and staples via `notarytool`. Output: `NDIOutput-<V>-macOS.pkg` (installer), `NDIOutput-<V>-macOS.zip` (bare signed bundle for manual installs), `SHA256SUMS.txt`. The NDI attribution file `libndi_licenses.txt` ships inside `Contents/Resources/` and the installer readme carries the required ndi.video link (NDI SDK distribution terms).
 
 One-time signing setup (the script's preflight names anything missing):
 
@@ -138,7 +138,7 @@ The May-2025 scaffold (commit `50eacc1`) never built, was never diagnosed, and p
 
 - **Visual Studio 2022** with the "Desktop development with C++" workload (MSVC v143 + Windows SDK)
 - **CMake** ≥ 3.22 and **vcpkg** (supplies zlib via [vcpkg.json](vcpkg.json))
-- **Windows NDI 6 Advanced SDK** installed at `C:\Program Files\NDI\NDI 6 Advanced SDK` (or pass `-DNDI_SDK_PATH=...`). HDR needs Advanced; the download is access-gated, request early. Without it the build automatically links a **stub import library** built from [third_party/ndi/](third_party/ndi/) — good for compile-proof only; a streaming binary needs the real SDK.
+- **Windows NDI 6 SDK** (Standard, royalty-free — **not** NDI Advanced) installed at `C:\Program Files\NDI\NDI 6 SDK` (or pass `-DNDI_SDK_PATH=...`); the build links `Lib\x64\Processing.NDI.Lib.x64.lib` and bundles `Bin\x64\Processing.NDI.Lib.x64.dll`. Without it the build automatically links a **stub import library** built from [third_party/ndi/](third_party/ndi/) — good for compile-proof only; a streaming binary needs the real SDK.
 - **CUDA Toolkit 12.9** (pinned; spec decision 8) — compiles the GPU-native pipeline (`src/CudaGPUAcceleration.cu`; nvcc requires MSVC as host compiler — that constraint killed the old MinGW script). Nothing can be cross-compiled from macOS. `-DNDI_ENABLE_CUDA=OFF` builds the CPU-only plugin without the toolkit (no GPU-native path — the documented non-NVIDIA behavior, not a shippable default).
 
 ### Build (Tier 0)
@@ -167,7 +167,7 @@ ctest --test-dir build -C Release --output-on-failure
 cmake --install build --config Release --prefix stage
 ```
 
-produces the spec bundle tree `stage/NDIOutput.ofx.bundle/Contents/Win64/NDIOutput.ofx` (with `Processing.NDI.Lib.Advanced.x64.dll` + its licenses file beside the binary when the real SDK is present — a stub-linked CI-style build stages no DLL and will not stream). Then, from an **elevated** PowerShell (UAC prompts spawned by automation shells can auto-cancel; open the terminal elevated yourself):
+produces the spec bundle tree `stage/NDIOutput.ofx.bundle/Contents/Win64/NDIOutput.ofx` (with `Processing.NDI.Lib.x64.dll` + its licenses file beside the binary when the real SDK is present — a stub-linked CI-style build stages no DLL and will not stream). Then, from an **elevated** PowerShell (UAC prompts spawned by automation shells can auto-cancel; open the terminal elevated yourself):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_windows.ps1              # copies the bundle into C:\Program Files\Common Files\OFX\Plugins
@@ -262,7 +262,7 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 - **NDI Studio Monitor** (Windows, part of free [NDI Tools](https://ndi.video/tools/)) — the Windows-loop receiver; run it on a second machine so the firewall is part of the test
 - **NDI Video Monitor** (installed at `/Applications/NDI Video Monitor.app`) — quickest visual check on macOS
 - **OBS Studio** with the NDI plugin
-- NDI Advanced SDK example receivers in `/Library/NDI Advanced SDK for Apple/examples/C++/` (`NDIlib_Recv`, `NDIlib_Recv_HDR`, `NDIlib_Jitter_Measure`, `NDIlib_Latency_Test`) — useful for programmatic/HDR validation
+- NDI SDK example receivers in `/Library/NDI SDK for Apple/examples/C++/` (e.g. `NDIlib_Recv`) — useful for programmatic validation
 
 ## Troubleshooting
 

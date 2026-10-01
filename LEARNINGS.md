@@ -407,6 +407,20 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** `ditto -x -k` extraction of the 1.14.1 and 1.14.0 zips both pass `codesign --verify --strict --deep`; Gatekeeper `spctl -a -t install` accepts the pkg as "Notarized Developer ID".
 **Rule:** verify a release zip with `ditto -x -k`, never `unzip`, before concluding the signature is broken — and consider `--norsrc` when producing it.
 
+### 2026-10-01 — `make install` failed "larger updated load commands do not fit" after the Standard-SDK switch
+**Symptom:** `make install` died in its `install_name_tool -change "@rpath/libndi.dylib" <SDK path>` step: "changing install names or rpaths can't be redone … larger updated load commands do not fit (the program must be relinked, and you may need to use -headerpad or -headerpad_max_install_names)". The SDK sat at an unusually long path at the time.
+**Root cause:** the linker only reserves enough Mach-O header padding for the install names it writes, so rewriting `@rpath/libndi.dylib` to a long absolute path overflows it. `-headerpad_max_install_names` had just been added to `LDFLAGS`, but `make` doesn't track the Makefile as a prerequisite: the binary linked a minute earlier was "up to date" and `install` reused it without the padding.
+**Fix:** `-headerpad_max_install_names` on the plugin and `make bench` links (this PR); force a relink after changing link flags (`rm NDIOutput.ofx.bundle/Contents/MacOS/NDIOutput.ofx` or `make clean`). Moving the SDK to the default `/Library/NDI SDK for Apple` also removes the need for the `NDI_SDK_PATH` override.
+**Validated by:** relinked binary accepted the long-path rewrite on a copy (`otool -L` shows the absolute path); `make install` then succeeded; `dlopen` of the installed bundle + `OfxGetNumberOfPlugins() == 1`; plugin listed in Resolve.
+**Rule:** after editing `LDFLAGS`/`CXXFLAGS`, force a rebuild — `make` will not notice the Makefile changed.
+
+### 2026-10-01 — A plugin that failed to load once stays hidden after its dylib is fixed
+**Symptom:** after the NDI SDK was briefly missing from `/Library/NDI SDK for Apple`, NDI Output never reappeared in the Effects Library, even after the SDK was restored and the installed binary `dlopen`ed cleanly outside Resolve.
+**Root cause:** Resolve recorded the failed load (`Failed to load …/NDIOutput.ofx.bundle` in `davinci_resolve.log`) in `OFXPluginCacheV2.xml` as `status="2" mtime="0" size="0"`. The re-scan trigger is the plugin binary's mtime/size; fixing a *dependency* (the SDK dylib) changes neither, so later launches trusted the cached failure and logged no new attempt.
+**Fix:** with Resolve fully quit, delete `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/OFXPluginCacheV2.xml` and relaunch.
+**Validated by:** plugin listed in Resolve after the cache delete + relaunch.
+**Rule:** before launching Resolve, check the installed plugin loads (`otool -L` paths exist, or `dlopen` it); if Resolve already saw a failed load, delete the plugin cache once the cause is fixed — a `status="2"` entry for NDIOutput means exactly that.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 

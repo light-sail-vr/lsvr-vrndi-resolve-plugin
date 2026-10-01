@@ -84,18 +84,19 @@ endif()
 # pins the dependency list.
 find_package(ZLIB REQUIRED)
 
-# NDI Advanced SDK: use the real installation when present (required for any
+# Standard (royalty-free) NDI SDK — never the Advanced SDK, which is a
+# commercial license. Use the real installation when present (required for any
 # binary that will actually stream; release builds must use an SDK <= 30 days
-# old). Without it — hosted CI, where the access-gated SDK cannot live — fall
-# back to the vendored MIT-licensed headers plus a stub import library built
-# from the checked-in export list, which proves the plugin compiles and links
-# without shipping a byte of NDI code.
-set(NDI_SDK_PATH "C:/Program Files/NDI/NDI 6 Advanced SDK"
-    CACHE PATH "Path to the NDI Advanced SDK")
-set(NDI_DLL_NAME "Processing.NDI.Lib.Advanced.x64")
+# old). Without it — hosted CI, where no SDK is installed — fall back to the
+# vendored MIT-licensed headers plus a stub import library built from the
+# checked-in export list, which proves the plugin compiles and links without
+# shipping a byte of NDI code.
+set(NDI_SDK_PATH "C:/Program Files/NDI/NDI 6 SDK"
+    CACHE PATH "Path to the Standard NDI SDK")
+set(NDI_DLL_NAME "Processing.NDI.Lib.x64")
 
 if(EXISTS "${NDI_SDK_PATH}/Include/Processing.NDI.Lib.h")
-    message(STATUS "NDI: using installed Advanced SDK at ${NDI_SDK_PATH}")
+    message(STATUS "NDI: using installed SDK at ${NDI_SDK_PATH}")
     set(NDI_INCLUDE_DIR "${NDI_SDK_PATH}/Include")
     set(NDI_LINK_LIB "${NDI_SDK_PATH}/Lib/x64/${NDI_DLL_NAME}.lib")
     set(NDI_USING_STUB FALSE)

@@ -14,7 +14,7 @@
 # Copy those three onto the macOS release machine's dist\v<VERSION>\ before
 # running scripts/publish_github_release.sh, which attaches them next to the pkg.
 #
-# -AllowStub packages a stub-linked build (no NDI Advanced SDK on the machine,
+# -AllowStub packages a stub-linked build (no NDI SDK on the machine,
 # which is CI's situation). Such a build loads but never streams, so its
 # artifacts are named ...-STUB.exe/.zip and must never be released.
 
@@ -58,7 +58,7 @@ else { Miss "$resDir\ndi_timeline_watch.py" }
 # NDI redistribution obligations (spec decision 13): the runtime rides inside
 # the bundle and its third-party notices ride beside it.
 $isStub = $false
-$ndiDll = Join-Path $binDir "Processing.NDI.Lib.Advanced.x64.dll"
+$ndiDll = Join-Path $binDir "Processing.NDI.Lib.x64.dll"
 $ndiLic = Join-Path $binDir "Processing.NDI.Lib.Licenses.txt"
 if ((Test-Path $ndiDll) -and (Test-Path $ndiLic)) {
     Note "NDI runtime DLL + third-party licenses file bundled"
@@ -67,7 +67,7 @@ if ((Test-Path $ndiDll) -and (Test-Path $ndiLic)) {
     Write-Host "  [warn] no NDI runtime in the stage tree - packaging a STUB build (-AllowStub)."
     Write-Host "         It installs and loads but does NOT stream. Never release it."
 } else {
-    Miss "$ndiDll and/or $ndiLic - build against the real NDI Advanced SDK (or pass -AllowStub)"
+    Miss "$ndiDll and/or $ndiLic - build against the real NDI SDK (or pass -AllowStub)"
 }
 
 $iss = Join-Path $repo "installer\NDIOutput.iss"

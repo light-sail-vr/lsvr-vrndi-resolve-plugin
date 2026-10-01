@@ -22,7 +22,7 @@
 #ifndef OutputDir
   #define OutputDir "..\dist\v" + AppVersion
 #endif
-; Stub-linked builds (no NDI Advanced SDK, e.g. CI) get a name that cannot be
+; Stub-linked builds (no NDI SDK, e.g. CI) get a name that cannot be
 ; mistaken for a release artifact - they compile and install but never stream.
 #ifndef OutputBaseName
   #define OutputBaseName "NDIOutput-" + AppVersion + "-Windows-x64"

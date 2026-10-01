@@ -5,12 +5,15 @@ VERSION_FILE = VERSION
 VERSION = $(shell cat $(VERSION_FILE))
 
 # Directories
-NDI_SDK_PATH = "/Library/NDI Advanced SDK for Apple"
+# Standard (royalty-free) NDI SDK — never the Advanced SDK, which is a
+# commercial license. Override for a non-default install, keeping the quotes:
+#   make dev NDI_SDK_PATH='"/path/to/NDI SDK for Apple"'
+NDI_SDK_PATH ?= "/Library/NDI SDK for Apple"
 NDI_INCLUDE = $(NDI_SDK_PATH)/include
-NDI_LIB = $(NDI_SDK_PATH)/lib/macOS/libndi_advanced.dylib
+NDI_LIB = $(NDI_SDK_PATH)/lib/macOS/libndi.dylib
 
 # Deployment target / architectures.
-# libndi_advanced.dylib requires macOS 13+, so that is our floor. Without an
+# macOS 13 is our supported floor (libndi.dylib itself needs only 11.2). Without an
 # explicit -mmacosx-version-min the binary is stamped with the build host's OS
 # version and refuses to load on anything older (bit us in v1.12: minos 26.0).
 # ARCHFLAGS is empty for dev builds (host arch); release packaging passes
@@ -25,7 +28,10 @@ ARCHFLAGS ?=
 CXX = c++
 CXXFLAGS = -c -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -Ithird_party/braw
 OBJCXXFLAGS = -c -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -x objective-c++
-LDFLAGS = -bundle -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -exported_symbols_list openfx/Support/include/osxSymbols $(NDI_LIB) -framework Metal -framework MetalKit -framework Foundation -framework AppKit -framework UniformTypeIdentifiers -lz
+# -headerpad_max_install_names: `make install`/`make bench` rewrite the NDI
+# dylib reference to its absolute SDK path with install_name_tool, which fails
+# ("larger updated load commands do not fit") when that path is long.
+LDFLAGS = -headerpad_max_install_names -bundle -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -exported_symbols_list openfx/Support/include/osxSymbols $(NDI_LIB) -framework Metal -framework MetalKit -framework Foundation -framework AppKit -framework UniformTypeIdentifiers -lz
 
 # Source files
 SOURCES = src/NDIOutputPlugin.cpp src/BRAWImmersiveReader.cpp src/TimelineClipWatcher.cpp
@@ -75,8 +81,8 @@ test-metal: src/MetalGPUAcceleration.o
 bench: src/MetalGPUAcceleration.o
 	mkdir -p build
 	$(CXX) -Isrc -I$(NDI_INCLUDE) tests/bench_pipeline.mm src/MetalGPUAcceleration.o \
-		-o build/bench_pipeline -framework Metal -framework Foundation $(NDI_LIB)
-	install_name_tool -change "@rpath/libndi_advanced.dylib" $(NDI_LIB) build/bench_pipeline
+		-o build/bench_pipeline -headerpad_max_install_names -framework Metal -framework Foundation $(NDI_LIB)
+	install_name_tool -change "@rpath/libndi.dylib" $(NDI_LIB) build/bench_pipeline
 	./build/bench_pipeline
 
 $(BUNDLE_EXECUTABLE): $(OBJECTS) | bundle_structure
@@ -104,7 +110,7 @@ bundle_structure:
 install: $(BUNDLE_EXECUTABLE)
 	sudo rm -rf "/Library/OFX/Plugins/$(BUNDLE_NAME)"
 	sudo cp -R $(BUNDLE_NAME) "/Library/OFX/Plugins/"
-	sudo install_name_tool -change "@rpath/libndi_advanced.dylib" $(NDI_LIB) "/Library/OFX/Plugins/$(BUNDLE_EXECUTABLE)"
+	sudo install_name_tool -change "@rpath/libndi.dylib" $(NDI_LIB) "/Library/OFX/Plugins/$(BUNDLE_EXECUTABLE)"
 
 # Clean
 clean:
