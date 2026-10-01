@@ -7,7 +7,6 @@
   Built on the Standard (royalty-free) NDI SDK - never the Advanced SDK.
   
   Based on modern OFX examples using the C API directly.
-  Includes HDR support with PQ/HLG transfer functions and Rec.2020/P3 color spaces.
   Enhanced with GPU acceleration for optimal performance.
 */
 
