@@ -6,7 +6,7 @@ sedi() {
     if sed --version >/dev/null 2>&1; then
         sed -i "$@"          # GNU
     else
-        sedi "$@"       # BSD
+        sed -i '' "$@"   # BSD
     fi
 }
 

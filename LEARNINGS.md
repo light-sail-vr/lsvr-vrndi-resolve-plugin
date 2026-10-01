@@ -421,6 +421,13 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** plugin listed in Resolve after the cache delete + relaunch.
 **Rule:** before launching Resolve, check the installed plugin loads (`otool -L` paths exist, or `dlopen` it); if Resolve already saw a failed load, delete the plugin cache once the cause is fixed — a `status="2"` entry for NDIOutput means exactly that.
 
+### 2026-10-01 — The version scripts' `sedi()` called itself on macOS (since v1.14.1)
+**Symptom:** found while cutting 1.14.2. On macOS, `scripts/set_version.sh` and `scripts/increment_version.sh` would write `VERSION` and then die before updating the `kPluginVersion*` `#define`s. The bash call stack overflowed.
+**Root cause:** commit `2ad0e6a` (v1.14.1) added a portable `sedi()` wrapper, apparently via a blanket replace of `sed -i ''` → `sedi` that also rewrote the wrapper's own BSD branch. So `sedi` called `sedi` forever. The 1.14.1 bump ran on the Windows workstation (GNU sed branch), so nobody noticed.
+**Fix:** the BSD branch is `sed -i '' "$@"` again (release-1.14.2 PR).
+**Validated by:** `./scripts/increment_version.sh` on macOS bumped 1.14.1 → 1.14.2 and updated `VERSION`, the `#define`s and `Info.plist`.
+**Rule:** after a mechanical search-and-replace that introduces a wrapper, check the wrapper's own body, and run the script once on each platform it claims to support.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
