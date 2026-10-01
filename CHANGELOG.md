@@ -1,9 +1,19 @@
 # Changelog
 
-All notable changes to the NDI Advanced Output Plugin will be documented in this file.
+All notable changes to the NDI Output Plugin will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.14.2] - 2026-10-01
+
+### Changed
+- **Built on the Standard (royalty-free) NDI SDK** instead of NDI Advanced (#43). The installers now bundle the Standard NDI runtime: `libndi.dylib` on macOS and `Processing.NDI.Lib.x64.dll` on Windows. End users still need nothing else installed, and NDI receivers work as before.
+- The README and installer text no longer advertise HDR (#43, #44).
+
+### Fixed
+- **Version scripts on macOS**: `scripts/set_version.sh` and `scripts/increment_version.sh` recursed forever in their BSD `sed` branch. They wrote `VERSION`, then crashed before updating the version `#define`s. Developer tooling only; shipped binaries were not affected.
+
 
 ## [1.14.1] - 2026-09-01
 
