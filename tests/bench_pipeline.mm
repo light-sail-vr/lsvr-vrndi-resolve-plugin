@@ -16,7 +16,7 @@
 // mirrors NDI Video Monitor running on the same machine, so the sender does
 // real encode/transport work.
 //
-// Build & run: make bench   (needs a Metal device + the NDI Advanced SDK;
+// Build & run: make bench   (needs a Metal device + the NDI SDK;
 // creates NDI source "NDI_BENCH_PIPELINE" — never the production name).
 //
 // Fidelity gaps vs in-host, by design: the GPU queue is idle (no Resolve

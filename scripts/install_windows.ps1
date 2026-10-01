@@ -27,7 +27,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $bundle = Join-Path $Stage "NDIOutput.ofx.bundle"
 $binDir = Join-Path $bundle "Contents\Win64"
 $ofx = Join-Path $binDir "NDIOutput.ofx"
-$ndiDll = Join-Path $binDir "Processing.NDI.Lib.Advanced.x64.dll"
+$ndiDll = Join-Path $binDir "Processing.NDI.Lib.x64.dll"
 
 if (-not (Test-Path $ofx)) {
     Write-Error ("No staged bundle at $ofx. Run: cmake --install build " +
@@ -36,7 +36,7 @@ if (-not (Test-Path $ofx)) {
 }
 if (-not (Test-Path $ndiDll)) {
     Write-Warning ("$ndiDll is missing - this is a stub-linked CI-style build " +
-        "and will NOT stream. Build on a machine with the NDI Advanced SDK installed.")
+        "and will NOT stream. Build on a machine with the NDI SDK installed.")
 }
 
 if (Get-Process -Name "Resolve" -ErrorAction SilentlyContinue) {

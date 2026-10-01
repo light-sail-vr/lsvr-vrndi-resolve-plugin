@@ -29,10 +29,10 @@ static void testSiblingDllPath()
     expectTrue(siblingDllPath(
                    L"C:\\Program Files\\Common Files\\OFX\\Plugins\\"
                    L"NDIOutput.ofx.bundle\\Contents\\Win64\\NDIOutput.ofx",
-                   L"Processing.NDI.Lib.Advanced.x64.dll") ==
+                   L"Processing.NDI.Lib.x64.dll") ==
                    L"C:\\Program Files\\Common Files\\OFX\\Plugins\\"
                    L"NDIOutput.ofx.bundle\\Contents\\Win64\\"
-                   L"Processing.NDI.Lib.Advanced.x64.dll",
+                   L"Processing.NDI.Lib.x64.dll",
                "bundle layout resolves beside the module");
 
     // Forward slashes (CMake-staged paths in dev trees).

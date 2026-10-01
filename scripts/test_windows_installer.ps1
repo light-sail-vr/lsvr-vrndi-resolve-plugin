@@ -132,7 +132,7 @@ if ($isStubBuild) {
     Write-Host "  [skip] NDI runtime + licenses file (STUB installer - built without the SDK)"
 } else {
     Check "NDI runtime DLL installed beside the plugin" `
-        (Test-Path (Join-Path $bundle "Contents\Win64\Processing.NDI.Lib.Advanced.x64.dll"))
+        (Test-Path (Join-Path $bundle "Contents\Win64\Processing.NDI.Lib.x64.dll"))
     Check "NDI third-party licenses file installed beside the plugin" `
         (Test-Path (Join-Path $bundle "Contents\Win64\Processing.NDI.Lib.Licenses.txt"))
 }

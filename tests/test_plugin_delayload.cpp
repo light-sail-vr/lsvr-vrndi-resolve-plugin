@@ -41,7 +41,7 @@ static void expectTrue(bool actual, const char* name)
     }
 }
 
-static const wchar_t kNdiDllName[] = L"Processing.NDI.Lib.Advanced.x64.dll";
+static const wchar_t kNdiDllName[] = L"Processing.NDI.Lib.x64.dll";
 
 int wmain(int argc, wchar_t** argv)
 {

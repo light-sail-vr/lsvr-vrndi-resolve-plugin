@@ -6,7 +6,7 @@
 # skips itself (compile-proof only) and Tiers 1-2 of the testing loop stay
 # human (BUILD.md, Windows section).
 #
-# The NDI Advanced SDK is access-gated and never lives in CI: the build links
+# No NDI SDK is installed in CI: the build links
 # a stub import library generated from the checked-in export list
 # (third_party/ndi/), so the artifact proves compile + link, not streaming.
 name: windows

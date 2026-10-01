@@ -12,7 +12,7 @@
 #
 # What this does differently from `make install` (the dev flow):
 #   - universal binary (arm64 + x86_64), macOS 13.0 deployment target
-#   - bundles libndi_advanced.dylib inside the bundle (Contents/Frameworks/)
+#   - bundles libndi.dylib (Standard NDI SDK) inside the bundle (Contents/Frameworks/)
 #     and rewrites the link reference to @loader_path — end users do NOT need
 #     the NDI SDK installed
 #   - ships the NDI third-party license file (libndi_licenses.txt) in
@@ -35,8 +35,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # ---------------------------------------------------------------- config ----
-NDI_SDK_PATH="/Library/NDI Advanced SDK for Apple"
-NDI_DYLIB="$NDI_SDK_PATH/lib/macOS/libndi_advanced.dylib"
+# Standard (royalty-free) NDI SDK only — never the Advanced SDK (commercial).
+NDI_SDK_PATH="${NDI_SDK_PATH:-/Library/NDI SDK for Apple}"
+NDI_DYLIB="$NDI_SDK_PATH/lib/macOS/libndi.dylib"
 NDI_LICENSES="$NDI_SDK_PATH/licenses/libndi_licenses.txt"
 PKG_ID="com.lightsailvr.ndioutput"
 NOTARY_PROFILE="${NOTARY_PROFILE:-NDI_NOTARY}"
@@ -72,7 +73,7 @@ miss() { echo "  [MISSING] $1"; fail=1; }
 
 echo "Preflight for v$VERSION:"
 
-[ -f "$NDI_DYLIB" ] && note "NDI Advanced SDK dylib" || miss "NDI Advanced SDK at $NDI_SDK_PATH"
+[ -f "$NDI_DYLIB" ] && note "NDI SDK dylib" || miss "NDI SDK at $NDI_SDK_PATH"
 [ -f "$NDI_LICENSES" ] && note "libndi_licenses.txt" || miss "$NDI_LICENSES"
 
 # Version defines must match the VERSION file (the set_version.sh contract)
@@ -135,8 +136,8 @@ cp -R NDIOutput.ofx.bundle "$BUNDLE"
 # Bundle the NDI dylib and point the plugin at it relative to itself
 mkdir -p "$BUNDLE/Contents/Frameworks"
 cp "$NDI_DYLIB" "$BUNDLE/Contents/Frameworks/"
-install_name_tool -change "@rpath/libndi_advanced.dylib" \
-    "@loader_path/../Frameworks/libndi_advanced.dylib" \
+install_name_tool -change "@rpath/libndi.dylib" \
+    "@loader_path/../Frameworks/libndi.dylib" \
     "$BUNDLE/Contents/MacOS/NDIOutput.ofx"
 
 # NDI license attribution ships inside the bundle
@@ -149,7 +150,7 @@ cp "$NDI_LICENSES" "$BUNDLE/Contents/Resources/"
 # ------------------------------------------------------------------ sign ----
 echo "Codesigning (inside-out)..."
 codesign --force --timestamp --options runtime --sign "$APP_CERT" \
-    "$BUNDLE/Contents/Frameworks/libndi_advanced.dylib"
+    "$BUNDLE/Contents/Frameworks/libndi.dylib"
 codesign --force --timestamp --options runtime --sign "$APP_CERT" \
     --identifier "LSVR.NDIOutput" "$BUNDLE"
 codesign --verify --strict --deep --verbose=1 "$BUNDLE"
@@ -189,7 +190,7 @@ cat > "$RES/Readme.html" <<EOF
 <p>This installs the <b>NDIOutput</b> OpenFX plugin into <code>/Library/OFX/Plugins</code>.
 After installing, <b>restart DaVinci Resolve</b>, then find the plugin on the Color page
 under OpenFX &rarr; LSVR &rarr; NDIOutput.</p>
-<p>The plugin streams the rendered frame as an NDI&reg; source (SDR and HDR) on your local
+<p>The plugin streams the rendered frame as an NDI&reg; source on your local
 network. Receive it with any NDI application &mdash; e.g. the free
 <a href="https://ndi.video/tools/">NDI Tools</a>.</p>
 <p>Requires macOS 13 or later (Apple Silicon or Intel). No other software is required:
