@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - **HDR output** (#48). The plugin is built on the Standard NDI SDK and now streams SDR only (8-bit, Rec.709). The **HDR Settings** group (Enable HDR, Color Space, Transfer Function, Max CLL/FALL) is gone. Projects saved with HDR switched on still open and stream SDR.
 
+### Known issues
+- **Half timeline resolution: the left eye zooms in during stereo playback.** With the timeline resolution set to half, Resolve renders the left eye at full resolution into a half-resolution frame during playback, so it shows that eye's top-left quarter at 2× (Resolve's own viewer jumps too). Scrubbing is unaffected, and 1.14.2 does the same. Workaround: keep the timeline at full resolution and use the plugin's **Resolution: Half** to shrink the stream.
+
 ## [1.14.2] - 2026-10-01
 
 ### Changed
