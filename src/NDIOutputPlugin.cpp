@@ -270,37 +270,6 @@ static void ndiWinLog(const char* fmt, ...)
 #define kParamDebugLoggingLabel "Log Render Calls"
 #define kParamDebugLoggingHint "Log one 'NDI Plugin: probe' line per render call (page, eye, thumbnail flag, frame time, dimensions, inter-call spacing) to the system log. Capture with scripts/capture_probe_log.sh. Leave off unless diagnosing host behavior."
 
-// HDR Parameters
-#define kParamHDREnabled "hdrEnabled"
-#define kParamHDREnabledLabel "Enable HDR"
-#define kParamHDREnabledHint "Enable HDR (High Dynamic Range) output"
-
-#define kParamColorSpace "colorSpace"
-#define kParamColorSpaceLabel "Color Space"
-#define kParamColorSpaceHint "Color space for HDR output"
-
-#define kParamTransferFunction "transferFunction"
-#define kParamTransferFunctionLabel "Transfer Function"
-#define kParamTransferFunctionHint "Transfer function for HDR output (PQ/HLG)"
-
-#define kParamMaxCLL "maxCLL"
-#define kParamMaxCLLLabel "Max Content Light Level"
-#define kParamMaxCLLHint "Maximum content light level in nits"
-
-#define kParamMaxFALL "maxFALL"
-#define kParamMaxFALLLabel "Max Frame Average Light Level"
-#define kParamMaxFALLHint "Maximum frame average light level in nits"
-
-// Color Space Options
-#define kColorSpaceRec709 "rec709"
-#define kColorSpaceRec2020 "rec2020"
-#define kColorSpaceP3 "p3"
-
-// Transfer Function Options
-#define kTransferFunctionSDR "sdr"
-#define kTransferFunctionPQ "pq"
-#define kTransferFunctionHLG "hlg"
-
 // Host pointers
 OfxHost                 *gHost;
 OfxImageEffectSuiteV1   *gEffectHost = 0;
@@ -340,15 +309,15 @@ static inline bool nativeGpuReadBuffer(NativeGPUContextRef c, void* q, void* src
 { return metal_gpu_read_buffer(c, q, src, cpuDst, bytes); }
 static inline NativeSubmitStatus nativeGpuDownscaleSubmit(NativeGPUContextRef c, void* q, void* src,
                                                           int sw, int sh, int srf, int divisor,
-                                                          int ow, int oh, bool p216,
+                                                          int ow, int oh,
                                                           native_gpu_done_fn done, void* user)
-{ return metal_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, p216, done, user); }
+{ return metal_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, done, user); }
 static inline NativeSubmitStatus nativeGpuWarpSubmit(NativeGPUContextRef c, void* q, void* src,
                                                      int sw, int sh, int srf,
                                                      void* map, int mw, int mh, int divisor,
-                                                     int ow, int oh, bool p216,
+                                                     int ow, int oh,
                                                      native_gpu_done_fn done, void* user)
-{ return metal_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, p216, done, user); }
+{ return metal_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, done, user); }
 static inline void nativeGpuDownscaleRelease(NativeGPUContextRef c, void* slot)
 { metal_gpu_downscale_release(c, slot); }
 static inline void* nativeGpuCreateBufferForQueue(NativeGPUContextRef c, void* q,
@@ -376,15 +345,15 @@ static inline bool nativeGpuReadBuffer(NativeGPUContextRef c, void* q, void* src
 { return cuda_gpu_read_buffer(c, q, src, cpuDst, bytes); }
 static inline NativeSubmitStatus nativeGpuDownscaleSubmit(NativeGPUContextRef c, void* q, void* src,
                                                           int sw, int sh, int srf, int divisor,
-                                                          int ow, int oh, bool p216,
+                                                          int ow, int oh,
                                                           native_gpu_done_fn done, void* user)
-{ return cuda_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, p216, done, user); }
+{ return cuda_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, done, user); }
 static inline NativeSubmitStatus nativeGpuWarpSubmit(NativeGPUContextRef c, void* q, void* src,
                                                      int sw, int sh, int srf,
                                                      void* map, int mw, int mh, int divisor,
-                                                     int ow, int oh, bool p216,
+                                                     int ow, int oh,
                                                      native_gpu_done_fn done, void* user)
-{ return cuda_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, p216, done, user); }
+{ return cuda_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, done, user); }
 static inline void nativeGpuDownscaleRelease(NativeGPUContextRef c, void* slot)
 { cuda_gpu_downscale_release(c, slot); }
 static inline void* nativeGpuCreateBufferForQueue(NativeGPUContextRef c, void* q,
@@ -410,7 +379,6 @@ struct AsyncFrameData {
     std::vector<uint8_t> frameData;
     int width;
     int height;
-    bool isHDR;
     std::chrono::high_resolution_clock::time_point timestamp;
 };
 
@@ -745,11 +713,6 @@ struct NDIInstanceData {
 #endif
     OfxParamHandle brawMapSizeParam;
     OfxParamHandle brawMaskParam;
-    OfxParamHandle hdrEnabledParam;
-    OfxParamHandle colorSpaceParam;
-    OfxParamHandle transferFunctionParam;
-    OfxParamHandle maxCLLParam;
-    OfxParamHandle maxFALLParam;
 
     // Diagnostic render-call probe
     std::string resolvePage;   // page that instantiated this effect (host provides it only at createInstance)
@@ -824,23 +787,14 @@ struct NDIInstanceData {
     bool optimalFormat;
     std::unique_ptr<GPUContext> gpuContext;
     
-    // HDR parameters
-    bool hdrEnabled;
-    std::string colorSpace;
-    std::string transferFunction;
-    double maxCLL;
-    double maxFALL;
-    
     // Stream resolution (issue #5): divisor 1/2/4, read fresh each render
     int resolutionDivisor;
 
     // Frame buffers
     std::vector<uint8_t> frameBuffer;
-    std::vector<uint16_t> hdrFrameBuffer;
     std::vector<uint8_t> uyvyFrameBuffer; // UYVY format for optimal performance
     std::vector<float> downscaleBuffer;   // CPU-path box-downscale output
     std::vector<float> readbackBuffer;    // full-frame readback when a Metal frame needs the CPU path
-    std::string hdrMetadataXML;
     
     // Asynchronous processing
     std::thread asyncThread;
@@ -857,7 +811,6 @@ struct NDIInstanceData {
 
 // Forward declarations
 static void convertRGBAToUYVY_CPU(NDIInstanceData* data, void* rgbaData, int width, int height);
-static void sendHDRFrame(NDIInstanceData* data, void* imageData, int width, int height);
 static void sendSDRFrame(NDIInstanceData* data, void* imageData, int width, int height);
 
 // ---------------------------------------------------------------------------
@@ -1069,15 +1022,10 @@ static inline double msSince(const std::chrono::steady_clock::time_point& t0)
 }
 
 // Caller holds hub->mutex. Builds and sends one NDI frame of the given wire
-// format. `allowAsync` is false for P216 (HDR sends have always been
-// synchronous here) and for any buffer that can't outlive the call.
-// hdrMetadataXML arrives by reference from the submission (never read off the
-// instance here — the pump worker calls this while render threads own the
-// instance's HDR strings).
+// format. `allowAsync` is false for any buffer that can't outlive the call.
 static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
                                const ndi_stereo::FrameMeta& meta,
-                               const uint8_t* bytes, bool allowAsync,
-                               const std::string& hdrMetadataXML)
+                               const uint8_t* bytes, bool allowAsync)
 {
     NDIlib_video_frame_v2_t frame;
     frame.xres = meta.width;
@@ -1091,11 +1039,6 @@ static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
     frame.p_metadata = nullptr;
 
     switch (meta.format) {
-        case ndi_stereo::WireFormat::P216:
-            frame.FourCC = NDIlib_FourCC_video_type_P216;
-            frame.line_stride_in_bytes = meta.width * static_cast<int>(sizeof(uint16_t));
-            frame.p_metadata = hdrMetadataXML.empty() ? nullptr : hdrMetadataXML.c_str();
-            break;
         case ndi_stereo::WireFormat::RGBA8:
             frame.FourCC = NDIlib_FourCC_type_RGBA;
             frame.line_stride_in_bytes = meta.width * 4;
@@ -1178,7 +1121,7 @@ static void hubUpdateStatusLocked(SenderHub* hub, NDIInstanceData* data)
 // One frame handed to the hub: everything the pairer and sender need,
 // captured at the PRODUCING call site. The async pump submits after the
 // originating render call has returned, so nothing here may be read off the
-// instance's render*/HDR fields at consume time — they belong to a later
+// instance's render* fields at consume time — they belong to a later
 // render by then.
 struct HubSubmit {
     ndi_stereo::WireFormat format = ndi_stereo::WireFormat::UYVY8;
@@ -1190,7 +1133,6 @@ struct HubSubmit {
     int eye = ndi_stereo::kEyeLeft;
     double time = 0.0;
     bool isThumbnail = false;
-    std::string hdrMetadataXML; // P216 only
 };
 
 // Stage timings for one hub submission. Out-param rather than instance fields
@@ -1209,8 +1151,7 @@ static void hubPackAndSendLocked(SenderHub* hub, NDIInstanceData* data,
                                  const ndi_stereo::FrameMeta& meta,
                                  ndi_stereo::StereoLayout layout,
                                  const uint8_t* left, const uint8_t* right,
-                                 bool allowAsync, const std::string& hdrMetadataXML,
-                                 SubmitTimers* timers)
+                                 bool allowAsync, SubmitTimers* timers)
 {
     // Pack into the buffer NOT submitted last; if it needs resizing it
     // could still be read by a send before last, so flush first.
@@ -1231,7 +1172,7 @@ static void hubPackAndSendLocked(SenderHub* hub, NDIInstanceData* data,
     hub->lastPackedMeta = packedMeta;
     hub->hasPackedFrame = true;
     const auto sendT0 = std::chrono::steady_clock::now();
-    hubSendFrameLocked(hub, data, packedMeta, packed.data(), allowAsync, hdrMetadataXML);
+    hubSendFrameLocked(hub, data, packedMeta, packed.data(), allowAsync);
     if (timers) timers->sendMs = msSince(sendT0);
 }
 
@@ -1272,7 +1213,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
     switch (result.action) {
         case ndi_stereo::SubmitAction::SendMono: {
             const auto sendT0 = std::chrono::steady_clock::now();
-            hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync, s.hdrMetadataXML);
+            hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync);
             if (timers) timers->sendMs = msSince(sendT0);
             break;
         }
@@ -1283,7 +1224,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
             const uint8_t* right = (s.eye == ndi_stereo::kEyeLeft)
                                        ? result.matePayload.data() : s.bytes;
             hubPackAndSendLocked(hub, data, meta, layout, left, right,
-                                 s.allowAsync, s.hdrMetadataXML, timers);
+                                 s.allowAsync, timers);
             // Return the consumed mate buffer to the pairer's pool — its warm
             // pages make the next hold a plain memcpy instead of a page-fault
             // storm inside this mutex.
@@ -1296,7 +1237,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
             // canvas keeps its packed dimensions — the flowing eye goes into
             // both halves. Viewers see 2D; the geometry never pops.
             hubPackAndSendLocked(hub, data, meta, layout, s.bytes, s.bytes,
-                                 s.allowAsync, s.hdrMetadataXML, timers);
+                                 s.allowAsync, timers);
             break;
         }
 
@@ -1315,7 +1256,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
                 // the async contract: it stays the one NDI may read from.
                 const auto sendT0 = std::chrono::steady_clock::now();
                 hubSendFrameLocked(hub, data, packedMeta, packed.data(),
-                                   s.allowAsync, s.hdrMetadataXML);
+                                   s.allowAsync);
                 if (timers) timers->sendMs = msSince(sendT0);
             } else {
                 const auto flushT0 = std::chrono::steady_clock::now();
@@ -1410,10 +1351,9 @@ static void pumpWorkerLoop(AsyncPump* pump)
             depth = pump->queue.size();
         }
         if (item.ok) {
-            // HDR metadata was captured into item.submit at ENQUEUE time on
-            // the render thread — this worker never reads the instance's
-            // colorSpace/transfer strings (they race with instanceChanged).
-            // Status changes are only FLAGGED inside the hub (statusParamDirty)
+            // Everything the submit needs was captured into item.submit at
+            // ENQUEUE time on the render thread. Status changes are only
+            // FLAGGED inside the hub (statusParamDirty)
             // — paramSetValue is a host call and stays on render threads.
             const auto t0 = std::chrono::steady_clock::now();
             SubmitTimers timers;
@@ -1692,11 +1632,7 @@ static void asyncFrameProcessor(NDIInstanceData* data)
             lock.unlock();
 
             // Process frame asynchronously
-            if (frameData.isHDR) {
-                sendHDRFrame(data, frameData.frameData.data(), frameData.width, frameData.height);
-            } else {
-                sendSDRFrame(data, frameData.frameData.data(), frameData.width, frameData.height);
-            }
+            sendSDRFrame(data, frameData.frameData.data(), frameData.width, frameData.height);
         }
     }
     
@@ -1825,50 +1761,6 @@ static void shutdownNDI(NDIInstanceData* data)
     data->ndiInitialized = false;
 }
 
-// Build the ndi_color_info XML from the instance's color settings. RENDER
-// THREADS ONLY — it reads the colorSpace/transferFunction strings that
-// instanceChanged rewrites; the async pump captures the RESULT into its item
-// at enqueue time instead of calling this from the worker.
-static std::string composeHDRMetadataXML(NDIInstanceData* data)
-{
-    // Create HDR metadata XML according to NDI SDK v6 specifications
-    // Reference: https://docs.ndi.video/all/developing-with-ndi/sdk/hdr#hdr-metadata
-
-    std::string primaries, transfer, matrix;
-    
-    // Map our color space to NDI primaries
-    if (data->colorSpace == kColorSpaceRec2020) {
-        primaries = "bt_2020";
-        matrix = "bt_2020";
-    } else if (data->colorSpace == kColorSpaceP3) {
-        primaries = "bt_2020"; // P3 uses bt_2020 primaries in NDI context
-        matrix = "bt_2020";
-    } else {
-        primaries = "bt_709";
-        matrix = "bt_709";
-    }
-    
-    // Map our transfer function to NDI transfer
-    if (data->transferFunction == kTransferFunctionPQ) {
-        transfer = "bt_2100_pq";
-    } else if (data->transferFunction == kTransferFunctionHLG) {
-        transfer = "bt_2100_hlg";
-    } else {
-        transfer = "bt_709";
-    }
-    
-    // Create proper NDI color info metadata
-    return "<ndi_color_info primaries=\"" + primaries +
-           "\" transfer=\"" + transfer +
-           "\" matrix=\"" + matrix + "\" />";
-}
-
-static void createHDRMetadata(NDIInstanceData* data)
-{
-    data->hdrMetadataXML = composeHDRMetadataXML(data);
-    NDI_LOG("HDR Metadata: %s", data->hdrMetadataXML.c_str());
-}
-
 // Submit the already-packed UYVY frame in data->uyvyFrameBuffer to the hub
 // (which streams it as mono, or pairs and packs it in stereo). Used by both
 // conversion paths: CPU/upload-convert (sendSDRFrame) and the GPU-native
@@ -1897,133 +1789,6 @@ static void sendUYVYToNDI(NDIInstanceData* data, int width, int height)
     s.time = data->renderTime;
     s.isThumbnail = data->renderIsThumbnail;
     hubSubmitFromRenderThread(data, s);
-}
-
-// Submit the already-packed P216 frame in data->hdrFrameBuffer with HDR
-// metadata. HDR sends stay synchronous (as they always were here).
-static void sendP216ToNDI(NDIInstanceData* data, int width, int height)
-{
-    createHDRMetadata(data);
-    HubSubmit s;
-    s.format = ndi_stereo::WireFormat::P216;
-    s.width = width;
-    s.height = height;
-    s.bytes = reinterpret_cast<const uint8_t*>(data->hdrFrameBuffer.data());
-    s.byteCount = static_cast<size_t>(width) * height * 2 * sizeof(uint16_t);
-    s.allowAsync = false;
-    s.eye = data->renderEye;
-    s.time = data->renderTime;
-    s.isThumbnail = data->renderIsThumbnail;
-    s.hdrMetadataXML = data->hdrMetadataXML; // same thread — safe to copy here
-    hubSubmitFromRenderThread(data, s);
-}
-
-static void sendHDRFrame(NDIInstanceData* data, void* imageData, int width, int height)
-{
-    if (!data->enabled || !data->ndiInitialized || !imageData) {
-        return;
-    }
-    
-    NDI_LOG("Sending HDR frame %dx%d to NDI", width, height);
-
-    // Prepare HDR frame buffer (16-bit per channel, P216 format)
-    // P216 is planar YUV 4:2:2 with 16-bit samples
-    const size_t frameSize = width * height * 2 * sizeof(uint16_t); // Y plane + UV plane (4:2:2)
-    if (data->hdrFrameBuffer.size() != frameSize / sizeof(uint16_t)) {
-        data->hdrFrameBuffer.resize(frameSize / sizeof(uint16_t));
-    }
-
-    uint16_t* dstData = data->hdrFrameBuffer.data();
-    float* srcData = static_cast<float*>(imageData);
-
-    // Try GPU acceleration first for HDR conversion
-    bool gpuSuccess = false;
-#ifdef __APPLE__
-    if (data->gpuAcceleration && data->gpuContext && data->gpuContext->initialized && data->gpuContext->nativeContext) {
-        // For HDR, we need to convert to 16-bit limited range
-        // The scale factor should be for 16-bit limited range (not full range)
-        float scale = 65472.0f; // 16-bit limited range: (235-16) * 256 + (240-16) * 256 for chroma
-        
-        gpuSuccess = metal_gpu_convert_rgba_to_hdr(
-            data->gpuContext->nativeContext,
-            srcData,
-            dstData,
-            width,
-            height,
-            scale
-        );
-        
-        if (gpuSuccess) {
-            NDI_LOG("Metal GPU HDR conversion completed");
-        } else {
-            NDI_LOG("Metal GPU HDR conversion failed, falling back to CPU");
-        }
-    }
-#endif
-
-    // Fallback to CPU conversion if GPU failed or not available
-    if (!gpuSuccess) {
-        // Convert RGBA float to YUV 16-bit limited range (P216 format)
-        // Reference: ITU BT.2100 quantization equations
-        
-        uint16_t* yPlane = dstData;
-        uint16_t* uvPlane = dstData + (width * height);
-        
-        for (int y = 0; y < height; ++y) {
-            int srcRow = height - 1 - y; // Flip vertically
-            for (int x = 0; x < width; x += 2) {
-                // Process two pixels for 4:2:2 subsampling
-                int srcIdx1 = (srcRow * width + x) * 4;
-                int srcIdx2 = (srcRow * width + x + 1) * 4;
-                
-                // Get RGB values (clamped to 0-1)
-                float r1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 0]));
-                float g1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 1]));
-                float b1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 2]));
-                
-                float r2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 0])) : r1;
-                float g2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 1])) : g1;
-                float b2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 2])) : b1;
-                
-                // Convert to YUV using Rec.2020 coefficients for HDR
-                float y1 = 0.2627f * r1 + 0.6780f * g1 + 0.0593f * b1;
-                float y2 = 0.2627f * r2 + 0.6780f * g2 + 0.0593f * b2;
-                
-                // Average chroma for 4:2:2 subsampling
-                float avgR = (r1 + r2) * 0.5f;
-                float avgG = (g1 + g2) * 0.5f;
-                float avgB = (b1 + b2) * 0.5f;
-                
-                float u = -0.1396f * avgR - 0.3604f * avgG + 0.5f * avgB;
-                float v = 0.5f * avgR - 0.4598f * avgG - 0.0402f * avgB;
-                
-                // Convert to 16-bit limited range (ITU BT.2100)
-                // Y: 16-bit limited range [4096, 60160] for 10-bit equivalent [64, 940]
-                // UV: 16-bit limited range [4096, 61440] for 10-bit equivalent [64, 960]
-                uint16_t y1_16 = static_cast<uint16_t>(4096 + y1 * 56064); // (60160-4096)
-                uint16_t y2_16 = static_cast<uint16_t>(4096 + y2 * 56064);
-                uint16_t u_16 = static_cast<uint16_t>(32768 + u * 28672); // Center + range
-                uint16_t v_16 = static_cast<uint16_t>(32768 + v * 28672);
-                
-                // Store in P216 format (planar)
-                int yIdx1 = y * width + x;
-                int yIdx2 = y * width + x + 1;
-                int uvIdx = (y * width + x) / 2; // 4:2:2 subsampling
-                
-                yPlane[yIdx1] = y1_16;
-                if (x + 1 < width) {
-                    yPlane[yIdx2] = y2_16;
-                }
-                
-                // Store U and V interleaved for 4:2:2
-                uvPlane[uvIdx * 2] = u_16;     // U
-                uvPlane[uvIdx * 2 + 1] = v_16; // V
-            }
-        }
-    }
-
-    // Send the HDR frame
-    sendP216ToNDI(data, width, height);
 }
 
 static void sendSDRFrame(NDIInstanceData* data, void* imageData, int width, int height)
@@ -2124,11 +1889,7 @@ static void sendNDIFrame(NDIInstanceData* data, void* imageData, int width, int 
         return;
     }
 
-    if (data->hdrEnabled) {
-        sendHDRFrame(data, imageData, width, height);
-    } else {
-        sendSDRFrame(data, imageData, width, height);
-    }
+    sendSDRFrame(data, imageData, width, height);
 }
 
 // Push a changed stream-status string to the informational UI param, at the
@@ -2261,7 +2022,7 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
 
     bool handledByFastPath = false;
     if (data->gpuAcceleration && nativeContext &&
-        (data->hdrEnabled || data->optimalFormat)) {
+        data->optimalFormat) {
         // Non-blocking fast path (v1.6.0): ENQUEUE the fused kernel and
         // return. No GPU wait here — that wait (plus the CPU-side NDI work
         // that followed it) was ~90ms of render-thread blocking per eye and
@@ -2272,23 +2033,16 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
         // stream survives, every frame).
         std::lock_guard<std::mutex> lock(data->gpuContext->gpuMutex);
         AsyncPump* pump = pumpEnsure(data);
-        const bool wantP216 = data->hdrEnabled;
         AsyncSubmitCtx* ctx = new AsyncSubmitCtx();
         ctx->pump = pump;
         ctx->item.nativeContext = nativeContext;
-        ctx->item.submit.format = wantP216 ? ndi_stereo::WireFormat::P216
-                                           : ndi_stereo::WireFormat::UYVY8;
+        ctx->item.submit.format = ndi_stereo::WireFormat::UYVY8;
         ctx->item.submit.width = outWidth;
         ctx->item.submit.height = outHeight;
         ctx->item.submit.allowAsync = false; // worker sends are synchronous by design
         ctx->item.submit.eye = data->renderEye;
         ctx->item.submit.time = data->renderTime;
         ctx->item.submit.isThumbnail = data->renderIsThumbnail;
-        if (wantP216) {
-            // Captured here, on the render thread — the worker must never
-            // read the instance's color strings (they race instanceChanged).
-            ctx->item.submit.hdrMetadataXML = composeHDRMetadataXML(data);
-        }
         ++pump->pendingSubmits;
         const auto convT0 = std::chrono::steady_clock::now();
         NativeSubmitStatus st = kNativeSubmitInvalid;
@@ -2301,20 +2055,20 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
                 st = nativeGpuWarpSubmit(nativeContext, gpuQueue, srcBuffer,
                                          width, height, rowFloats,
                                          mapBuffer, stmap->map.width, stmap->map.height,
-                                         divisor, outWidth, outHeight, wantP216,
+                                         divisor, outWidth, outHeight,
                                          pumpOnConvertDone, ctx);
             }
         } else {
             st = nativeGpuDownscaleSubmit(nativeContext, gpuQueue, srcBuffer,
                                           width, height, rowFloats, divisor,
-                                          outWidth, outHeight, wantP216,
+                                          outWidth, outHeight,
                                           pumpOnConvertDone, ctx);
         }
         data->timerConvMs = msSince(convT0);
         if (st == kNativeSubmitOK) {
             handledByFastPath = true;
-            NDI_LOG("GPU-native async: %dx%d device frame -> %dx%d %d enqueued (divisor %d, fmt 0=UYVY 1=P216, warp %d)",
-                    width, height, outWidth, outHeight, wantP216 ? 1 : 0, divisor, stmap ? 1 : 0);
+            NDI_LOG("GPU-native async: %dx%d device frame -> %dx%d UYVY enqueued (divisor %d, warp %d)",
+                    width, height, outWidth, outHeight, divisor, stmap ? 1 : 0);
         } else {
             --pump->pendingSubmits;
             delete ctx;
@@ -2708,28 +2462,6 @@ static void readInstanceParams(NDIInstanceData* myData)
     myData->autoLensMapSize.store(brawMapSizeFromChoice(myData->brawMapSizeChoice),
                                   std::memory_order_relaxed);
     myData->autoLensMask.store(myData->brawMaskChoice == 1, std::memory_order_relaxed);
-
-    int hdrEnabled;
-    gParamHost->paramGetValue(myData->hdrEnabledParam, &hdrEnabled);
-    myData->hdrEnabled = (hdrEnabled != 0);
-
-    int colorSpaceIndex;
-    gParamHost->paramGetValue(myData->colorSpaceParam, &colorSpaceIndex);
-    myData->colorSpace = (colorSpaceIndex == 0) ? kColorSpaceRec709 :
-                        (colorSpaceIndex == 1) ? kColorSpaceRec2020 : kColorSpaceP3;
-
-    int transferFunctionIndex;
-    gParamHost->paramGetValue(myData->transferFunctionParam, &transferFunctionIndex);
-    myData->transferFunction = (transferFunctionIndex == 0) ? kTransferFunctionSDR :
-                              (transferFunctionIndex == 1) ? kTransferFunctionPQ : kTransferFunctionHLG;
-
-    double maxCLL;
-    gParamHost->paramGetValue(myData->maxCLLParam, &maxCLL);
-    myData->maxCLL = maxCLL;
-
-    double maxFALL;
-    gParamHost->paramGetValue(myData->maxFALLParam, &maxFALL);
-    myData->maxFALL = maxFALL;
 }
 
 static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandle inArgs)
@@ -2766,12 +2498,6 @@ static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandl
     myData->optimalFormat = true;
     myData->stopAsyncThread = false;
     
-    // HDR settings
-    myData->hdrEnabled = false;
-    myData->colorSpace = kColorSpaceRec709;
-    myData->transferFunction = kTransferFunctionSDR;
-    myData->maxCLL = 1000.0;
-    myData->maxFALL = 400.0;
 
     // Diagnostic probe state; the page is only handed over here, never at render time
     myData->resolvePage = "";
@@ -2821,11 +2547,6 @@ static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandl
 #endif
     gParamHost->paramGetHandle(paramSet, kParamBRAWMapSize, &myData->brawMapSizeParam, 0);
     gParamHost->paramGetHandle(paramSet, kParamBRAWMask, &myData->brawMaskParam, 0);
-    gParamHost->paramGetHandle(paramSet, kParamHDREnabled, &myData->hdrEnabledParam, 0);
-    gParamHost->paramGetHandle(paramSet, kParamColorSpace, &myData->colorSpaceParam, 0);
-    gParamHost->paramGetHandle(paramSet, kParamTransferFunction, &myData->transferFunctionParam, 0);
-    gParamHost->paramGetHandle(paramSet, kParamMaxCLL, &myData->maxCLLParam, 0);
-    gParamHost->paramGetHandle(paramSet, kParamMaxFALL, &myData->maxFALLParam, 0);
 
     // Set instance data
     gPropHost->propSetPointer(effectProps, kOfxPropInstanceData, 0, (void *) myData);
@@ -2920,15 +2641,11 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
         updateParamVisibility(myData);
         refreshSTMaps(myData);
 
-        NDI_LOG("Updated params - sourceName='%s', enabled=%d, frameRate=%.2f, hdr=%d, colorSpace='%s', transferFunc='%s'",
-               myData->sourceName.c_str(), myData->enabled, myData->frameRate, myData->hdrEnabled, 
-               myData->colorSpace.c_str(), myData->transferFunction.c_str());
+        NDI_LOG("Updated params - sourceName='%s', enabled=%d, frameRate=%.2f",
+               myData->sourceName.c_str(), myData->enabled, myData->frameRate);
         
-        // Restart NDI if source name changed or HDR settings changed
-        if ((strcmp(paramName, kParamSourceName) == 0 || 
-             strcmp(paramName, kParamHDREnabled) == 0 ||
-             strcmp(paramName, kParamColorSpace) == 0 ||
-             strcmp(paramName, kParamTransferFunction) == 0) && myData->ndiInitialized) {
+        // Restart NDI if source name changed
+        if (strcmp(paramName, kParamSourceName) == 0 && myData->ndiInitialized) {
             NDI_LOG("Restarting NDI due to %s parameter change", paramName);
             shutdownNDI(myData);
         }
@@ -2952,10 +2669,6 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     if (!myData) return kOfxStatFailed;
 
     // Read current parameter values at render time
-    int hdrEnabled;
-    gParamHost->paramGetValue(myData->hdrEnabledParam, &hdrEnabled);
-    myData->hdrEnabled = (hdrEnabled != 0);
-    
     int gpuAcceleration;
     gParamHost->paramGetValue(myData->gpuAccelerationParam, &gpuAcceleration);
     myData->gpuAcceleration = (gpuAcceleration != 0);
@@ -2979,8 +2692,8 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     gParamHost->paramGetValue(myData->stereoPackingParam, &myData->stereoPacking);
 
     // Log current parameter state for debugging
-    NDI_LOG("Render params - enabled=%d, hdr=%d, gpu=%d, divisor=%d",
-           myData->enabled, myData->hdrEnabled, myData->gpuAcceleration, myData->resolutionDivisor);
+    NDI_LOG("Render params - enabled=%d, gpu=%d, divisor=%d",
+           myData->enabled, myData->gpuAcceleration, myData->resolutionDivisor);
 
     // Get time
     double time;
@@ -3257,11 +2970,6 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     gParamHost->paramDefine(paramSet, kOfxParamTypeGroup, "performanceGroup", &performanceGroupProps);
     gPropHost->propSetString(performanceGroupProps, kOfxPropLabel, 0, "Performance Settings");
     gPropHost->propSetInt(performanceGroupProps, kOfxParamPropGroupOpen, 0, 1); // Open by default
-
-    OfxPropertySetHandle hdrGroupProps = NULL;
-    gParamHost->paramDefine(paramSet, kOfxParamTypeGroup, "hdrGroup", &hdrGroupProps);
-    gPropHost->propSetString(hdrGroupProps, kOfxPropLabel, 0, "HDR Settings");
-    gPropHost->propSetInt(hdrGroupProps, kOfxParamPropGroupOpen, 0, 0); // Closed by default
 
     OfxPropertySetHandle diagnosticsGroupProps = NULL;
     gParamHost->paramDefine(paramSet, kOfxParamTypeGroup, "diagnosticsGroup", &diagnosticsGroupProps);
@@ -3543,70 +3251,6 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     gPropHost->propSetInt(optimalFormatProps, kOfxParamPropDefault, 0, 1); // Default to enabled
     gPropHost->propSetInt(optimalFormatProps, kOfxParamPropAnimates, 0, 0);
     gPropHost->propSetString(optimalFormatProps, kOfxParamPropParent, 0, "performanceGroup");
-
-    // Define HDR enabled parameter - in HDR group
-    OfxPropertySetHandle hdrEnabledProps = NULL;
-    gParamHost->paramDefine(paramSet, kOfxParamTypeBoolean, kParamHDREnabled, &hdrEnabledProps);
-    gPropHost->propSetString(hdrEnabledProps, kOfxPropLabel, 0, kParamHDREnabledLabel);
-    gPropHost->propSetString(hdrEnabledProps, kOfxParamPropScriptName, 0, kParamHDREnabled);
-    gPropHost->propSetString(hdrEnabledProps, kOfxParamPropHint, 0, kParamHDREnabledHint);
-    gPropHost->propSetInt(hdrEnabledProps, kOfxParamPropDefault, 0, 0); // Default to disabled
-    gPropHost->propSetInt(hdrEnabledProps, kOfxParamPropAnimates, 0, 0);
-    gPropHost->propSetString(hdrEnabledProps, kOfxParamPropParent, 0, "hdrGroup");
-
-    // Define color space parameter - in HDR group
-    OfxPropertySetHandle colorSpaceProps = NULL;
-    gParamHost->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorSpace, &colorSpaceProps);
-    gPropHost->propSetString(colorSpaceProps, kOfxPropLabel, 0, kParamColorSpaceLabel);
-    gPropHost->propSetString(colorSpaceProps, kOfxParamPropScriptName, 0, kParamColorSpace);
-    gPropHost->propSetString(colorSpaceProps, kOfxParamPropHint, 0, kParamColorSpaceHint);
-    gPropHost->propSetString(colorSpaceProps, kOfxParamPropChoiceOption, 0, "Rec.709");
-    gPropHost->propSetString(colorSpaceProps, kOfxParamPropChoiceOption, 1, "Rec.2020");
-    gPropHost->propSetString(colorSpaceProps, kOfxParamPropChoiceOption, 2, "DCI-P3");
-    gPropHost->propSetInt(colorSpaceProps, kOfxParamPropDefault, 0, 0); // Rec.709
-    gPropHost->propSetInt(colorSpaceProps, kOfxParamPropAnimates, 0, 0);
-    gPropHost->propSetString(colorSpaceProps, kOfxParamPropParent, 0, "hdrGroup");
-
-    // Define transfer function parameter - in HDR group
-    OfxPropertySetHandle transferFunctionProps = NULL;
-    gParamHost->paramDefine(paramSet, kOfxParamTypeChoice, kParamTransferFunction, &transferFunctionProps);
-    gPropHost->propSetString(transferFunctionProps, kOfxPropLabel, 0, kParamTransferFunctionLabel);
-    gPropHost->propSetString(transferFunctionProps, kOfxParamPropScriptName, 0, kParamTransferFunction);
-    gPropHost->propSetString(transferFunctionProps, kOfxParamPropHint, 0, kParamTransferFunctionHint);
-    gPropHost->propSetString(transferFunctionProps, kOfxParamPropChoiceOption, 0, "SDR (Gamma 2.4)");
-    gPropHost->propSetString(transferFunctionProps, kOfxParamPropChoiceOption, 1, "PQ (ST.2084)");
-    gPropHost->propSetString(transferFunctionProps, kOfxParamPropChoiceOption, 2, "HLG (Hybrid Log-Gamma)");
-    gPropHost->propSetInt(transferFunctionProps, kOfxParamPropDefault, 0, 0); // SDR
-    gPropHost->propSetInt(transferFunctionProps, kOfxParamPropAnimates, 0, 0);
-    gPropHost->propSetString(transferFunctionProps, kOfxParamPropParent, 0, "hdrGroup");
-
-    // Define max CLL parameter - in HDR group
-    OfxPropertySetHandle maxCLLProps = NULL;
-    gParamHost->paramDefine(paramSet, kOfxParamTypeDouble, kParamMaxCLL, &maxCLLProps);
-    gPropHost->propSetString(maxCLLProps, kOfxPropLabel, 0, kParamMaxCLLLabel);
-    gPropHost->propSetString(maxCLLProps, kOfxParamPropScriptName, 0, kParamMaxCLL);
-    gPropHost->propSetString(maxCLLProps, kOfxParamPropHint, 0, kParamMaxCLLHint);
-    gPropHost->propSetDouble(maxCLLProps, kOfxParamPropDefault, 0, 1000.0);
-    gPropHost->propSetDouble(maxCLLProps, kOfxParamPropMin, 0, 100.0);
-    gPropHost->propSetDouble(maxCLLProps, kOfxParamPropMax, 0, 10000.0);
-    gPropHost->propSetDouble(maxCLLProps, kOfxParamPropDisplayMin, 0, 100.0);
-    gPropHost->propSetDouble(maxCLLProps, kOfxParamPropDisplayMax, 0, 4000.0);
-    gPropHost->propSetInt(maxCLLProps, kOfxParamPropAnimates, 0, 0);
-    gPropHost->propSetString(maxCLLProps, kOfxParamPropParent, 0, "hdrGroup");
-
-    // Define max FALL parameter - in HDR group
-    OfxPropertySetHandle maxFALLProps = NULL;
-    gParamHost->paramDefine(paramSet, kOfxParamTypeDouble, kParamMaxFALL, &maxFALLProps);
-    gPropHost->propSetString(maxFALLProps, kOfxPropLabel, 0, kParamMaxFALLLabel);
-    gPropHost->propSetString(maxFALLProps, kOfxParamPropScriptName, 0, kParamMaxFALL);
-    gPropHost->propSetString(maxFALLProps, kOfxParamPropHint, 0, kParamMaxFALLHint);
-    gPropHost->propSetDouble(maxFALLProps, kOfxParamPropDefault, 0, 400.0);
-    gPropHost->propSetDouble(maxFALLProps, kOfxParamPropMin, 0, 50.0);
-    gPropHost->propSetDouble(maxFALLProps, kOfxParamPropMax, 0, 4000.0);
-    gPropHost->propSetDouble(maxFALLProps, kOfxParamPropDisplayMin, 0, 50.0);
-    gPropHost->propSetDouble(maxFALLProps, kOfxParamPropDisplayMax, 0, 1000.0);
-    gPropHost->propSetInt(maxFALLProps, kOfxParamPropAnimates, 0, 0);
-    gPropHost->propSetString(maxFALLProps, kOfxParamPropParent, 0, "hdrGroup");
 
     // Define debug logging parameter - in Diagnostics group
     OfxPropertySetHandle debugLoggingProps = NULL;

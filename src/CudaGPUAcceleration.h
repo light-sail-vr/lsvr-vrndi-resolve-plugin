@@ -65,16 +65,6 @@ bool cuda_gpu_buffer_downscale_to_uyvy(CudaGPUContextRef context,
                                        int outWidth, int outHeight,
                                        unsigned char* uyvyOut);
 
-// Fused downscale + RGBA float → P216 (planar Y then interleaved UV, 16-bit,
-// BT.2100 limited range). p216Out receives outWidth*outHeight*2 uint16 values.
-bool cuda_gpu_buffer_downscale_to_p216(CudaGPUContextRef context,
-                                       void* cudaStream,
-                                       void* srcDeviceBuffer,
-                                       int srcWidth, int srcHeight, int srcRowFloats,
-                                       int divisor,
-                                       int outWidth, int outHeight,
-                                       unsigned short* p216Out);
-
 // ---------------------------------------------------------------------------
 // STMap warp variants: same fused structure, but each output pixel gathers
 // through an STMap — the map texel for a full-res destination pixel gives the
@@ -96,15 +86,6 @@ bool cuda_gpu_buffer_warp_to_uyvy(CudaGPUContextRef context,
                                   int divisor,
                                   int outWidth, int outHeight,
                                   unsigned char* uyvyOut);
-
-bool cuda_gpu_buffer_warp_to_p216(CudaGPUContextRef context,
-                                  void* cudaStream,
-                                  void* srcDeviceBuffer,
-                                  int srcWidth, int srcHeight, int srcRowFloats,
-                                  void* mapDeviceBuffer, int mapWidth, int mapHeight,
-                                  int divisor,
-                                  int outWidth, int outHeight,
-                                  unsigned short* p216Out);
 
 // ---------------------------------------------------------------------------
 // Non-blocking fast path: same fused kernels, but the render thread only
@@ -147,7 +128,6 @@ cuda_submit_status cuda_gpu_downscale_submit(CudaGPUContextRef context,
                                              int srcWidth, int srcHeight, int srcRowFloats,
                                              int divisor,
                                              int outWidth, int outHeight,
-                                             bool p216,
                                              cuda_downscale_done_fn done, void* user);
 
 // Non-blocking STMap warp: identical contract to cuda_gpu_downscale_submit
@@ -161,7 +141,6 @@ cuda_submit_status cuda_gpu_warp_submit(CudaGPUContextRef context,
                                         void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                         int divisor,
                                         int outWidth, int outHeight,
-                                        bool p216,
                                         cuda_downscale_done_fn done, void* user);
 
 void cuda_gpu_downscale_release(CudaGPUContextRef context, void* slot);

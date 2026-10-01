@@ -67,7 +67,7 @@ int main()
     expectInt(w, 2048, "4096 half width");
     expectInt(h, 2048, "4096 half height");
 
-    // Downscaled width must be even — UYVY and P216 are 4:2:2 (two pixels per
+    // Downscaled width must be even — UYVY is 4:2:2 (two pixels per
     // chroma macropixel).
     outputDims(1918, 1080, 2, &w, &h);
     expectInt(w, 958, "odd half width rounds down to even");

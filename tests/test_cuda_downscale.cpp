@@ -71,44 +71,6 @@ static void referenceUYVY(const float* src, int width, int height, std::vector<u
     }
 }
 
-// Reference P216 packing — same math as the CPU HDR path in sendHDRFrame
-// (vertical flip, Rec.2020, BT.2100 limited range, planar Y + interleaved UV).
-static void referenceP216(const float* src, int width, int height, std::vector<uint16_t>& out)
-{
-    out.assign(static_cast<size_t>(width) * height * 2, 0);
-    uint16_t* yPlane = out.data();
-    uint16_t* uvPlane = out.data() + static_cast<size_t>(width) * height;
-    for (int y = 0; y < height; ++y) {
-        int srcRow = height - 1 - y;
-        for (int x = 0; x < width; x += 2) {
-            int srcIdx1 = (srcRow * width + x) * 4;
-            int srcIdx2 = (srcRow * width + x + 1) * 4;
-
-            float r1 = std::fmax(0.0f, std::fmin(1.0f, src[srcIdx1 + 0]));
-            float g1 = std::fmax(0.0f, std::fmin(1.0f, src[srcIdx1 + 1]));
-            float b1 = std::fmax(0.0f, std::fmin(1.0f, src[srcIdx1 + 2]));
-            float r2 = (x + 1 < width) ? std::fmax(0.0f, std::fmin(1.0f, src[srcIdx2 + 0])) : r1;
-            float g2 = (x + 1 < width) ? std::fmax(0.0f, std::fmin(1.0f, src[srcIdx2 + 1])) : g1;
-            float b2 = (x + 1 < width) ? std::fmax(0.0f, std::fmin(1.0f, src[srcIdx2 + 2])) : b1;
-
-            float y1 = 0.2627f * r1 + 0.6780f * g1 + 0.0593f * b1;
-            float y2 = 0.2627f * r2 + 0.6780f * g2 + 0.0593f * b2;
-            float avgR = (r1 + r2) * 0.5f, avgG = (g1 + g2) * 0.5f, avgB = (b1 + b2) * 0.5f;
-            float u = -0.1396f * avgR - 0.3604f * avgG + 0.5f * avgB;
-            float v = 0.5f * avgR - 0.4598f * avgG - 0.0402f * avgB;
-
-            int yIdx = y * width + x;
-            yPlane[yIdx] = static_cast<uint16_t>(4096 + y1 * 56064);
-            if (x + 1 < width) {
-                yPlane[yIdx + 1] = static_cast<uint16_t>(4096 + y2 * 56064);
-            }
-            int uvIdx = yIdx / 2;
-            uvPlane[uvIdx * 2] = static_cast<uint16_t>(32768 + u * 28672);
-            uvPlane[uvIdx * 2 + 1] = static_cast<uint16_t>(32768 + v * 28672);
-        }
-    }
-}
-
 // Deterministic frame content: gradients across all channels, including
 // out-of-range values so both paths must clamp identically.
 static void fillFrame(std::vector<float>& frame, int width, int height, int rowFloats)
@@ -198,17 +160,6 @@ int main()
             check(ran && compareExact(actual.data(), expected.data(), expected.size(), name), name);
         }
 
-        {
-            std::vector<uint16_t> expected, actual(static_cast<size_t>(outW) * outH * 2, 0);
-            referenceP216(small.data(), outW, outH, expected);
-            bool ran = cuda_gpu_buffer_downscale_to_p216(ctx, nullptr, srcBuf,
-                                                         srcW, srcH, c.rowFloats, c.divisor,
-                                                         outW, outH, actual.data());
-            char name[128];
-            std::snprintf(name, sizeof(name), "P216 kernel byte-identical to CPU reference (%s)", c.name);
-            check(ran && compareExact(actual.data(), expected.data(), expected.size(), name), name);
-        }
-
         cuda_gpu_release_buffer(srcBuf);
     }
 
@@ -288,27 +239,12 @@ int main()
             AsyncCapture cap;
             bool submitted = cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                        srcW, srcH, srcW * 4, 2, outW, outH,
-                                                       /*p216=*/false, onDone, &cap) == CUDA_SUBMIT_OK;
+                                                       onDone, &cap) == CUDA_SUBMIT_OK;
             bool done = submitted && waitFired(cap, 1);
             check(done && cap.ok && cap.out.size() == expected.size() &&
                       compareExact(cap.out.data(), expected.data(), expected.size(),
                                    "async UYVY"),
                   "async submit UYVY byte-identical to CPU reference (divisor 2)");
-            if (cap.slot) cuda_gpu_downscale_release(ctx, cap.slot);
-        }
-
-        {
-            std::vector<uint16_t> expected;
-            referenceP216(small.data(), outW, outH, expected);
-            AsyncCapture cap;
-            bool submitted = cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
-                                                       srcW, srcH, srcW * 4, 2, outW, outH,
-                                                       /*p216=*/true, onDone, &cap) == CUDA_SUBMIT_OK;
-            bool done = submitted && waitFired(cap, 1);
-            check(done && cap.ok && cap.out.size() == expected.size() * sizeof(uint16_t) &&
-                      compareExact(reinterpret_cast<const uint16_t*>(cap.out.data()),
-                                   expected.data(), expected.size(), "async P216"),
-                  "async submit P216 byte-identical to CPU reference (divisor 2)");
             if (cap.slot) cuda_gpu_downscale_release(ctx, cap.slot);
         }
 
@@ -320,13 +256,13 @@ int main()
             for (int i = 0; i < 4; ++i) {
                 if (cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                               srcW, srcH, srcW * 4, 2, outW, outH,
-                                              false, onDone, &caps[i]) == CUDA_SUBMIT_OK) {
+                                              onDone, &caps[i]) == CUDA_SUBMIT_OK) {
                     ++accepted;
                 }
             }
             bool fifthRefused = cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                           srcW, srcH, srcW * 4, 2, outW, outH,
-                                                          false, onDone, &caps[4]) == CUDA_SUBMIT_BUSY;
+                                                          onDone, &caps[4]) == CUDA_SUBMIT_BUSY;
             bool allFired = true;
             for (int i = 0; i < 4; ++i) {
                 allFired = allFired && waitFired(caps[i], 1);
@@ -335,7 +271,7 @@ int main()
             AsyncCapture after;
             bool afterOk = (cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                       srcW, srcH, srcW * 4, 2, outW, outH,
-                                                      false, onDone, &after) == CUDA_SUBMIT_OK) &&
+                                                      onDone, &after) == CUDA_SUBMIT_OK) &&
                            waitFired(after, 1);
             if (after.slot) cuda_gpu_downscale_release(ctx, after.slot);
             check(accepted == 4 && fifthRefused && allFired && afterOk,
@@ -391,22 +327,6 @@ int main()
                 check(ranPlain && ranWarp &&
                           std::memcmp(plain.data(), warped.data(), plain.size()) == 0, name);
             }
-            {
-                std::vector<uint16_t> plain(static_cast<size_t>(outW) * outH * 2, 0);
-                std::vector<uint16_t> warped(plain.size(), 1);
-                bool ranPlain = cuda_gpu_buffer_downscale_to_p216(ctx, nullptr, srcBuf,
-                                                                  srcW, srcH, srcW * 4, divisor,
-                                                                  outW, outH, plain.data());
-                bool ranWarp = cuda_gpu_buffer_warp_to_p216(ctx, nullptr, srcBuf,
-                                                            srcW, srcH, srcW * 4,
-                                                            identBuf, srcW, srcH, divisor,
-                                                            outW, outH, warped.data());
-                char name[128];
-                std::snprintf(name, sizeof(name),
-                              "identity-map warp P216 == downscale kernel (divisor %d)", divisor);
-                check(ranPlain && ranWarp &&
-                          std::memcmp(plain.data(), warped.data(), plain.size() * 2) == 0, name);
-            }
         }
 
         // Arbitrary smooth map at non-source dims, including an out-of-range
@@ -457,18 +377,6 @@ int main()
                 check(ran && compareExact(actual.data(), expected.data(), expected.size(), name),
                       name);
             }
-            {
-                std::vector<uint16_t> expected, actual(static_cast<size_t>(outW) * outH * 2, 0);
-                referenceP216(small.data(), outW, outH, expected);
-                bool ran = cuda_gpu_buffer_warp_to_p216(ctx, nullptr, wsrcBuf,
-                                                        srcW, srcH, c.rowFloats,
-                                                        mapBuf, mapW, mapH, c.divisor,
-                                                        outW, outH, actual.data());
-                char name[128];
-                std::snprintf(name, sizeof(name), "warp P216 byte-identical to CPU reference (%s)", c.name);
-                check(ran && compareExact(actual.data(), expected.data(), expected.size(), name),
-                      name);
-            }
             cuda_gpu_release_buffer(wsrcBuf);
         }
 
@@ -506,7 +414,7 @@ int main()
             bool submitted = cuda_gpu_warp_submit(ctx, nullptr, srcBuf,
                                                   srcW, srcH, srcW * 4,
                                                   mapBuf, mapW, mapH, 2, outW, outH,
-                                                  /*p216=*/false, onDone, &cap) == CUDA_SUBMIT_OK;
+                                                  onDone, &cap) == CUDA_SUBMIT_OK;
             bool done = false;
             if (submitted) {
                 std::unique_lock<std::mutex> lock(cap.m);
@@ -535,7 +443,7 @@ int main()
             bool tinyRefused = cuda_gpu_warp_submit(ctx, nullptr, srcBuf,
                                                     srcW, srcH, srcW * 4,
                                                     tiny, mapW, mapH, 1, outW, outH,
-                                                    false, noopDone, nullptr) == CUDA_SUBMIT_INVALID;
+                                                    noopDone, nullptr) == CUDA_SUBMIT_INVALID;
             cuda_gpu_release_buffer(tiny);
             check(nullRefused && tinyRefused, "warp refuses null/undersized map buffers as invalid");
         }

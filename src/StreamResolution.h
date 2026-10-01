@@ -31,7 +31,7 @@ inline int divisorForResolutionChoice(int choiceIndex)
 
 // Outgoing stream dimensions for a divisor. Divisor 1 passes the source
 // dimensions through untouched (the shipping full-resolution behavior).
-// Downscaled widths round down to even — UYVY and P216 are 4:2:2, two pixels
+// Downscaled widths round down to even — UYVY is 4:2:2, two pixels
 // per chroma macropixel — and both axes clamp so a degenerate source (e.g. a
 // filmstrip thumbnail) can never produce a zero-sized frame.
 inline void outputDims(int srcWidth, int srcHeight, int divisor, int* outWidth, int* outHeight)

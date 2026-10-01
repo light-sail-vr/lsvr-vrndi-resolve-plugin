@@ -58,7 +58,6 @@ One-time prep: keep a dedicated Resolve project (e.g. **`NDI_PLUGIN_TEST`**) wit
 
 ### Tier 3 — feature-specific validation
 
-- **HDR:** the reference receiver is the SDK example `NDIlib_Recv_HDR` (P). Validate FourCC is `P216` and metadata carries `<ndi_color_info primaries="bt_2020" transfer="bt_2100_pq" .../>`. NDI Video Monitor gives the visual check.
 - **Latency/jitter:** SDK examples `NDIlib_Latency_Test`, `NDIlib_Jitter_Measure` in `/Library/NDI Advanced SDK for Apple/examples/C++/`.
 - **GPU path/perf:** `./scripts/monitor_gpu_performance.sh` plus the log lines above; the v1.2.4 release notes list the exact strings that distinguish GPU success from CPU fallback.
 
@@ -109,6 +108,7 @@ Seeded from release notes and the 2026-08-28 cleanup. Newest entries at the bott
 **Rule:** any new frame path (new format, new GPU kernel) must re-verify orientation in an actual receiver — it's the cheapest thing to get wrong silently.
 
 ### 2025-05-27 — HDR sent black frames (v1.2.3)
+*(Historical: HDR output — P216, the HDR Settings group, and the color metadata — was removed after v1.14.2, since the bundled Standard NDI SDK targets SDR UYVY.)*
 **Symptom:** enabling HDR produced black frames and poor performance downstream.
 **Root cause:** HDR was being sent as RGBA FourCC; NDI 6 HDR requires **P216** (planar 16-bit 4:2:2) with BT.2100 limited-range quantization and `ndi_color_info` XML metadata.
 **Fix:** P216 packing, Rec.2020 coefficients, limited-range encode (Y ∈ [4096, 60160], UV 32768±28672), proper `<ndi_color_info primaries="bt_2020" transfer="bt_2100_pq" matrix="bt_2020"/>` metadata (shipped v1.2.3).
