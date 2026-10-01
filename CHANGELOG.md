@@ -5,13 +5,13 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.15.0] - 2026-10-01
 
 ### Added
-- **Mono option in Stereo Packing** (Side-by-Side / Top-Bottom / **Mono**). On a stereo timeline, Mono streams only the left eye as a plain single frame for monoscopic 360 receivers. It skips the eye pairer, and right-eye and thumbnail renders skip the NDI path entirely, with no conversion or readback. Stream Status reads "Mono (left eye of stereo pair)". Mono timelines are unchanged under every setting.
+- **Mono option for 360 streams** (#49). **Stereo Packing** now offers Side-by-Side, Top-Bottom and **Mono**. On a stereo timeline, Mono streams only the left eye as a normal single frame, for monoscopic 360 receivers. Right-eye renders are skipped, so they cost no GPU time, and Resolve's own output is unaffected. **Stream Status** reads "Mono (left eye of stereo pair)". Mono timelines stream exactly as before.
 
 ### Removed
-- **HDR output.** The plugin is built on the Standard NDI SDK, so it now streams SDR only: 8-bit UYVY, Rec.709. The **HDR Settings** group (Enable HDR, Color Space, Transfer Function, Max CLL/FALL) is gone, along with the P216 16-bit wire format, its Metal and CUDA kernels, and the `ndi_color_info` metadata. Projects saved with HDR enabled now load and stream SDR.
+- **HDR output** (#48). The plugin is built on the Standard NDI SDK and now streams SDR only (8-bit, Rec.709). The **HDR Settings** group (Enable HDR, Color Space, Transfer Function, Max CLL/FALL) is gone. Projects saved with HDR switched on still open and stream SDR.
 
 ## [1.14.2] - 2026-10-01
 
