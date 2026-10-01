@@ -558,6 +558,35 @@ int main()
         expectTrue(std::memcmp(out.data(), tbExpect, 16) == 0, "pack: UYVY TB plane layout");
     }
 
+    // --- Edit-page eye skew (2026-10-01 capture): during edit-page playback
+    // Resolve renders the right eye a steady 18 frames ahead of the left, both
+    // at 24 fps. Every left frame's partner was submitted ~750 ms earlier, so
+    // the window must hold the leading eye's frames until the lagging eye
+    // arrives. Before the fix the 8-frame cap evicted each one first and no
+    // pair ever completed (the stream froze). Times are interleaved exactly as
+    // captured: R(t+18), L(t), ~21 ms apart. ---
+    {
+        EyePairer pairer;
+        const int kSkew = 18;
+        const int kFrames = 240; // 10 s of playback
+        int pairs = 0, pairsAfterWarmup = 0;
+        uint64_t now = 0;
+        for (int k = 0; k < kFrames; ++k) {
+            SubmitResult r = submit(pairer, kEyeRight, 1000.0 + k + kSkew, kEyeMeta, payload(1), now);
+            if (r.action == SubmitAction::SendPair) ++pairs;
+            now += 21;
+            r = submit(pairer, kEyeLeft, 1000.0 + k, kEyeMeta, payload(2), now);
+            if (r.action == SubmitAction::SendPair) {
+                ++pairs;
+                if (k >= kSkew) ++pairsAfterWarmup;
+            }
+            now += 21;
+        }
+        expectInt(pairsAfterWarmup, kFrames - kSkew,
+                  "skew: every left frame pairs once the right eye's lead is buffered");
+        expectTrue(pairer.mode() == StreamMode::Stereo, "skew: stream stays Stereo (never degrades)");
+    }
+
     // --- Mono packing: only the left eye streams; right-eye renders and
     // thumbnails never reach the wire (a thumbnail would resize the stream). ---
     {

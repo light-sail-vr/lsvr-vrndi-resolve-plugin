@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Mono option for 360 streams** (#49). **Stereo Packing** now offers Side-by-Side, Top-Bottom and **Mono**. On a stereo timeline, Mono streams only the left eye as a normal single frame, for monoscopic 360 receivers. Right-eye renders are skipped, so they cost no GPU time, and Resolve's own output is unaffected. **Stream Status** reads "Mono (left eye of stereo pair)". Mono timelines stream exactly as before.
 
+### Fixed
+- **Stereo playback on the Edit page streamed nothing** (scrubbing worked). Resolve renders the right eye well ahead of the left there, and the plugin gave up waiting for the matching left frame. It now waits long enough to pair them. The bug was also present in 1.14.2.
+
 ### Removed
 - **HDR output** (#48). The plugin is built on the Standard NDI SDK and now streams SDR only (8-bit, Rec.709). The **HDR Settings** group (Enable HDR, Color Space, Transfer Function, Max CLL/FALL) is gone. Projects saved with HDR switched on still open and stream SDR.
 

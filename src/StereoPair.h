@@ -52,9 +52,15 @@ enum class WireFormat { UYVY8 = 0, RGBA8 = 2 };
 
 // Tuning, derived from the probe findings:
 // - the reorder window must cover ≥5 frames (in-eye time reversal at 8K);
-// - the pending timeout must sit comfortably above the observed ±334 ms
-//   eye-arrival skew, and stay short enough that stale holds never pile up.
-constexpr size_t kMaxPending = 8;
+// - it must also hold the leading eye through a STEADY skew: edit-page
+//   playback renders the right eye ~18 frames (~750 ms) ahead of the left
+//   (2026-10-01 capture), so every leading-eye frame waits that long for its
+//   mate. Capped by count and by bytes, whichever binds first — the byte
+//   budget keeps 8K-per-eye holds at the old 8-frame depth;
+// - the pending timeout must sit comfortably above the observed eye-arrival
+//   skew, and stay short enough that stale holds never pile up.
+constexpr size_t kMaxPending = 48;
+constexpr size_t kMaxPendingBytes = size_t(1) << 30; // 1 GiB of held payloads
 constexpr uint64_t kPendingTimeoutMs = 1000;
 // Recycled hold-payload buffers kept warm (see EyePairer::recycle).
 constexpr size_t kPayloadPoolCap = 4;
@@ -422,9 +428,21 @@ private:
         }
     }
 
+    size_t pendingBytes() const
+    {
+        size_t total = 0;
+        for (const auto& entry : pending_) {
+            total += entry.second.payload.size();
+        }
+        return total;
+    }
+
+    // Oldest-first, down to both the count cap and the byte budget. The
+    // newest hold always survives — a single frame over budget still pairs.
     void evictOverCapacity()
     {
-        while (pending_.size() > kMaxPending) {
+        while (pending_.size() > kMaxPending ||
+               (pending_.size() > 1 && pendingBytes() > kMaxPendingBytes)) {
             auto oldest = pending_.begin();
             for (auto it = pending_.begin(); it != pending_.end(); ++it) {
                 if (it->second.heldSeq < oldest->second.heldSeq) {
