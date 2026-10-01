@@ -164,8 +164,8 @@ __device__ __forceinline__ void cudaWarpSampleRGB(const float* src, const float*
     rgb[2] = cudaClamp01(sum2 * invCount);
 }
 
-// Shared packing tails: two sampled pixels -> one UYVY macropixel / one P216
-// column pair. Expression trees match the CPU converters exactly.
+// Shared packing tail: two sampled pixels -> one UYVY macropixel. Expression
+// tree matches the CPU converter exactly.
 __device__ __forceinline__ void cudaEmitUYVY(unsigned char* dst, unsigned outWidth,
                                              unsigned x0, unsigned oy,
                                              const float rgb1[3], const float rgb2[3])
@@ -183,31 +183,6 @@ __device__ __forceinline__ void cudaEmitUYVY(unsigned char* dst, unsigned outWid
     out[1] = static_cast<unsigned char>(y1 * 255.0f);
     out[2] = static_cast<unsigned char>((v + 0.5f) * 255.0f);
     out[3] = static_cast<unsigned char>(y2 * 255.0f);
-}
-
-__device__ __forceinline__ void cudaEmitP216(unsigned short* dst, unsigned outWidth, unsigned outHeight,
-                                             unsigned x0, unsigned oy,
-                                             const float rgb1[3], const float rgb2[3])
-{
-    const float y1 = 0.2627f * rgb1[0] + 0.6780f * rgb1[1] + 0.0593f * rgb1[2];
-    const float y2 = 0.2627f * rgb2[0] + 0.6780f * rgb2[1] + 0.0593f * rgb2[2];
-    const float avgR = (rgb1[0] + rgb2[0]) * 0.5f;
-    const float avgG = (rgb1[1] + rgb2[1]) * 0.5f;
-    const float avgB = (rgb1[2] + rgb2[2]) * 0.5f;
-    const float u = -0.1396f * avgR - 0.3604f * avgG + 0.5f * avgB;
-    const float v = 0.5f * avgR - 0.4598f * avgG - 0.0402f * avgB;
-
-    unsigned short* yPlane = dst;
-    unsigned short* uvPlane = dst + static_cast<size_t>(outWidth) * outHeight;
-
-    const size_t yIdx = static_cast<size_t>(oy) * outWidth + x0;
-    yPlane[yIdx] = static_cast<unsigned short>(4096 + y1 * 56064);
-    if (x0 + 1 < outWidth) {
-        yPlane[yIdx + 1] = static_cast<unsigned short>(4096 + y2 * 56064);
-    }
-    const size_t uvIdx = yIdx / 2;
-    uvPlane[uvIdx * 2] = static_cast<unsigned short>(32768 + u * 28672);
-    uvPlane[uvIdx * 2 + 1] = static_cast<unsigned short>(32768 + v * 28672);
 }
 
 __global__ void downscaleRGBAToUYVYKernel(const float* __restrict__ src, unsigned char* dst,
@@ -228,24 +203,6 @@ __global__ void downscaleRGBAToUYVYKernel(const float* __restrict__ src, unsigne
     cudaEmitUYVY(dst, p.outWidth, x0, oy, rgb1, rgb2);
 }
 
-__global__ void downscaleRGBAToP216Kernel(const float* __restrict__ src, unsigned short* dst,
-                                          CudaConvertParams p)
-{
-    const unsigned gx = blockIdx.x * blockDim.x + threadIdx.x;
-    const unsigned oy = blockIdx.y * blockDim.y + threadIdx.y;
-    const unsigned x0 = gx * 2u;
-    if (x0 >= p.outWidth || oy >= p.outHeight) return;
-
-    float rgb1[3], rgb2[3];
-    cudaBoxSampleRGB(src, p, x0, oy, rgb1);
-    if (x0 + 1 < p.outWidth) {
-        cudaBoxSampleRGB(src, p, x0 + 1, oy, rgb2);
-    } else {
-        rgb2[0] = rgb1[0]; rgb2[1] = rgb1[1]; rgb2[2] = rgb1[2];
-    }
-    cudaEmitP216(dst, p.outWidth, p.outHeight, x0, oy, rgb1, rgb2);
-}
-
 __global__ void warpRGBAToUYVYKernel(const float* __restrict__ src, unsigned char* dst,
                                      const float* __restrict__ mapUV, CudaConvertParams p)
 {
@@ -262,24 +219,6 @@ __global__ void warpRGBAToUYVYKernel(const float* __restrict__ src, unsigned cha
         rgb2[0] = rgb1[0]; rgb2[1] = rgb1[1]; rgb2[2] = rgb1[2];
     }
     cudaEmitUYVY(dst, p.outWidth, x0, oy, rgb1, rgb2);
-}
-
-__global__ void warpRGBAToP216Kernel(const float* __restrict__ src, unsigned short* dst,
-                                     const float* __restrict__ mapUV, CudaConvertParams p)
-{
-    const unsigned gx = blockIdx.x * blockDim.x + threadIdx.x;
-    const unsigned oy = blockIdx.y * blockDim.y + threadIdx.y;
-    const unsigned x0 = gx * 2u;
-    if (x0 >= p.outWidth || oy >= p.outHeight) return;
-
-    float rgb1[3], rgb2[3];
-    cudaWarpSampleRGB(src, mapUV, p, x0, oy, rgb1);
-    if (x0 + 1 < p.outWidth) {
-        cudaWarpSampleRGB(src, mapUV, p, x0 + 1, oy, rgb2);
-    } else {
-        rgb2[0] = rgb1[0]; rgb2[1] = rgb1[1]; rgb2[2] = rgb1[2];
-    }
-    cudaEmitP216(dst, p.outWidth, p.outHeight, x0, oy, rgb1, rgb2);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +475,7 @@ static bool srcBufferLargeEnough(void* srcDeviceBuffer, int srcHeight, int srcRo
 }
 
 static void launchConvertKernel(cudaStream_t stream, void* srcDeviceBuffer, void* dstDeviceBuffer,
-                                void* mapDeviceBuffer, const CudaConvertParams& p, bool p216)
+                                void* mapDeviceBuffer, const CudaConvertParams& p)
 {
     const dim3 block(16, 16, 1);
     const dim3 grid(((p.outWidth / 2) + block.x - 1) / block.x,
@@ -544,21 +483,11 @@ static void launchConvertKernel(cudaStream_t stream, void* srcDeviceBuffer, void
     const float* src = static_cast<const float*>(srcDeviceBuffer);
     if (mapDeviceBuffer) {
         const float* mapUV = static_cast<const float*>(mapDeviceBuffer);
-        if (p216) {
-            warpRGBAToP216Kernel<<<grid, block, 0, stream>>>(
-                src, static_cast<unsigned short*>(dstDeviceBuffer), mapUV, p);
-        } else {
-            warpRGBAToUYVYKernel<<<grid, block, 0, stream>>>(
-                src, static_cast<unsigned char*>(dstDeviceBuffer), mapUV, p);
-        }
+        warpRGBAToUYVYKernel<<<grid, block, 0, stream>>>(
+            src, static_cast<unsigned char*>(dstDeviceBuffer), mapUV, p);
     } else {
-        if (p216) {
-            downscaleRGBAToP216Kernel<<<grid, block, 0, stream>>>(
-                src, static_cast<unsigned short*>(dstDeviceBuffer), p);
-        } else {
-            downscaleRGBAToUYVYKernel<<<grid, block, 0, stream>>>(
-                src, static_cast<unsigned char*>(dstDeviceBuffer), p);
-        }
+        downscaleRGBAToUYVYKernel<<<grid, block, 0, stream>>>(
+            src, static_cast<unsigned char*>(dstDeviceBuffer), p);
     }
 }
 
@@ -586,7 +515,7 @@ static bool runConvertKernel(CudaGPUContextRef context, void* cudaStream, void* 
                              void* mapDeviceBuffer, int mapWidth, int mapHeight,
                              int divisor,
                              int outWidth, int outHeight,
-                             bool p216, void* cpuOut, size_t outBytes, const char* label)
+                             void* cpuOut, size_t outBytes, const char* label)
 {
     if (!context || !srcDeviceBuffer || !cpuOut) return false;
     if (!validConvertGeometry(srcWidth, srcHeight, srcRowFloats, divisor, outWidth, outHeight)) {
@@ -621,7 +550,7 @@ static bool runConvertKernel(CudaGPUContextRef context, void* cudaStream, void* 
 
     const CudaConvertParams p = makeParams(srcWidth, srcHeight, srcRowFloats,
                                            divisor, outWidth, outHeight, mapWidth, mapHeight);
-    launchConvertKernel(stream, srcDeviceBuffer, context->stagingDev, mapDeviceBuffer, p, p216);
+    launchConvertKernel(stream, srcDeviceBuffer, context->stagingDev, mapDeviceBuffer, p);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         CUDA_LOG("Blocking convert: kernel launch failed: %s", cudaGetErrorString(err));
@@ -655,21 +584,7 @@ bool cuda_gpu_buffer_downscale_to_uyvy(CudaGPUContextRef context,
     const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2;
     return runConvertKernel(context, cudaStream, srcDeviceBuffer,
                             srcWidth, srcHeight, srcRowFloats, nullptr, 0, 0, divisor,
-                            outWidth, outHeight, false, uyvyOut, outBytes, "UYVY");
-}
-
-bool cuda_gpu_buffer_downscale_to_p216(CudaGPUContextRef context,
-                                       void* cudaStream,
-                                       void* srcDeviceBuffer,
-                                       int srcWidth, int srcHeight, int srcRowFloats,
-                                       int divisor,
-                                       int outWidth, int outHeight,
-                                       unsigned short* p216Out)
-{
-    const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2 * sizeof(unsigned short);
-    return runConvertKernel(context, cudaStream, srcDeviceBuffer,
-                            srcWidth, srcHeight, srcRowFloats, nullptr, 0, 0, divisor,
-                            outWidth, outHeight, true, p216Out, outBytes, "P216");
+                            outWidth, outHeight, uyvyOut, outBytes, "UYVY");
 }
 
 bool cuda_gpu_buffer_warp_to_uyvy(CudaGPUContextRef context,
@@ -686,24 +601,7 @@ bool cuda_gpu_buffer_warp_to_uyvy(CudaGPUContextRef context,
     return runConvertKernel(context, cudaStream, srcDeviceBuffer,
                             srcWidth, srcHeight, srcRowFloats,
                             mapDeviceBuffer, mapWidth, mapHeight, divisor,
-                            outWidth, outHeight, false, uyvyOut, outBytes, "warp UYVY");
-}
-
-bool cuda_gpu_buffer_warp_to_p216(CudaGPUContextRef context,
-                                  void* cudaStream,
-                                  void* srcDeviceBuffer,
-                                  int srcWidth, int srcHeight, int srcRowFloats,
-                                  void* mapDeviceBuffer, int mapWidth, int mapHeight,
-                                  int divisor,
-                                  int outWidth, int outHeight,
-                                  unsigned short* p216Out)
-{
-    if (!mapDeviceBuffer) return false;
-    const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2 * sizeof(unsigned short);
-    return runConvertKernel(context, cudaStream, srcDeviceBuffer,
-                            srcWidth, srcHeight, srcRowFloats,
-                            mapDeviceBuffer, mapWidth, mapHeight, divisor,
-                            outWidth, outHeight, true, p216Out, outBytes, "warp P216");
+                            outWidth, outHeight, uyvyOut, outBytes, "warp UYVY");
 }
 
 // Non-blocking variant: enqueue only. Validation mirrors runConvertKernel so
@@ -718,7 +616,6 @@ static cuda_submit_status submitConvertInternal(CudaGPUContextRef context,
                                                 void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                                 int divisor,
                                                 int outWidth, int outHeight,
-                                                bool p216,
                                                 cuda_downscale_done_fn done, void* user)
 {
     if (!context || !srcDeviceBuffer || !done) return CUDA_SUBMIT_INVALID;
@@ -734,8 +631,7 @@ static cuda_submit_status submitConvertInternal(CudaGPUContextRef context,
     }
     cudaStream_t stream = resolveStream(context, cudaStream);
     if (!stream) return CUDA_SUBMIT_INVALID;
-    const size_t outBytes = static_cast<size_t>(outWidth) * outHeight * 2 *
-                            (p216 ? sizeof(unsigned short) : 1);
+    const size_t outBytes = static_cast<size_t>(outWidth) * outHeight * 2;
 
     // Claim a free slot; none free = GPU behind or consumer backlogged — the
     // caller drops this frame (backpressure by dropping, never blocking).
@@ -776,7 +672,7 @@ static cuda_submit_status submitConvertInternal(CudaGPUContextRef context,
     const CudaConvertParams p = makeParams(srcWidth, srcHeight, srcRowFloats,
                                            divisor, outWidth, outHeight, mapWidth, mapHeight);
     cudaEventRecord(slot->evStart, stream);
-    launchConvertKernel(stream, srcDeviceBuffer, slot->devBuffer, mapDeviceBuffer, p, p216);
+    launchConvertKernel(stream, srcDeviceBuffer, slot->devBuffer, mapDeviceBuffer, p);
     cudaError_t err = cudaGetLastError();
     const bool kernelLaunched = (err == cudaSuccess);
     if (err == cudaSuccess) err = cudaEventRecord(slot->evEnd, stream);
@@ -809,13 +705,12 @@ cuda_submit_status cuda_gpu_downscale_submit(CudaGPUContextRef context,
                                              int srcWidth, int srcHeight, int srcRowFloats,
                                              int divisor,
                                              int outWidth, int outHeight,
-                                             bool p216,
                                              cuda_downscale_done_fn done, void* user)
 {
     return submitConvertInternal(context, cudaStream, srcDeviceBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  nullptr, 0, 0, divisor,
-                                 outWidth, outHeight, p216, done, user);
+                                 outWidth, outHeight, done, user);
 }
 
 cuda_submit_status cuda_gpu_warp_submit(CudaGPUContextRef context,
@@ -825,14 +720,13 @@ cuda_submit_status cuda_gpu_warp_submit(CudaGPUContextRef context,
                                         void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                         int divisor,
                                         int outWidth, int outHeight,
-                                        bool p216,
                                         cuda_downscale_done_fn done, void* user)
 {
     if (!mapDeviceBuffer) return CUDA_SUBMIT_INVALID;
     return submitConvertInternal(context, cudaStream, srcDeviceBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  mapDeviceBuffer, mapWidth, mapHeight, divisor,
-                                 outWidth, outHeight, p216, done, user);
+                                 outWidth, outHeight, done, user);
 }
 
 void cuda_gpu_downscale_release(CudaGPUContextRef context, void* slot)

@@ -19,9 +19,8 @@
 // a different device than this context's default — so cache one state per device.
 struct MetalFastPathState {
     id<MTLComputePipelineState> uyvyPipeline;
-    id<MTLComputePipelineState> p216Pipeline;
-    id<MTLComputePipelineState> warpUyvyPipeline; // STMap warp variants (issue #7);
-    id<MTLComputePipelineState> warpP216Pipeline; // nil if compilation failed — warp then refuses, downscale still works
+    id<MTLComputePipelineState> warpUyvyPipeline; // STMap warp variant (issue #7); nil if compilation
+                                                  // failed — warp then refuses, downscale still works
     id<MTLBuffer> staging;          // readback target, grown as needed
     size_t stagingCapacity;
 };
@@ -45,7 +44,6 @@ struct MetalGPUContext {
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
     id<MTLComputePipelineState> rgbaToUyvyPipeline;
-    id<MTLComputePipelineState> rgbaToHdrPipeline;
     id<MTLLibrary> library;
     std::unordered_map<void*, MetalFastPathState> fastPathByDevice; // key: id<MTLDevice>
     std::mutex asyncMutex;                    // guards the slot ring
@@ -129,73 +127,6 @@ kernel void rgba_to_uyvy_kernel(device const float4* rgbaInput [[buffer(0)]],
     );
 }
 
-// RGBA to HDR P216 conversion kernel
-kernel void rgba_to_hdr_p216(
-    const device float4* rgbaInput [[buffer(0)]],
-    device uint16_t* yPlaneOutput [[buffer(1)]],
-    device uint16_t* uvPlaneOutput [[buffer(2)]],
-    constant uint2& dimensions [[buffer(3)]],
-    constant float& scale [[buffer(4)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (gid.x >= dimensions.x || gid.y >= dimensions.y) {
-        return;
-    }
-    
-    // Process two pixels for 4:2:2 subsampling
-    uint x = gid.x * 2;
-    uint y = gid.y;
-    
-    if (x >= dimensions.x) {
-        return;
-    }
-    
-    // Flip vertically: OpenFX uses bottom-left origin, NDI expects top-left
-    uint srcRow = dimensions.y - 1 - y;
-    
-    // Read two RGBA pixels
-    uint srcIdx1 = srcRow * dimensions.x + x;
-    uint srcIdx2 = srcRow * dimensions.x + x + 1;
-    
-    float4 rgba1 = rgbaInput[srcIdx1];
-    float4 rgba2 = (x + 1 < dimensions.x) ? rgbaInput[srcIdx2] : rgba1;
-    
-    // Clamp to 0-1 range
-    rgba1 = clamp(rgba1, 0.0f, 1.0f);
-    rgba2 = clamp(rgba2, 0.0f, 1.0f);
-    
-    // Convert to YUV using Rec.2020 coefficients for HDR
-    float y1 = 0.2627f * rgba1.r + 0.6780f * rgba1.g + 0.0593f * rgba1.b;
-    float y2 = 0.2627f * rgba2.r + 0.6780f * rgba2.g + 0.0593f * rgba2.b;
-    
-    // Average chroma for 4:2:2 subsampling
-    float3 avgRGB = (rgba1.rgb + rgba2.rgb) * 0.5f;
-    float u = -0.1396f * avgRGB.r - 0.3604f * avgRGB.g + 0.5f * avgRGB.b;
-    float v = 0.5f * avgRGB.r - 0.4598f * avgRGB.g - 0.0402f * avgRGB.b;
-    
-    // Convert to 16-bit limited range (ITU BT.2100)
-    // Y: 16-bit limited range [4096, 60160] for 10-bit equivalent [64, 940]
-    // UV: 16-bit limited range [4096, 61440] for 10-bit equivalent [64, 960]
-    uint16_t y1_16 = uint16_t(4096 + y1 * 56064); // (60160-4096)
-    uint16_t y2_16 = uint16_t(4096 + y2 * 56064);
-    uint16_t u_16 = uint16_t(32768 + u * 28672); // Center + range
-    uint16_t v_16 = uint16_t(32768 + v * 28672);
-    
-    // Store in P216 format (planar)
-    uint yIdx1 = y * dimensions.x + x;
-    uint yIdx2 = y * dimensions.x + x + 1;
-    uint uvIdx = (y * dimensions.x + x) / 2; // 4:2:2 subsampling
-    
-    yPlaneOutput[yIdx1] = y1_16;
-    if (x + 1 < dimensions.x) {
-        yPlaneOutput[yIdx2] = y2_16;
-    }
-    
-    // Store U and V interleaved for 4:2:2
-    uvPlaneOutput[uvIdx * 2] = u_16;     // U
-    uvPlaneOutput[uvIdx * 2 + 1] = v_16; // V
-}
-
 // ---------------------------------------------------------------------------
 // GPU-native fast path: fused box-downscale (divisor 1/2/4) + vertical flip +
 // color conversion, reading the float RGBA frame the host left on the device.
@@ -215,8 +146,8 @@ struct DownscaleParams {
 };
 
 // Shared packing tails of the fused kernels (downscale and STMap-warp
-// variants): two sampled pixels -> one UYVY macropixel / one P216 column
-// pair. Arithmetic matches the CPU converters exactly.
+// variants): two sampled pixels -> one UYVY macropixel. Arithmetic matches
+// the CPU converter exactly.
 static inline void emit_uyvy(device uchar4* dst, uint outWidth,
                              uint2 gid, float3 rgb1, float3 rgb2) {
     float y1 = 0.2126f * rgb1.r + 0.7152f * rgb1.g + 0.0722f * rgb1.b;
@@ -231,27 +162,6 @@ static inline void emit_uyvy(device uchar4* dst, uint outWidth,
         uchar((v + 0.5f) * 255.0f),
         uchar(y2 * 255.0f)
     );
-}
-
-static inline void emit_p216(device ushort* dst, uint outWidth, uint outHeight,
-                             uint2 gid, uint x0, float3 rgb1, float3 rgb2) {
-    float y1 = 0.2627f * rgb1.r + 0.6780f * rgb1.g + 0.0593f * rgb1.b;
-    float y2 = 0.2627f * rgb2.r + 0.6780f * rgb2.g + 0.0593f * rgb2.b;
-    float3 avg = (rgb1 + rgb2) * 0.5f;
-    float u = -0.1396f * avg.r - 0.3604f * avg.g + 0.5f * avg.b;
-    float v = 0.5f * avg.r - 0.4598f * avg.g - 0.0402f * avg.b;
-
-    device ushort* yPlane = dst;
-    device ushort* uvPlane = dst + outWidth * outHeight;
-
-    uint yIdx = gid.y * outWidth + x0;
-    yPlane[yIdx] = ushort(4096.0f + y1 * 56064.0f);
-    if (x0 + 1 < outWidth) {
-        yPlane[yIdx + 1] = ushort(4096.0f + y2 * 56064.0f);
-    }
-    uint uvIdx = yIdx / 2;
-    uvPlane[uvIdx * 2] = ushort(32768.0f + u * 28672.0f);
-    uvPlane[uvIdx * 2 + 1] = ushort(32768.0f + v * 28672.0f);
 }
 
 static inline float3 box_sample_rgb(device const float* src,
@@ -280,21 +190,6 @@ kernel void downscale_rgba_to_uyvy(device const float* src [[buffer(0)]],
     float3 rgb1 = box_sample_rgb(src, p, x0, gid.y);
     float3 rgb2 = (x0 + 1 < p.outWidth) ? box_sample_rgb(src, p, x0 + 1, gid.y) : rgb1;
     emit_uyvy(dst, p.outWidth, gid, rgb1, rgb2);
-}
-
-// One thread emits two output pixels of P216: planar Y at [0, outW*outH),
-// interleaved UV at [outW*outH, 2*outW*outH), 16-bit BT.2100 limited range,
-// Rec.2020 coefficients — same quantization as rgba_to_hdr_p216 above.
-kernel void downscale_rgba_to_p216(device const float* src [[buffer(0)]],
-                                   device ushort* dst [[buffer(1)]],
-                                   constant DownscaleParams& p [[buffer(2)]],
-                                   uint2 gid [[thread_position_in_grid]]) {
-    uint x0 = gid.x * 2;
-    if (x0 >= p.outWidth || gid.y >= p.outHeight) return;
-
-    float3 rgb1 = box_sample_rgb(src, p, x0, gid.y);
-    float3 rgb2 = (x0 + 1 < p.outWidth) ? box_sample_rgb(src, p, x0 + 1, gid.y) : rgb1;
-    emit_p216(dst, p.outWidth, p.outHeight, gid, x0, rgb1, rgb2);
 }
 
 // ---------------------------------------------------------------------------
@@ -379,19 +274,6 @@ kernel void warp_rgba_to_uyvy(device const float* src [[buffer(0)]],
     float3 rgb2 = (x0 + 1 < p.outWidth) ? warp_sample_rgb(src, mapUV, p, x0 + 1, gid.y) : rgb1;
     emit_uyvy(dst, p.outWidth, gid, rgb1, rgb2);
 }
-
-kernel void warp_rgba_to_p216(device const float* src [[buffer(0)]],
-                              device ushort* dst [[buffer(1)]],
-                              constant WarpParams& p [[buffer(2)]],
-                              device const float* mapUV [[buffer(3)]],
-                              uint2 gid [[thread_position_in_grid]]) {
-    uint x0 = gid.x * 2;
-    if (x0 >= p.outWidth || gid.y >= p.outHeight) return;
-
-    float3 rgb1 = warp_sample_rgb(src, mapUV, p, x0, gid.y);
-    float3 rgb2 = (x0 + 1 < p.outWidth) ? warp_sample_rgb(src, mapUV, p, x0 + 1, gid.y) : rgb1;
-    emit_p216(dst, p.outWidth, p.outHeight, gid, x0, rgb1, rgb2);
-}
 )";
 
 bool metal_gpu_is_available(void) {
@@ -432,9 +314,8 @@ MetalGPUContextRef metal_gpu_init(void) {
         
         // Create compute pipeline states
         id<MTLFunction> rgbaToUyvyFunction = [library newFunctionWithName:@"rgba_to_uyvy_kernel"];
-        id<MTLFunction> rgbaToHdrFunction = [library newFunctionWithName:@"rgba_to_hdr_p216"];
         
-        if (!rgbaToUyvyFunction || !rgbaToHdrFunction) {
+        if (!rgbaToUyvyFunction) {
             METAL_LOG("Failed to find Metal kernel functions\n");
             return nullptr;
         }
@@ -445,25 +326,17 @@ MetalGPUContextRef metal_gpu_init(void) {
             return nullptr;
         }
         
-        id<MTLComputePipelineState> rgbaToHdrPipeline = [device newComputePipelineStateWithFunction:rgbaToHdrFunction error:&error];
-        if (!rgbaToHdrPipeline) {
-            METAL_LOG("Failed to create RGBA to HDR pipeline: %s\n", [[error localizedDescription] UTF8String]);
-            return nullptr;
-        }
-        
         // Create context
         MetalGPUContext* context = new MetalGPUContext;
         context->device = device;
         context->commandQueue = commandQueue;
         context->rgbaToUyvyPipeline = rgbaToUyvyPipeline;
-        context->rgbaToHdrPipeline = rgbaToHdrPipeline;
         context->library = library;
         
         // Retain objects
         [device retain];
         [commandQueue retain];
         [rgbaToUyvyPipeline retain];
-        [rgbaToHdrPipeline retain];
         [library retain];
         
         METAL_LOG("Metal GPU acceleration initialized successfully\n");
@@ -515,9 +388,7 @@ void metal_gpu_shutdown(MetalGPUContextRef context) {
 
         for (auto& entry : context->fastPathByDevice) {
             [entry.second.uyvyPipeline release];
-            [entry.second.p216Pipeline release];
             if (entry.second.warpUyvyPipeline) [entry.second.warpUyvyPipeline release];
-            if (entry.second.warpP216Pipeline) [entry.second.warpP216Pipeline release];
             if (entry.second.staging) [entry.second.staging release];
         }
         context->fastPathByDevice.clear();
@@ -525,7 +396,6 @@ void metal_gpu_shutdown(MetalGPUContextRef context) {
         [context->device release];
         [context->commandQueue release];
         [context->rgbaToUyvyPipeline release];
-        [context->rgbaToHdrPipeline release];
         [context->library release];
 
         delete context;
@@ -552,46 +422,30 @@ static MetalFastPathState* fastPathForDevice(MetalGPUContextRef context, id<MTLD
     }
 
     id<MTLFunction> uyvyFunction = [library newFunctionWithName:@"downscale_rgba_to_uyvy"];
-    id<MTLFunction> p216Function = [library newFunctionWithName:@"downscale_rgba_to_p216"];
     id<MTLFunction> warpUyvyFunction = [library newFunctionWithName:@"warp_rgba_to_uyvy"];
-    id<MTLFunction> warpP216Function = [library newFunctionWithName:@"warp_rgba_to_p216"];
     MetalFastPathState state = {};
-    if (uyvyFunction && p216Function) {
+    if (uyvyFunction) {
         state.uyvyPipeline = [device newComputePipelineStateWithFunction:uyvyFunction error:&error];
-        if (state.uyvyPipeline) {
-            state.p216Pipeline = [device newComputePipelineStateWithFunction:p216Function error:&error];
-        }
     }
-    // Warp pipelines fail independently: without them warp submits refuse
+    // The warp pipeline fails independently: without it warp submits refuse
     // (callers fall back to the CPU warp) while the plain downscale keeps
     // streaming.
-    if (state.p216Pipeline && warpUyvyFunction && warpP216Function) {
+    if (state.uyvyPipeline && warpUyvyFunction) {
         NSError* warpError = nil;
         state.warpUyvyPipeline = [device newComputePipelineStateWithFunction:warpUyvyFunction error:&warpError];
-        if (state.warpUyvyPipeline) {
-            state.warpP216Pipeline = [device newComputePipelineStateWithFunction:warpP216Function error:&warpError];
-        }
-        if (!state.warpUyvyPipeline || !state.warpP216Pipeline) {
-            METAL_LOG("Fast path: failed to create STMap warp pipelines: %{public}s",
+        if (!state.warpUyvyPipeline) {
+            METAL_LOG("Fast path: failed to create STMap warp pipeline: %{public}s",
                       warpError ? [[warpError localizedDescription] UTF8String] : "unknown");
-            if (state.warpUyvyPipeline) [state.warpUyvyPipeline release];
-            state.warpUyvyPipeline = nil;
-            state.warpP216Pipeline = nil;
         }
     }
     if (uyvyFunction) [uyvyFunction release];
-    if (p216Function) [p216Function release];
     if (warpUyvyFunction) [warpUyvyFunction release];
-    if (warpP216Function) [warpP216Function release];
     [library release];
 
-    if (!state.uyvyPipeline || !state.p216Pipeline) {
+    if (!state.uyvyPipeline) {
         METAL_LOG("Fast path: failed to create pipelines: %{public}s",
                   error ? [[error localizedDescription] UTF8String] : "missing kernel function");
-        if (state.uyvyPipeline) [state.uyvyPipeline release];
-        if (state.p216Pipeline) [state.p216Pipeline release];
         if (state.warpUyvyPipeline) [state.warpUyvyPipeline release];
-        if (state.warpP216Pipeline) [state.warpP216Pipeline release];
         return nullptr;
     }
 
@@ -601,12 +455,9 @@ static MetalFastPathState* fastPathForDevice(MetalGPUContextRef context, id<MTLD
 
 // Pipeline for one conversion: the plain fused downscale, or the STMap warp
 // variant when a map is bound. nil = this combination can't run on the device.
-static id<MTLComputePipelineState> convertPipeline(MetalFastPathState* fastPath, bool warp, bool p216)
+static id<MTLComputePipelineState> convertPipeline(MetalFastPathState* fastPath, bool warp)
 {
-    if (warp) {
-        return p216 ? fastPath->warpP216Pipeline : fastPath->warpUyvyPipeline;
-    }
-    return p216 ? fastPath->p216Pipeline : fastPath->uyvyPipeline;
+    return warp ? fastPath->warpUyvyPipeline : fastPath->uyvyPipeline;
 }
 
 // Bind the geometry params (and for warp the map buffer) for either kernel
@@ -671,7 +522,7 @@ static bool runConvertKernel(MetalGPUContextRef context, void* commandQueue, voi
                                void* mapMetalBuffer, int mapWidth, int mapHeight,
                                int divisor,
                                int outWidth, int outHeight,
-                               bool p216, void* cpuOut, size_t outBytes, const char* label)
+                               void* cpuOut, size_t outBytes, const char* label)
 {
     if (!context || !srcMetalBuffer || !cpuOut) return false;
     // Odd widths can't pack 4:2:2 rows cleanly — refuse so the caller falls
@@ -706,7 +557,7 @@ static bool runConvertKernel(MetalGPUContextRef context, void* commandQueue, voi
 
         MetalFastPathState* fastPath = fastPathForDevice(context, device);
         if (!fastPath) return false;
-        id<MTLComputePipelineState> pipeline = convertPipeline(fastPath, warp, p216);
+        id<MTLComputePipelineState> pipeline = convertPipeline(fastPath, warp);
         if (!pipeline) return false;
 
         id<MTLBuffer> staging = ensureStagingBuffer(fastPath, device, outBytes);
@@ -763,21 +614,7 @@ bool metal_gpu_buffer_downscale_to_uyvy(MetalGPUContextRef context,
     const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2;
     return runConvertKernel(context, commandQueue, srcMetalBuffer,
                               srcWidth, srcHeight, srcRowFloats, nullptr, 0, 0, divisor,
-                              outWidth, outHeight, false, uyvyOut, outBytes, "UYVY");
-}
-
-bool metal_gpu_buffer_downscale_to_p216(MetalGPUContextRef context,
-                                        void* commandQueue,
-                                        void* srcMetalBuffer,
-                                        int srcWidth, int srcHeight, int srcRowFloats,
-                                        int divisor,
-                                        int outWidth, int outHeight,
-                                        unsigned short* p216Out)
-{
-    const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2 * sizeof(unsigned short);
-    return runConvertKernel(context, commandQueue, srcMetalBuffer,
-                              srcWidth, srcHeight, srcRowFloats, nullptr, 0, 0, divisor,
-                              outWidth, outHeight, true, p216Out, outBytes, "P216");
+                              outWidth, outHeight, uyvyOut, outBytes, "UYVY");
 }
 
 bool metal_gpu_buffer_warp_to_uyvy(MetalGPUContextRef context,
@@ -794,24 +631,7 @@ bool metal_gpu_buffer_warp_to_uyvy(MetalGPUContextRef context,
     return runConvertKernel(context, commandQueue, srcMetalBuffer,
                               srcWidth, srcHeight, srcRowFloats,
                               mapMetalBuffer, mapWidth, mapHeight, divisor,
-                              outWidth, outHeight, false, uyvyOut, outBytes, "warp UYVY");
-}
-
-bool metal_gpu_buffer_warp_to_p216(MetalGPUContextRef context,
-                                   void* commandQueue,
-                                   void* srcMetalBuffer,
-                                   int srcWidth, int srcHeight, int srcRowFloats,
-                                   void* mapMetalBuffer, int mapWidth, int mapHeight,
-                                   int divisor,
-                                   int outWidth, int outHeight,
-                                   unsigned short* p216Out)
-{
-    if (!mapMetalBuffer) return false;
-    const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2 * sizeof(unsigned short);
-    return runConvertKernel(context, commandQueue, srcMetalBuffer,
-                              srcWidth, srcHeight, srcRowFloats,
-                              mapMetalBuffer, mapWidth, mapHeight, divisor,
-                              outWidth, outHeight, true, p216Out, outBytes, "warp P216");
+                              outWidth, outHeight, uyvyOut, outBytes, "warp UYVY");
 }
 
 // Non-blocking variant (issue #5, v1.6.0): encode + commit only. See the
@@ -827,7 +647,6 @@ static metal_submit_status submitConvertInternal(MetalGPUContextRef context,
                                                  void* mapMetalBuffer, int mapWidth, int mapHeight,
                                                  int divisor,
                                                  int outWidth, int outHeight,
-                                                 bool p216,
                                                  metal_downscale_done_fn done, void* user)
 {
     if (!context || !srcMetalBuffer || !done) return METAL_SUBMIT_INVALID;
@@ -840,8 +659,7 @@ static metal_submit_status submitConvertInternal(MetalGPUContextRef context,
     if (warp && !validWarpMap(mapBuffer, mapWidth, mapHeight)) {
         return METAL_SUBMIT_INVALID;
     }
-    const size_t outBytes = static_cast<size_t>(outWidth) * outHeight * 2 *
-                            (p216 ? sizeof(unsigned short) : 1);
+    const size_t outBytes = static_cast<size_t>(outWidth) * outHeight * 2;
 
     @autoreleasepool {
         id<MTLCommandQueue> queue = commandQueue
@@ -859,7 +677,7 @@ static metal_submit_status submitConvertInternal(MetalGPUContextRef context,
 
         MetalFastPathState* fastPath = fastPathForDevice(context, device);
         if (!fastPath) return METAL_SUBMIT_INVALID;
-        id<MTLComputePipelineState> pipeline = convertPipeline(fastPath, warp, p216);
+        id<MTLComputePipelineState> pipeline = convertPipeline(fastPath, warp);
         if (!pipeline) return METAL_SUBMIT_INVALID;
 
         // Claim a free slot; none free = GPU behind or consumer backlogged —
@@ -928,13 +746,12 @@ metal_submit_status metal_gpu_downscale_submit(MetalGPUContextRef context,
                                                int srcWidth, int srcHeight, int srcRowFloats,
                                                int divisor,
                                                int outWidth, int outHeight,
-                                               bool p216,
                                                metal_downscale_done_fn done, void* user)
 {
     return submitConvertInternal(context, commandQueue, srcMetalBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  nullptr, 0, 0, divisor,
-                                 outWidth, outHeight, p216, done, user);
+                                 outWidth, outHeight, done, user);
 }
 
 metal_submit_status metal_gpu_warp_submit(MetalGPUContextRef context,
@@ -944,14 +761,13 @@ metal_submit_status metal_gpu_warp_submit(MetalGPUContextRef context,
                                           void* mapMetalBuffer, int mapWidth, int mapHeight,
                                           int divisor,
                                           int outWidth, int outHeight,
-                                          bool p216,
                                           metal_downscale_done_fn done, void* user)
 {
     if (!mapMetalBuffer) return METAL_SUBMIT_INVALID;
     return submitConvertInternal(context, commandQueue, srcMetalBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  mapMetalBuffer, mapWidth, mapHeight, divisor,
-                                 outWidth, outHeight, p216, done, user);
+                                 outWidth, outHeight, done, user);
 }
 
 void metal_gpu_downscale_release(MetalGPUContextRef context, void* slot)
@@ -1176,109 +992,6 @@ bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context,
         [rgbaBuffer release];
         [uyvyBuffer release];
         [dimensionsBuffer release];
-        
-        return true;
-    }
-}
-
-bool metal_gpu_convert_rgba_to_hdr(MetalGPUContextRef context, const float* rgbaInput, uint16_t* hdrOutput, int width, int height, float scale) {
-    auto startTime = std::chrono::high_resolution_clock::now();
-    
-    METAL_LOG("🚀 Starting Metal HDR P216 conversion (%dx%d)", width, height);
-    
-    MetalGPUContext* ctx = static_cast<MetalGPUContext*>(context);
-    if (!ctx || !ctx->device || !ctx->rgbaToHdrPipeline) {
-        METAL_LOG("❌ Invalid Metal context for HDR conversion");
-        return false;
-    }
-    
-    @autoreleasepool {
-        // Calculate buffer sizes for P216 format
-        size_t inputSize = width * height * 4 * sizeof(float);
-        size_t yPlaneSize = width * height * sizeof(uint16_t);
-        size_t uvPlaneSize = width * height * sizeof(uint16_t); // U and V interleaved, 4:2:2 subsampling
-        
-        // Create input buffer
-        id<MTLBuffer> inputBuffer = [ctx->device newBufferWithBytes:rgbaInput 
-                                                             length:inputSize 
-                                                            options:MTLResourceStorageModeShared];
-        if (!inputBuffer) {
-            METAL_LOG("❌ Failed to create input buffer");
-            return false;
-        }
-        
-        // Create output buffers for Y and UV planes
-        id<MTLBuffer> yPlaneBuffer = [ctx->device newBufferWithLength:yPlaneSize 
-                                                              options:MTLResourceStorageModeShared];
-        id<MTLBuffer> uvPlaneBuffer = [ctx->device newBufferWithLength:uvPlaneSize 
-                                                               options:MTLResourceStorageModeShared];
-        
-        if (!yPlaneBuffer || !uvPlaneBuffer) {
-            METAL_LOG("❌ Failed to create output buffers");
-            return false;
-        }
-        
-        // Create parameter buffers
-        simd_uint2 dimensions = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-        id<MTLBuffer> dimensionsBuffer = [ctx->device newBufferWithBytes:&dimensions 
-                                                                  length:sizeof(dimensions) 
-                                                                 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> scaleBuffer = [ctx->device newBufferWithBytes:&scale 
-                                                             length:sizeof(scale) 
-                                                            options:MTLResourceStorageModeShared];
-        
-        // Create command buffer and encoder
-        id<MTLCommandBuffer> commandBuffer = [ctx->commandQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-        
-        // Set pipeline state and buffers
-        [encoder setComputePipelineState:ctx->rgbaToHdrPipeline];
-        [encoder setBuffer:inputBuffer offset:0 atIndex:0];
-        [encoder setBuffer:yPlaneBuffer offset:0 atIndex:1];
-        [encoder setBuffer:uvPlaneBuffer offset:0 atIndex:2];
-        [encoder setBuffer:dimensionsBuffer offset:0 atIndex:3];
-        [encoder setBuffer:scaleBuffer offset:0 atIndex:4];
-        
-        // Calculate thread groups for 4:2:2 processing (process width/2 pixels horizontally)
-        MTLSize threadsPerThreadgroup = MTLSizeMake(16, 16, 1);
-        MTLSize threadgroupsPerGrid = MTLSizeMake(
-            (width / 2 + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
-            (height + threadsPerThreadgroup.height - 1) / threadsPerThreadgroup.height,
-            1
-        );
-        
-        METAL_LOG("Dispatching thread groups: %lux%lu, threads per group: %lux%lu", 
-                 threadgroupsPerGrid.width, threadgroupsPerGrid.height,
-                 threadsPerThreadgroup.width, threadsPerThreadgroup.height);
-        
-        [encoder dispatchThreadgroups:threadgroupsPerGrid threadsPerThreadgroup:threadsPerThreadgroup];
-        [encoder endEncoding];
-        
-        // Commit and wait
-        [commandBuffer commit];
-        [commandBuffer waitUntilCompleted];
-        
-        if (commandBuffer.error) {
-            METAL_LOG("❌ Metal command execution failed: %s", commandBuffer.error.localizedDescription.UTF8String);
-            return false;
-        }
-        
-        // Copy results back to output buffer
-        // P216 format: Y plane followed by interleaved UV plane
-        uint16_t* yPlaneData = static_cast<uint16_t*>([yPlaneBuffer contents]);
-        uint16_t* uvPlaneData = static_cast<uint16_t*>([uvPlaneBuffer contents]);
-        
-        // Copy Y plane
-        memcpy(hdrOutput, yPlaneData, yPlaneSize);
-        
-        // Copy UV plane (starts after Y plane)
-        memcpy(hdrOutput + (width * height), uvPlaneData, uvPlaneSize);
-        
-        auto endTime = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
-        
-        METAL_LOG("✅ Metal HDR P216 conversion completed in %lld μs (%.2f ms)", 
-                 duration.count(), duration.count() / 1000.0);
         
         return true;
     }

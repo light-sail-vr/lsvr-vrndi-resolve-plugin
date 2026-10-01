@@ -5,6 +5,11 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+- **HDR output.** The plugin is built on the Standard NDI SDK, so it now streams SDR only: 8-bit UYVY, Rec.709. The **HDR Settings** group (Enable HDR, Color Space, Transfer Function, Max CLL/FALL) is gone, along with the P216 16-bit wire format, its Metal and CUDA kernels, and the `ndi_color_info` metadata. Projects saved with HDR enabled now load and stream SDR.
+
 ## [1.14.2] - 2026-10-01
 
 ### Changed
