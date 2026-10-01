@@ -428,6 +428,19 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** `./scripts/increment_version.sh` on macOS bumped 1.14.1 → 1.14.2 and updated `VERSION`, the `#define`s and `Info.plist`.
 **Rule:** after a mechanical search-and-replace that introduces a wrapper, check the wrapper's own body, and run the script once on each platform it claims to support.
 
+### 2026-10-01 — Edit-page stereo playback streamed nothing (scrubbing worked)
+**Symptom:** on a stereo timeline, Edit-page playback froze the NDI stream; scrubbing and Color-page playback paired fine. Present in v1.14.2 too — found while testing v1.15.0.
+**Root cause:** during Edit-page playback Resolve renders the right eye a steady ~18 frames (~750 ms) ahead of the left (probe: `eye=L time=2943` next to `eye=R time=2961`). The pairer's 8-frame pending cap evicted each held right-eye frame (oldest first) just before its left mate arrived, so no pair ever completed — the "Stereo pairer dropped N unmated frame(s)" counter climbed by 48/s.
+**Fix:** `kMaxPending` 8 → 48 plus a 1 GiB `kMaxPendingBytes` budget (whichever binds first; 8K-per-eye holds stay ~8 deep). Regression test `skew:` in `tests/test_stereo_pair.cpp`.
+**Validated by:** the skew test (0 → 222/222 pairs); Tier 1–2 pending on the Edit page.
+**Rule:** eye skew is page-dependent — when stereo freezes, read the probe `time=` values per eye before suspecting the send path; a climbing unmated-drop counter with zero `pack>0` wtimer lines means the window is shorter than the skew.
+
+### 2026-10-01 — Half timeline resolution zooms the left eye 2× during stereo playback (Resolve-side)
+**Symptom:** with the timeline resolution at half, Color-page stereo playback showed the left eye "changing size"; Resolve's own viewer jumped too. Scrubbing was fine. Same on v1.14.2.
+**Root cause:** during playback Resolve renders the left (viewer) eye at full resolution into the half-resolution buffer, so the plugin receives that eye's top-left quarter at 2× — the rest of the image never reaches the plugin. Proven from the NDI stream itself: a throwaway receiver (`NDIlib_recv` → PPM) grabbed 9 frames; the left half correlated 0.98–0.99 with the right half's top-left quarter upscaled 2×, versus ≈0 for identical framing. The plugin's source and output bounds matched on every render (2048², equal strides), so it passes the crop through untouched.
+**Fix:** none in the plugin (the data is already lost). Documented as a known issue in the 1.15.0 notes; workaround is full timeline resolution plus the plugin's **Resolution: Half**. Not yet confirmed with the NDI node disabled (would rule out the plugin's OFX declarations steering Resolve into that path).
+**Rule:** for "image looks wrong" reports, grab the actual NDI frames and compare the eyes numerically before touching conversion code — logs prove geometry, never pixels.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
