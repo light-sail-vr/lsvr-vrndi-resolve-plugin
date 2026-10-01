@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-OpenFX plugin for DaVinci Resolve that streams the rendered frame to NDI (SDR + HDR, Metal-accelerated on macOS; Windows/CUDA port in the same tree since 2026-09-01, CMake + VS2022 + CUDA 12.9, not yet publicly released — see below).
+OpenFX plugin for DaVinci Resolve that streams the rendered frame to NDI (Standard NDI SDK, Metal-accelerated on macOS; Windows/CUDA port in the same tree since 2026-09-01, CMake + VS2022 + CUDA 12.9, not yet publicly released — see below).
 
 ## Workflow rules
 
