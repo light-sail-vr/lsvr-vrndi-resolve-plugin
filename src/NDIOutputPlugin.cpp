@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /*
-  NDI Advanced Output Plugin for OpenFX with GPU Acceleration
-  Sends video frames to NDI (Network Device Interface) for streaming over network with HDR support.
+  NDI Output Plugin for OpenFX with GPU Acceleration
+  Sends video frames to NDI (Network Device Interface) for streaming over network.
+  Built on the Standard (royalty-free) NDI SDK - never the Advanced SDK.
   
   Based on modern OFX examples using the C API directly.
-  Includes HDR support with PQ/HLG transfer functions and Rec.2020/P3 color spaces.
   Enhanced with GPU acceleration for optimal performance.
 */
 
@@ -106,7 +106,7 @@ static void ndiWinLog(const char* fmt, ...);
 #define native_open_file_dialog win_open_file_dialog
 #endif
 
-// NDI Advanced SDK
+// NDI SDK (Standard)
 #include <Processing.NDI.Lib.h>
 
 #if defined __APPLE__ || defined __linux__ || defined __FreeBSD__
@@ -159,14 +159,14 @@ static void ndiWinLog(const char* fmt, ...)
 #define kPluginName "NDIOutput"
 #define kPluginGrouping "LSVR"
 #define kPluginDescription \
-"NDI Advanced Output v" kPluginVersionString " (GPU-Accelerated): GPU-accelerated NDI streaming with HDR support. \n" \
-"Configure the NDI source name, HDR settings, GPU acceleration, and enable/disable the output stream. \n" \
-"Version: " kPluginVersionString " - GPU-Accelerated NDI Advanced"
+"NDI Output v" kPluginVersionString " (GPU-Accelerated): GPU-accelerated NDI streaming. \n" \
+"Configure the NDI source name, GPU acceleration, and enable/disable the output stream. \n" \
+"Version: " kPluginVersionString " - GPU-Accelerated NDI"
 #define kPluginIdentifier "LSVR.NDIOutput"
 #define kPluginVersionMajor 1
 #define kPluginVersionMinor 14
-#define kPluginVersionPatch 1
-#define kPluginVersionString "1.14.1"
+#define kPluginVersionPatch 2
+#define kPluginVersionString "1.14.2"
 
 // Parameter names
 #define kParamSourceName "sourceName"
@@ -925,7 +925,7 @@ static bool ensureNDIRuntimeLoaded()
 {
     static const bool loaded = []() {
         const ndi_loader::PreloadResult r =
-            ndi_loader::preloadNDIRuntime(L"Processing.NDI.Lib.Advanced.x64.dll");
+            ndi_loader::preloadNDIRuntime(L"Processing.NDI.Lib.x64.dll");
         if (r.loaded && r.fromBundle) {
             NDI_LOG("NDI runtime loaded from the bundle: %ls", r.bundlePath.c_str());
         } else if (r.loaded) {
@@ -1737,7 +1737,7 @@ static bool initializeNDI(NDIInstanceData* data)
         return true;
     }
 
-    NDI_LOG("Initializing NDI Advanced SDK...");
+    NDI_LOG("Initializing NDI SDK...");
 
     if (!ensureNDILibInitialized()) {
         return false;
@@ -3274,7 +3274,7 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     gPropHost->propSetString(versionLabelProps, kOfxPropLabel, 0, kParamVersionLabelLabel);
     gPropHost->propSetString(versionLabelProps, kOfxParamPropScriptName, 0, kParamVersionLabel);
     gPropHost->propSetString(versionLabelProps, kOfxParamPropHint, 0, kParamVersionLabelHint);
-    gPropHost->propSetString(versionLabelProps, kOfxParamPropDefault, 0, "v" kPluginVersionString " (GPU-Accelerated NDI Advanced)");
+    gPropHost->propSetString(versionLabelProps, kOfxParamPropDefault, 0, "v" kPluginVersionString " (GPU-Accelerated NDI)");
     gPropHost->propSetInt(versionLabelProps, kOfxParamPropAnimates, 0, 0);
     gPropHost->propSetString(versionLabelProps, kOfxParamPropParent, 0, "infoGroup");
 

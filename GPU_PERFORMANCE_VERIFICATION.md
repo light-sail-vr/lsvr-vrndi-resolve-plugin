@@ -81,7 +81,7 @@ export MTL_HUD_ENABLED=1
 ### 5. Plugin Interface Verification
 
 Look for the **"Plugin Version"** field in the NDI Output plugin interface:
-- Should show: `v1.1.9 (GPU-Accelerated NDI Advanced)`
+- Should show: `v1.1.9 (GPU-Accelerated NDI)`
 - Confirms you have the GPU-enabled version
 
 ### 6. Performance Test Scenarios
@@ -170,7 +170,7 @@ sudo powermetrics -n 1 -i 1000 --samplers gpu_power
 
 ## 🎯 Quick Verification Checklist
 
-- [ ] Plugin version shows "GPU-Accelerated NDI Advanced"
+- [ ] Plugin version shows "GPU-Accelerated NDI"
 - [ ] Console logs show "Metal GPU acceleration initialized successfully"
 - [ ] Conversion logs show "✅ Metal GPU acceleration SUCCESS!"
 - [ ] Timing shows <5ms for 1080p conversion

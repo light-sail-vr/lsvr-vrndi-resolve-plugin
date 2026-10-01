@@ -2,7 +2,7 @@
 ==============================
 
 An OpenFX plugin that streams the frame DaVinci Resolve renders as an NDI®
-source on your local network — SDR and HDR, GPU-accelerated on NVIDIA hardware.
+source on your local network — GPU-accelerated on NVIDIA hardware.
 
 Installs to:
   C:\Program Files\Common Files\OFX\Plugins\NDIOutput.ofx.bundle
@@ -53,7 +53,7 @@ Attribution and licensing
 -------------------------
 NDI® is a registered trademark of Vizrt NDI AB — https://ndi.video/
 
-This product uses the NDI Advanced SDK. The SDK's third-party license notices
+This product uses the NDI SDK. The SDK's third-party license notices
 are installed beside the plugin binary as
 Contents\Win64\Processing.NDI.Lib.Licenses.txt.
 

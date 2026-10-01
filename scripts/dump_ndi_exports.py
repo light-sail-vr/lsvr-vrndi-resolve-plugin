@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Dump the export names of a 64-bit Windows DLL, one per line, sorted.
 
-Used to (re)generate third_party/ndi/Processing.NDI.Lib.Advanced.x64.def:
-the export list feeds a stub import library so CI can link the plugin
-without the access-gated NDI Advanced SDK (see CMakeLists.txt).
+Used to (re)generate third_party/ndi/Processing.NDI.Lib.x64.def from the
+Standard NDI SDK's Processing.NDI.Lib.x64.dll: the export list feeds a stub
+import library so CI can link the plugin without the SDK (see CMakeLists.txt).
 
 Usage: python scripts/dump_ndi_exports.py <path-to-dll>
 """
