@@ -1,11 +1,12 @@
 # CLAUDE.md
 
-OpenFX plugin for DaVinci Resolve that streams the rendered frame to NDI (Standard NDI SDK, Metal-accelerated on macOS; Windows/CUDA port in the same tree since 2026-09-01, CMake + VS2022 + CUDA 12.9, not yet publicly released — see below).
+OpenFX plugin for DaVinci Resolve that streams the rendered frame to NDI (Standard NDI SDK, Metal-accelerated on macOS; Windows/CUDA port in the same tree since 2026-09-01, CMake + VS2022 + CUDA 12.9, first released in v1.14.1 — see below).
 
 ## Workflow rules
 
 - **Never commit to `master`.** Day-to-day base branch is `dev`.
-- **Branching/release flow (Matt, 2026-08-30):** every new feature gets its own `feature/<name>` branch off `dev` and merges into `dev` by PR once the testing loop passes. Releases happen only when Matt explicitly instructs: open a release PR merging `dev` → `master` (it must already carry the version bump and a `CHANGELOG.md` `## [X.Y.Z]` section — the publish script reads its release notes from there); after the merge, run `./scripts/package_release.sh` then `./scripts/publish_github_release.sh --publish` from `master` so the GitHub release updates automatically.
+- **Branching:** every new feature gets its own `feature/<name>` branch off `dev` and merges into `dev` by PR once the testing loop passes (Matt, 2026-08-30).
+- **Releases and merges into `master`:** follow [docs/RELEASING.md](docs/RELEASING.md) — whenever Matt asks to strike a release or anything merges into `master`. It covers the Mac/Windows hand-off prompts and the human gates; a release starts only on Matt's explicit instruction.
 - **Testing loop:** LEARNINGS.md §2. Tier 0 (`make dev`) on every change; Tiers 1–2 (install → restart Resolve → verify stream in NDI Video Monitor) before calling anything working. Playback must be started by a human — the Resolve API has no transport control.
 - **After fixing any bug or discovering a workflow gotcha, append an entry to LEARNINGS.md** (template at the bottom of that file). This is a standing instruction from Matt.
 - **Build/install questions:** BUILD.md is the single source of truth; update it in the same PR as any build change.

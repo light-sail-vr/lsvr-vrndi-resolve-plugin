@@ -118,7 +118,7 @@ Flags: `--skip-notarize` (local testing), `--skip-tests`, `--host-arch-only`, `-
 
 A release build differs from the dev build (universal, deployment target, bundled dylib), so run the Tiers 1–2 loop with the **pkg-installed** plugin before publishing.
 
-**Windows artifacts join the same release** (one `VERSION`, one `CHANGELOG.md`, one release event): build them on a Windows machine with `scripts/package_windows_release.ps1` (Windows section below), copy the three files into this machine's `dist/v<VERSION>/`, and `publish_github_release.sh` attaches them next to the pkg and grows a Windows install section in the notes. It is all-or-nothing — two of three files present is an error, and any `-STUB` artifact aborts the publish. With none present it releases macOS-only and says so.
+**Windows artifacts join the same release** (one `VERSION`, one `CHANGELOG.md`, one release event). The release order, hand-offs and human gates are in [docs/RELEASING.md](docs/RELEASING.md): the Mac publishes first, then the workstation uploads its files built with `scripts/package_windows_release.ps1` (Windows section below). Alternatively, if the three files are copied into this machine's `dist/v<VERSION>/` before publishing, `publish_github_release.sh` attaches them next to the pkg and grows a Windows install section in the notes. It is all-or-nothing — two of three files present is an error, and any `-STUB` artifact aborts the publish. With none present it releases macOS-only and says so.
 
 ---
 
