@@ -164,9 +164,9 @@ static void ndiWinLog(const char* fmt, ...)
 "Version: " kPluginVersionString " - GPU-Accelerated NDI"
 #define kPluginIdentifier "LSVR.NDIOutput"
 #define kPluginVersionMajor 1
-#define kPluginVersionMinor 15
+#define kPluginVersionMinor 16
 #define kPluginVersionPatch 0
-#define kPluginVersionString "1.15.0"
+#define kPluginVersionString "1.16.0"
 
 // Parameter names
 #define kParamSourceName "sourceName"
