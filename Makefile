@@ -43,11 +43,21 @@ BUNDLE_NAME = NDIOutput.ofx.bundle
 BUNDLE_EXECUTABLE = $(BUNDLE_NAME)/Contents/MacOS/NDIOutput.ofx
 
 # Build targets
-.PHONY: all clean dev install test test-metal
+.PHONY: all clean dev install test test-metal ndi-verify
 
 all: $(BUNDLE_EXECUTABLE)
 
 dev: $(BUNDLE_EXECUTABLE)
+
+# Reference NDI receiver for the signal-flow checks (BUILD.md "Receiving the
+# stream"): reports a source's on-wire geometry, cadence and content, with
+# --expect assertions. Needs the NDI SDK; no Resolve. Builds only.
+ndi-verify:
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -I$(NDI_INCLUDE) tools/ndi_verify.cpp \
+		-o build/ndi_verify -headerpad_max_install_names $(NDI_LIB)
+	install_name_tool -change "@rpath/libndi.dylib" $(NDI_LIB) build/ndi_verify
+	@echo "built build/ndi_verify — run ./build/ndi_verify --help"
 
 # Host-independent unit tests (no Resolve or NDI SDK needed)
 test:

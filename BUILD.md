@@ -263,6 +263,8 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 - **NDI Video Monitor** (installed at `/Applications/NDI Video Monitor.app`) — quickest visual check on macOS
 - **OBS Studio** with the NDI plugin
 - NDI SDK example receivers in `/Library/NDI SDK for Apple/examples/C++/` (e.g. `NDIlib_Recv`) — useful for programmatic validation
+- **`ndi_verify`** (this repo, macOS): `make ndi-verify` builds `build/ndi_verify` against the NDI SDK for Apple. It connects to one source and prints its on-wire geometry (resolution, FourCC, declared fps, aspect), the measured frame rate and gaps, the SDK's dropped-frame counters, a black-frame check, and optionally dumps the last frame (`--dump frame.ppm`, converted to PNG via `sips`). `--expect 7200x3600 --expect-fps 30 --expect-fourcc UYVY` make it an assertion with a nonzero exit on mismatch. `--bandwidth lowest` shows NDI's preview stream (640 px long side) and `--color best` the P216 decode a receiver such as VR.NDI's native build requests. Run it on a second machine with `--iface en0` to estimate the stream's Mbit/s on that link. `./build/ndi_verify --list` shows what is discoverable.
+- **Resolution test chart**: `scripts/gen_resolution_chart.py --size 7200 --eye L` (and `--eye R`) writes labelled line-pair blocks, a zone plate and crosshairs as an 8-bit PNG, standard library only. Put the pair on a stereo timeline (or one `--eye mono` chart on a mono one), stream through the plugin, and the finest block that is still clean stripes names the per-eye resolution reaching the viewer; moiré in the zone plate means a resample after the plugin. Sender-side reference: with **Resolution: Half** the block labelled with half the chart width is the finest clean one.
 
 ## Troubleshooting
 
