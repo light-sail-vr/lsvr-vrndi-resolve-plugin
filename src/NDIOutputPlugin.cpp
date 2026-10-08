@@ -193,7 +193,7 @@ static void ndiWinLog(const char* fmt, ...)
 
 #define kParamStereoStatus "stereoStatus"
 #define kParamStereoStatusLabel "Stream Status"
-#define kParamStereoStatusHint "What the stream is currently carrying: Mono, a packed stereo pair, a labeled single-eye fallback when the partner eye stops rendering, or the sender-creation failure (e.g. the NDI name is already in use on this machine)."
+#define kParamStereoStatusHint "What the stream is currently carrying: Mono, a packed stereo pair, a labeled single-eye fallback when the partner eye stops rendering, or the sender-creation failure (e.g. the NDI name is already in use on this machine) — and the frame size actually being sent, per eye for a packed pair. That size is the frame Resolve feeds (or the map, in the Equirect modes) divided by Resolution; if it is what you expect, anything softer in a receiver is on the receiving side."
 
 // Projection Parameters (issue #7)
 #define kParamProjection "projectionMode"
@@ -861,6 +861,11 @@ struct SenderHub {
     // the SbS/TB param).
     bool hasPackedFrame = false;
     ndi_stereo::FrameMeta lastPackedMeta;
+    // Dimensions of the last frame handed to NDI (mono frame or packed
+    // canvas), for the Stream Status readout (v1.16.0): the one number a
+    // user needs to tell a sender problem from a receiver problem.
+    int lastSentWidth = 0;
+    int lastSentHeight = 0;
     std::string status;               // last stream-status string, for change detection
     unsigned long long lastLoggedDrops = 0;
     // A right-eye render has arrived at some point (any instance). Only the
@@ -1063,6 +1068,8 @@ static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
         NDIlib_send_send_video_v2(hub->sender, &frame);
         hub->asyncInFlight = false;
     }
+    hub->lastSentWidth = meta.width;
+    hub->lastSentHeight = meta.height;
 }
 
 // Caller holds hub->mutex. Human-readable stream status for the UI param.
@@ -1106,6 +1113,24 @@ static std::string hubComposeStatusLocked(SenderHub* hub, NDIInstanceData* data)
             break;
         default:
             break;
+    }
+    // The on-wire size (v1.16.0). For a packed canvas also say what each eye
+    // gets, since that is what a headset receiver draws per eye. Read in the
+    // field as: Resolution divides the frame Resolve feeds (or the map, in
+    // the Equirect modes); if this number is right, the sender is right.
+    if (hub->lastSentWidth > 0 && hub->lastSentHeight > 0) {
+        char wire[96];
+        const bool packed = (data->stereoPacking != kStereoPackingMono) &&
+                            (hub->pairer.mode() != ndi_stereo::StreamMode::Mono);
+        if (packed) {
+            const int eyeW = (data->stereoPacking == 1) ? hub->lastSentWidth : hub->lastSentWidth / 2;
+            const int eyeH = (data->stereoPacking == 1) ? hub->lastSentHeight / 2 : hub->lastSentHeight;
+            snprintf(wire, sizeof(wire), ", sending %dx%d (%dx%d per eye)",
+                     hub->lastSentWidth, hub->lastSentHeight, eyeW, eyeH);
+        } else {
+            snprintf(wire, sizeof(wire), ", sending %dx%d", hub->lastSentWidth, hub->lastSentHeight);
+        }
+        status += wire;
     }
     return status;
 }
