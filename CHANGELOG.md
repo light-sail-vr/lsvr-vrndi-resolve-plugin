@@ -5,6 +5,17 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-10-08
+
+### Added
+- **Stream Status shows the frame size on the wire**, e.g. "Stereo (Side-by-Side), sending 7200x3600 (3600x3600 per eye)". It is the frame Resolve feeds (or the map, in the Equirect modes) divided by **Resolution**. If that number is what you expect, a soft picture is on the receiving side. Background: with Resolution: Half on a 7200×7200 stereo timeline the plugin sends 3600×3600 per eye, and reports of it looking like quarter resolution traced to the VR.NDI Quest app drawing every source into a fixed 1920-per-eye surface. **VR.NDI 4.2.0** (native Android) sizes its surface from the source; pair this release with it.
+- Developer tooling, not part of the installed plugin: `make ndi-verify` builds a reference receiver that reports a source's on-wire geometry, frame rate and drops, with `--expect` assertions, and `scripts/gen_resolution_chart.py` makes a labelled resolution test chart. See BUILD.md "Receiving the stream".
+
+### Notes
+- In the Equirect (STMap / Camera Metadata) modes the stream is the **map size** divided by Resolution, not the timeline divided by Resolution: Metadata Map Size 2048 with Half sends 1024 per eye. For a 180° headset view at full detail use 4096 with Half, or 2048 with Full.
+- The sender's downscale is unchanged from 1.15.0; this release adds the readout and the tooling only.
+- Windows: built from the same source. The Windows installer follows once its Tier 1–2 check passes, so it may lag the macOS artifacts.
+
 ## [1.15.0] - 2026-10-01
 
 ### Added
