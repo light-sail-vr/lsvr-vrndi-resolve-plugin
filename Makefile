@@ -66,6 +66,8 @@ test:
 	./build/test_render_probe
 	$(CXX) -Isrc tests/test_stream_resolution.cpp -o build/test_stream_resolution
 	./build/test_stream_resolution
+	$(CXX) -Isrc tests/test_uyvy_encode.cpp -o build/test_uyvy_encode
+	./build/test_uyvy_encode
 	$(CXX) -Isrc tests/test_stereo_pair.cpp -o build/test_stereo_pair
 	./build/test_stereo_pair
 	$(CXX) -Isrc tests/test_platform_paths.cpp -o build/test_platform_paths

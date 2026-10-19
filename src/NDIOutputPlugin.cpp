@@ -67,6 +67,7 @@ static void ndiWinLog(const char* fmt, ...);
 #include "STMap.h"
 #include "StereoPair.h"
 #include "StreamResolution.h"
+#include "UYVYEncode.h"
 #include "TimelineClipWatcher.h"  // self-gates (defines NDI_TIMELINE_WATCH on macOS + Windows)
 
 #include "BRAWImmersiveReader.h"  // self-gates (macOS + Windows, ticket #26)
@@ -1601,40 +1602,11 @@ static void convertRGBAToUYVY_CPU(NDIInstanceData* data, void* rgbaData, int wid
         data->uyvyFrameBuffer.resize(uyvySize);
     }
 
-    float* srcData = static_cast<float*>(rgbaData);
-    uint8_t* dstData = data->uyvyFrameBuffer.data();
+    // BT.709 limited range with the vertical flip (OFX bottom-up → NDI
+    // top-down) — the shared encoder the GPU kernels mirror (issue #57).
+    ndi_uyvy::convertRGBAToUYVYFlipped(static_cast<const float*>(rgbaData), width, height,
+                                       data->uyvyFrameBuffer.data());
 
-    // Convert RGBA float to UYVY (4:2:2 format) with vertical flip
-    for (int y = 0; y < height; ++y) {
-        int srcRow = height - 1 - y; // Flip vertically: OpenFX uses bottom-left origin, NDI expects top-left
-        for (int x = 0; x < width; x += 2) {
-            int srcIdx1 = (srcRow * width + x) * 4;
-            int srcIdx2 = (srcRow * width + x + 1) * 4;
-            int dstIdx = (y * width + x) * 2;
-
-            // Get RGB values for two pixels
-            float r1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 0]));
-            float g1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 1]));
-            float b1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 2]));
-
-            float r2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 0])) : r1;
-            float g2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 1])) : g1;
-            float b2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 2])) : b1;
-
-            // Convert to YUV using Rec.709 coefficients
-            float y1 = 0.2126f * r1 + 0.7152f * g1 + 0.0722f * b1;
-            float y2 = 0.2126f * r2 + 0.7152f * g2 + 0.0722f * b2;
-            float u = -0.1146f * ((r1 + r2) * 0.5f) - 0.3854f * ((g1 + g2) * 0.5f) + 0.5f * ((b1 + b2) * 0.5f);
-            float v = 0.5f * ((r1 + r2) * 0.5f) - 0.4542f * ((g1 + g2) * 0.5f) - 0.0458f * ((b1 + b2) * 0.5f);
-
-            // Scale to 8-bit and pack as UYVY
-            dstData[dstIdx + 0] = static_cast<uint8_t>((u + 0.5f) * 255.0f);  // U
-            dstData[dstIdx + 1] = static_cast<uint8_t>(y1 * 255.0f);          // Y1
-            dstData[dstIdx + 2] = static_cast<uint8_t>((v + 0.5f) * 255.0f);  // V
-            dstData[dstIdx + 3] = static_cast<uint8_t>(y2 * 255.0f);          // Y2
-        }
-    }
-    
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
     

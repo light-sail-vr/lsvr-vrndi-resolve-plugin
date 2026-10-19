@@ -27,3 +27,6 @@ x64/
 # Editors
 .vscode/
 .idea/
+
+# Python bytecode (scripts/gen_patch_chart.py imports gen_resolution_chart)
+__pycache__/

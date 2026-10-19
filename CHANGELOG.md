@@ -5,6 +5,14 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Stream levels: every UYVY stream now changes visibly** (#57). The encoder wrote full-range Y'CbCr (black at 0, white at 255), but NDI is a limited-range format, so NDI's decoder (and VR.NDI) crushed everything below about 6% to black, clipped everything above about 92% to white, added about 16% extra contrast and saturation, and tinted neutrals slightly green. The plugin now encodes BT.709 limited range (black 16, white 235, neutral chroma 128) on every path — CPU, Metal and CUDA. **Existing streams look lower in contrast than before: that is the fix.** Shadows and highlights that used to vanish are back, and greys are neutral. Measured through NDI's own decoder, every patch of the new test chart now lands within 1 code of the source (it was off by up to 20). Optimal Color Format off (RGBA) is unchanged; NDI converts that path itself.
+
+### Added
+- **Patch chart and readout for checking stream colour** (#57). `scripts/gen_patch_chart.py` writes a levels/primaries/grey-ramp chart, and `ndi_verify --patches` reads it back off the wire and fails when a patch is more than 2 codes off. See BUILD.md, "Receiving the stream".
+
 ## [1.15.0] - 2026-10-01
 
 ### Added

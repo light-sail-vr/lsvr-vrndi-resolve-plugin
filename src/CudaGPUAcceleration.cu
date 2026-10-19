@@ -164,25 +164,36 @@ __device__ __forceinline__ void cudaWarpSampleRGB(const float* src, const float*
     rgb[2] = cudaClamp01(sum2 * invCount);
 }
 
-// Shared packing tail: two sampled pixels -> one UYVY macropixel. Expression
-// tree matches the CPU converter exactly.
+// Limited-range quantization, mirroring ndi_uyvy::quantize
+// (src/UYVYEncode.h): scale*v + offset as one fma, clamped, rounded half-up.
+__device__ __forceinline__ unsigned char cudaQuantize(float v, float scale, float offset,
+                                                      float lo, float hi)
+{
+    const float q = fminf(fmaxf(fmaf(scale, v, offset), lo), hi);
+    return static_cast<unsigned char>(q + 0.5f);
+}
+
+// Shared packing tail: two sampled pixels -> one UYVY macropixel, BT.709
+// limited range (issue #57). Mirrors ndi_uyvy::encodeMacropixel operation
+// for operation with explicit fmaf — the one place this file contracts on
+// purpose, so the bytes match the CPU and Metal backends alike.
 __device__ __forceinline__ void cudaEmitUYVY(unsigned char* dst, unsigned outWidth,
                                              unsigned x0, unsigned oy,
                                              const float rgb1[3], const float rgb2[3])
 {
-    const float y1 = 0.2126f * rgb1[0] + 0.7152f * rgb1[1] + 0.0722f * rgb1[2];
-    const float y2 = 0.2126f * rgb2[0] + 0.7152f * rgb2[1] + 0.0722f * rgb2[2];
+    const float y1 = fmaf(0.2126f, rgb1[0], fmaf(0.7152f, rgb1[1], 0.0722f * rgb1[2]));
+    const float y2 = fmaf(0.2126f, rgb2[0], fmaf(0.7152f, rgb2[1], 0.0722f * rgb2[2]));
     const float avgR = (rgb1[0] + rgb2[0]) * 0.5f;
     const float avgG = (rgb1[1] + rgb2[1]) * 0.5f;
     const float avgB = (rgb1[2] + rgb2[2]) * 0.5f;
-    const float u = -0.1146f * avgR - 0.3854f * avgG + 0.5f * avgB;
-    const float v = 0.5f * avgR - 0.4542f * avgG - 0.0458f * avgB;
+    const float cb = fmaf(-0.11457211f, avgR, fmaf(-0.38542789f, avgG, 0.5f * avgB));
+    const float cr = fmaf(0.5f, avgR, fmaf(-0.45415291f, avgG, -0.04584709f * avgB));
 
     unsigned char* out = dst + (static_cast<size_t>(oy) * outWidth + x0) * 2u;
-    out[0] = static_cast<unsigned char>((u + 0.5f) * 255.0f);
-    out[1] = static_cast<unsigned char>(y1 * 255.0f);
-    out[2] = static_cast<unsigned char>((v + 0.5f) * 255.0f);
-    out[3] = static_cast<unsigned char>(y2 * 255.0f);
+    out[0] = cudaQuantize(cb, 224.0f, 128.0f, 16.0f, 240.0f);
+    out[1] = cudaQuantize(y1, 219.0f, 16.0f, 16.0f, 235.0f);
+    out[2] = cudaQuantize(cr, 224.0f, 128.0f, 16.0f, 240.0f);
+    out[3] = cudaQuantize(y2, 219.0f, 16.0f, 16.0f, 235.0f);
 }
 
 __global__ void downscaleRGBAToUYVYKernel(const float* __restrict__ src, unsigned char* dst,

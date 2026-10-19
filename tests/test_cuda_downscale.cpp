@@ -1,10 +1,10 @@
 // Correctness test for the CUDA GPU-native fast path
 // (src/CudaGPUAcceleration.cu): the fused downscale+convert kernels must be
 // BYTE-IDENTICAL to the CPU reference composition
-// (ndi_stream::downscaleRGBABox + the flipping CPU converters) on a real CUDA
-// device — ticket #22's bar, stricter than the Metal test's rounding
-// tolerance; the module compiles with -fmad=false and mirrors the CPU
-// arithmetic operation-for-operation to earn it. Also covers the passthrough
+// (ndi_stream::downscaleRGBABox + the shared UYVY encoder) on a real CUDA
+// device — ticket #22's bar (the Metal test holds the same one since issue
+// #57); the module compiles with -fmad=false and mirrors the CPU arithmetic
+// operation-for-operation to earn it. Also covers the passthrough
 // copy, the full-frame readback used by the CPU fallback, the non-blocking
 // slot ring, and the STMap warp kernels against the ndi_stmap::warpRGBABox
 // CPU reference (identity map ≡ the plain downscale kernels, byte-for-byte).
@@ -14,6 +14,7 @@
 #include "CudaGPUAcceleration.h"
 #include "STMap.h"
 #include "StreamResolution.h"
+#include "UYVYEncode.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -36,39 +37,14 @@ static void check(bool ok, const char* name)
     }
 }
 
-// Reference UYVY packing — same math as convertRGBAToUYVY_CPU in
-// NDIOutputPlugin.cpp (vertical flip, Rec.709, truncating 8-bit casts),
-// applied to an already-downscaled bottom-up float RGBA buffer. Kept textually
-// identical to the copy in tests/test_metal_downscale.mm — both GPU modules
-// are held to the same CPU oracle.
+// Reference UYVY packing: the shared encoder the CPU path runs
+// (src/UYVYEncode.h — vertical flip, BT.709 limited range), applied to an
+// already-downscaled bottom-up float RGBA buffer. Both GPU modules are held
+// to this one oracle (issue #57).
 static void referenceUYVY(const float* src, int width, int height, std::vector<uint8_t>& out)
 {
     out.assign(static_cast<size_t>(width) * height * 2, 0);
-    for (int y = 0; y < height; ++y) {
-        int srcRow = height - 1 - y;
-        for (int x = 0; x < width; x += 2) {
-            int srcIdx1 = (srcRow * width + x) * 4;
-            int srcIdx2 = (srcRow * width + x + 1) * 4;
-            int dstIdx = (y * width + x) * 2;
-
-            float r1 = std::fmax(0.0f, std::fmin(1.0f, src[srcIdx1 + 0]));
-            float g1 = std::fmax(0.0f, std::fmin(1.0f, src[srcIdx1 + 1]));
-            float b1 = std::fmax(0.0f, std::fmin(1.0f, src[srcIdx1 + 2]));
-            float r2 = (x + 1 < width) ? std::fmax(0.0f, std::fmin(1.0f, src[srcIdx2 + 0])) : r1;
-            float g2 = (x + 1 < width) ? std::fmax(0.0f, std::fmin(1.0f, src[srcIdx2 + 1])) : g1;
-            float b2 = (x + 1 < width) ? std::fmax(0.0f, std::fmin(1.0f, src[srcIdx2 + 2])) : b1;
-
-            float y1 = 0.2126f * r1 + 0.7152f * g1 + 0.0722f * b1;
-            float y2 = 0.2126f * r2 + 0.7152f * g2 + 0.0722f * b2;
-            float u = -0.1146f * ((r1 + r2) * 0.5f) - 0.3854f * ((g1 + g2) * 0.5f) + 0.5f * ((b1 + b2) * 0.5f);
-            float v = 0.5f * ((r1 + r2) * 0.5f) - 0.4542f * ((g1 + g2) * 0.5f) - 0.0458f * ((b1 + b2) * 0.5f);
-
-            out[dstIdx + 0] = static_cast<uint8_t>((u + 0.5f) * 255.0f);
-            out[dstIdx + 1] = static_cast<uint8_t>(y1 * 255.0f);
-            out[dstIdx + 2] = static_cast<uint8_t>((v + 0.5f) * 255.0f);
-            out[dstIdx + 3] = static_cast<uint8_t>(y2 * 255.0f);
-        }
-    }
+    ndi_uyvy::convertRGBAToUYVYFlipped(src, width, height, out.data());
 }
 
 // Deterministic frame content: gradients across all channels, including

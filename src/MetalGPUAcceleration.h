@@ -19,7 +19,10 @@ MetalGPUContextRef metal_gpu_init(void);
 // Shutdown Metal GPU context
 void metal_gpu_shutdown(MetalGPUContextRef context);
 
-// Convert RGBA float to UYVY using Metal compute shader
+// Convert a tightly packed CPU float RGBA frame (bottom-up) to UYVY (top-down,
+// BT.709 limited range): uploads it and runs the fused kernel at divisor 1.
+// Returns false for anything that kernel refuses (e.g. odd widths) — the
+// caller falls back to the CPU converter (src/UYVYEncode.h).
 bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context, 
                                    const float* rgbaData, 
                                    unsigned char* uyvyData,

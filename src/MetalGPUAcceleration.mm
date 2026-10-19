@@ -43,8 +43,6 @@ struct MetalAsyncSlot {
 struct MetalGPUContext {
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
-    id<MTLComputePipelineState> rgbaToUyvyPipeline;
-    id<MTLLibrary> library;
     std::unordered_map<void*, MetalFastPathState> fastPathByDevice; // key: id<MTLDevice>
     std::mutex asyncMutex;                    // guards the slot ring
     MetalAsyncSlot asyncSlots[METAL_ASYNC_SLOTS];
@@ -77,56 +75,6 @@ static const char* metalShaderSource = R"(
 #include <metal_stdlib>
 using namespace metal;
 
-// RGBA to UYVY conversion kernel
-kernel void rgba_to_uyvy_kernel(device const float4* rgbaInput [[buffer(0)]],
-                                device uchar4* uyvyOutput [[buffer(1)]],
-                                constant uint2& dimensions [[buffer(2)]],
-                                uint2 gid [[thread_position_in_grid]]) {
-    
-    uint width = dimensions.x;
-    uint height = dimensions.y;
-    
-    // Process two pixels at a time for UYVY (4:2:2 format)
-    if (gid.x * 2 >= width || gid.y >= height) return;
-    
-    uint x = gid.x * 2;
-    uint y = gid.y;
-    
-    // Flip vertically: OpenFX uses bottom-left origin, NDI expects top-left
-    uint srcRow = height - 1 - y;
-    
-    // Get two adjacent pixels
-    uint srcIdx1 = srcRow * width + x;
-    uint srcIdx2 = srcRow * width + x + 1;
-    
-    float4 pixel1 = rgbaInput[srcIdx1];
-    float4 pixel2 = (x + 1 < width) ? rgbaInput[srcIdx2] : pixel1;
-    
-    // Clamp values to [0, 1]
-    pixel1 = clamp(pixel1, 0.0f, 1.0f);
-    pixel2 = clamp(pixel2, 0.0f, 1.0f);
-    
-    // Convert to YUV using Rec.709 coefficients
-    float y1 = 0.2126f * pixel1.r + 0.7152f * pixel1.g + 0.0722f * pixel1.b;
-    float y2 = 0.2126f * pixel2.r + 0.7152f * pixel2.g + 0.0722f * pixel2.b;
-    
-    float avgR = (pixel1.r + pixel2.r) * 0.5f;
-    float avgG = (pixel1.g + pixel2.g) * 0.5f;
-    float avgB = (pixel1.b + pixel2.b) * 0.5f;
-    
-    float u = -0.1146f * avgR - 0.3854f * avgG + 0.5f * avgB;
-    float v = 0.5f * avgR - 0.4542f * avgG - 0.0458f * avgB;
-    
-    // Scale to 8-bit and pack as UYVY
-    uint dstIdx = y * (width / 2) + gid.x;
-    uyvyOutput[dstIdx] = uchar4(
-        uchar((u + 0.5f) * 255.0f),  // U
-        uchar(y1 * 255.0f),          // Y1
-        uchar((v + 0.5f) * 255.0f),  // V
-        uchar(y2 * 255.0f)           // Y2
-    );
-}
-
 // ---------------------------------------------------------------------------
 // GPU-native fast path: fused box-downscale (divisor 1/2/4) + vertical flip +
 // color conversion, reading the float RGBA frame the host left on the device.
@@ -145,22 +93,30 @@ struct DownscaleParams {
     uint divisor;
 };
 
-// Shared packing tails of the fused kernels (downscale and STMap-warp
-// variants): two sampled pixels -> one UYVY macropixel. Arithmetic matches
-// the CPU converter exactly.
+// Shared packing tail of the fused kernels (downscale and STMap-warp
+// variants): two sampled pixels -> one UYVY macropixel, BT.709 limited range
+// (issue #57). Mirrors ndi_uyvy::encodeMacropixel (src/UYVYEncode.h)
+// operation for operation — every multiply-add is an explicit fma, because
+// this compiler contracts bare a*b+c on its own and CPU compilers differ;
+// see the byte-identity note in that header.
+static inline uchar uyvy_quantize(float v, float scale, float offset, float lo, float hi) {
+    float q = fmin(fmax(fma(scale, v, offset), lo), hi);
+    return uchar(q + 0.5f);
+}
+
 static inline void emit_uyvy(device uchar4* dst, uint outWidth,
                              uint2 gid, float3 rgb1, float3 rgb2) {
-    float y1 = 0.2126f * rgb1.r + 0.7152f * rgb1.g + 0.0722f * rgb1.b;
-    float y2 = 0.2126f * rgb2.r + 0.7152f * rgb2.g + 0.0722f * rgb2.b;
+    float y1 = fma(0.2126f, rgb1.r, fma(0.7152f, rgb1.g, 0.0722f * rgb1.b));
+    float y2 = fma(0.2126f, rgb2.r, fma(0.7152f, rgb2.g, 0.0722f * rgb2.b));
     float3 avg = (rgb1 + rgb2) * 0.5f;
-    float u = -0.1146f * avg.r - 0.3854f * avg.g + 0.5f * avg.b;
-    float v = 0.5f * avg.r - 0.4542f * avg.g - 0.0458f * avg.b;
+    float cb = fma(-0.11457211f, avg.r, fma(-0.38542789f, avg.g, 0.5f * avg.b));
+    float cr = fma(0.5f, avg.r, fma(-0.45415291f, avg.g, -0.04584709f * avg.b));
 
     dst[gid.y * (outWidth / 2) + gid.x] = uchar4(
-        uchar((u + 0.5f) * 255.0f),
-        uchar(y1 * 255.0f),
-        uchar((v + 0.5f) * 255.0f),
-        uchar(y2 * 255.0f)
+        uyvy_quantize(cb, 224.0f, 128.0f, 16.0f, 240.0f),
+        uyvy_quantize(y1, 219.0f, 16.0f, 16.0f, 235.0f),
+        uyvy_quantize(cr, 224.0f, 128.0f, 16.0f, 240.0f),
+        uyvy_quantize(y2, 219.0f, 16.0f, 16.0f, 235.0f)
     );
 }
 
@@ -276,6 +232,8 @@ kernel void warp_rgba_to_uyvy(device const float* src [[buffer(0)]],
 }
 )";
 
+static MetalFastPathState* fastPathForDevice(MetalGPUContextRef context, id<MTLDevice> device);
+
 bool metal_gpu_is_available(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -303,42 +261,27 @@ MetalGPUContextRef metal_gpu_init(void) {
             return nullptr;
         }
         
-        // Create library from source
-        NSString* shaderSource = [NSString stringWithUTF8String:metalShaderSource];
-        NSError* error = nil;
-        id<MTLLibrary> library = [device newLibraryWithSource:shaderSource options:nil error:&error];
-        if (!library) {
-            METAL_LOG("Failed to create Metal library: %s\n", [[error localizedDescription] UTF8String]);
-            return nullptr;
-        }
-        
-        // Create compute pipeline states
-        id<MTLFunction> rgbaToUyvyFunction = [library newFunctionWithName:@"rgba_to_uyvy_kernel"];
-        
-        if (!rgbaToUyvyFunction) {
-            METAL_LOG("Failed to find Metal kernel functions\n");
-            return nullptr;
-        }
-        
-        id<MTLComputePipelineState> rgbaToUyvyPipeline = [device newComputePipelineStateWithFunction:rgbaToUyvyFunction error:&error];
-        if (!rgbaToUyvyPipeline) {
-            METAL_LOG("Failed to create RGBA to UYVY pipeline: %s\n", [[error localizedDescription] UTF8String]);
-            return nullptr;
-        }
-        
         // Create context
         MetalGPUContext* context = new MetalGPUContext;
         context->device = device;
         context->commandQueue = commandQueue;
-        context->rgbaToUyvyPipeline = rgbaToUyvyPipeline;
-        context->library = library;
-        
+
         // Retain objects
         [device retain];
         [commandQueue retain];
-        [rgbaToUyvyPipeline retain];
-        [library retain];
-        
+
+        // Compile the kernels now for the default device: a shader that fails
+        // to compile fails init (the plugin then streams on the CPU path)
+        // instead of failing on the first render. Other devices compile
+        // lazily on first use (multi-GPU Macs).
+        if (!fastPathForDevice(context, device)) {
+            METAL_LOG("Failed to build the Metal conversion pipelines\n");
+            [context->device release];
+            [context->commandQueue release];
+            delete context;
+            return nullptr;
+        }
+
         METAL_LOG("Metal GPU acceleration initialized successfully\n");
         return context;
     }
@@ -395,8 +338,6 @@ void metal_gpu_shutdown(MetalGPUContextRef context) {
 
         [context->device release];
         [context->commandQueue release];
-        [context->rgbaToUyvyPipeline release];
-        [context->library release];
 
         delete context;
     }
@@ -907,93 +848,34 @@ void metal_gpu_release_buffer(void* metalBuffer)
     [static_cast<id<MTLBuffer>>(metalBuffer) release];
 }
 
-bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context, 
-                                   const float* rgbaData, 
+// CPU-buffer renders (the host handed CPU memory but GPU Acceleration is
+// on): upload the tight frame and run the same fused kernel at divisor 1, so
+// there is exactly one GPU UYVY formula (issue #57 retired the separate
+// rgba_to_uyvy kernel, which carried its own copy of the full-range bug).
+// Refuses what the fused kernel refuses (odd widths) — the caller falls back
+// to the CPU converter.
+bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context,
+                                   const float* rgbaData,
                                    unsigned char* uyvyData,
-                                   int width, 
+                                   int width,
                                    int height) {
-    if (!context || !rgbaData || !uyvyData) return false;
-    
+    if (!context || !rgbaData || !uyvyData || width <= 0 || height <= 0) return false;
+
     @autoreleasepool {
-        // Start timing
-        auto startTime = std::chrono::high_resolution_clock::now();
-        
-        METAL_LOG("Starting Metal GPU RGBA->UYVY conversion (%dx%d)\n", width, height);
-        
-        // Create buffers
-        size_t rgbaSize = width * height * 4 * sizeof(float);
-        size_t uyvySize = width * height * 2; // UYVY is 2 bytes per pixel
-        
-        id<MTLBuffer> rgbaBuffer = [context->device newBufferWithBytes:rgbaData 
-                                                               length:rgbaSize 
+        const size_t rgbaBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4 * sizeof(float);
+        id<MTLBuffer> rgbaBuffer = [context->device newBufferWithBytes:rgbaData
+                                                               length:rgbaBytes
                                                               options:MTLResourceStorageModeShared];
-        
-        id<MTLBuffer> uyvyBuffer = [context->device newBufferWithLength:uyvySize 
-                                                                options:MTLResourceStorageModeShared];
-        
-        uint32_t dimensions[2] = {(uint32_t)width, (uint32_t)height};
-        id<MTLBuffer> dimensionsBuffer = [context->device newBufferWithBytes:dimensions 
-                                                                      length:sizeof(dimensions) 
-                                                                     options:MTLResourceStorageModeShared];
-        
-        if (!rgbaBuffer || !uyvyBuffer || !dimensionsBuffer) {
-            METAL_LOG("Failed to create Metal buffers\n");
+        if (!rgbaBuffer) {
+            METAL_LOG("CPU-buffer convert: failed to upload %zu bytes", rgbaBytes);
             return false;
         }
-        
-        // Create command buffer and encoder
-        id<MTLCommandBuffer> commandBuffer = [context->commandQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-        
-        [encoder setComputePipelineState:context->rgbaToUyvyPipeline];
-        [encoder setBuffer:rgbaBuffer offset:0 atIndex:0];
-        [encoder setBuffer:uyvyBuffer offset:0 atIndex:1];
-        [encoder setBuffer:dimensionsBuffer offset:0 atIndex:2];
-        
-        // Calculate thread groups
-        MTLSize threadsPerThreadgroup = MTLSizeMake(16, 16, 1);
-        MTLSize threadgroupsPerGrid = MTLSizeMake(
-            (width / 2 + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
-            (height + threadsPerThreadgroup.height - 1) / threadsPerThreadgroup.height,
-            1
-        );
-        
-        METAL_LOG("Dispatching %zu x %zu threadgroups with %zu x %zu threads each\n", 
-               threadgroupsPerGrid.width, threadgroupsPerGrid.height,
-               threadsPerThreadgroup.width, threadsPerThreadgroup.height);
-        
-        [encoder dispatchThreadgroups:threadgroupsPerGrid threadsPerThreadgroup:threadsPerThreadgroup];
-        [encoder endEncoding];
-        
-        // Execute and wait
-        [commandBuffer commit];
-        [commandBuffer waitUntilCompleted];
-        
-        // Check for errors
-        if (commandBuffer.error) {
-            METAL_LOG("Metal command buffer error: %s\n", 
-                   [[commandBuffer.error localizedDescription] UTF8String]);
-            [rgbaBuffer release];
-            [uyvyBuffer release];
-            [dimensionsBuffer release];
-            return false;
-        }
-        
-        // Copy result back
-        memcpy(uyvyData, [uyvyBuffer contents], uyvySize);
-        
-        // Calculate timing
-        auto endTime = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
-        
-        METAL_LOG("✅ Metal GPU RGBA->UYVY conversion completed in %lld μs (%.2f ms)\n", 
-               duration.count(), duration.count() / 1000.0);
-        
+        const size_t uyvyBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 2;
+        const bool ok = runConvertKernel(context, nullptr, rgbaBuffer, width, height, width * 4,
+                                         nullptr, 0, 0, 1, width, height,
+                                         uyvyData, uyvyBytes, "CPU-buffer UYVY");
         [rgbaBuffer release];
-        [uyvyBuffer release];
-        [dimensionsBuffer release];
-        
-        return true;
+        return ok;
     }
 }
 

@@ -232,6 +232,7 @@ enable_testing()
 set(NDI_PORTABLE_TESTS
     test_render_probe
     test_stream_resolution
+    test_uyvy_encode
     test_stereo_pair
     test_platform_paths
     test_ndi_loader
