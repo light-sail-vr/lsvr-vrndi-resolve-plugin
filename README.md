@@ -9,6 +9,7 @@ A modern OpenFX plugin that sends video frames from DaVinci Resolve to NDI (Netw
 
 - **Modern OFX Implementation**: Uses C API directly for maximum compatibility with DaVinci Resolve 20+
 - **Stereo Timelines**: On a native stereo timeline (Stereo 3D palette at **Vision: Stereo**), the plugin pairs the left/right eye renders per frame and streams **one packed frame** — Side-by-Side or Top-Bottom (Stereo group) — for VR receivers such as VR.NDI on Quest. Choose **Mono** instead to stream only the left eye as a plain single frame for monoscopic 360 receivers; right-eye renders are skipped. The packed canvas is locked for the stream's lifetime: brief eye stalls re-send the last packed frame, and a sustained stall degrades to the flowing eye duplicated into both halves (labeled in the **Stream Status** parameter) — the frame dimensions never change mid-stream, so the geometry never pops in-headset. Mono timelines are unaffected.
+- **Output Color**: Choose what colour the stream carries. **Passthrough** (default) streams the node's pixels untouched; a display space (Rec.709 Gamma 2.4/2.2, sRGB, P3-D65 Gamma 2.2/2.6, Display P3, Rec.2020 Gamma 2.4) converts to it; **LUT File** applies a 3D `.cube` LUT, which is the right choice for log timelines. Frames whose colour space is known are labelled for receivers that read the label (VR.NDI). See [Output Color](#output-color) below.
 - **Real-time Streaming**: Low-latency video streaming over network
 - **Pass-through Design**: Maintains original video quality while streaming
 - **User-friendly Controls**: Easy-to-use parameters for configuration
@@ -50,6 +51,19 @@ sudo make install   # install to /Library/OFX/Plugins
 
 3. **Receive the Stream**: Use any NDI-compatible receiver (NDI Video Monitor, OBS Studio, etc.) to receive the stream on the network.
 
+### Output Color
+
+**The node sees the timeline colour space, not Resolve's output.** On the Color page an OpenFX node runs inside "Timeline Processing": the Output LUT and Resolve's output colour space conversion (Resolve Color Management, ACES output transform) run after it (Resolve manual, processing-order chart). On a DaVinci Wide Gamut/Intermediate or ACEScct timeline, a Passthrough stream is the flat log picture, not what Resolve's viewer shows. The **Output Color** group fixes that for the stream only; the node's own output back to Resolve is never changed.
+
+- **Timeline Color**: the colour space the node's pixels are in. **Auto** (default) asks Resolve: the OpenFX colour-management property when Resolve reports one, otherwise the timeline's colour settings through external scripting (needs **Preferences → System → General → External scripting using: Local**, the same setting Timeline (Auto) camera clips use). If neither answers, a display-space NDI Output assumes Rec.709 Gamma 2.4 and **Stream Status** says so. Pick a space to override Auto.
+- **NDI Output**:
+  - **Passthrough** (default): the stream carries the timeline's pixels unchanged.
+  - **A display space**: converts from Timeline Color to that space (transfer curve, then the primaries, D65 white; colours outside the target gamut clip — there is no gamut mapping). This is display-to-display only: it can't turn a log timeline into a display picture, and Stream Status warns when you try.
+  - **LUT File**: applies a 3D `.cube` LUT (2–65 points). For a log timeline this is the faithful route: build a **Color Space Transform** node from your timeline space to the display you want, with the project's tone and gamut mapping, right-click the node and use **Generate LUT → 65 Point Cube**, then pick that file. Set **LUT Produces** to the display space the LUT outputs, so the stream is labelled correctly. A file that can't be used (missing, 1D or shaper LUTs, malformed) falls back to Passthrough, and Stream Status gives the reason.
+- **Stream Status** shows the conversion in use, e.g. `color: Rec.709 G2.4 → P3-D65 G2.2`, plus any warning.
+
+Every frame whose colour space is known carries an `lsvr_color` tag in its NDI metadata, e.g. `<lsvr_color primaries="p3_d65" transfer="gamma_2.2" matrix="bt_709" range="limited"/>`. NDI's own colour metadata can't name P3-D65 or gamma 2.2, so receivers that don't read the tag assume Rec.709. The stream itself is always 8-bit BT.709 limited-range Y'CbCr, the format NDI expects.
+
 ## Technical Details
 
 ### Architecture
@@ -77,6 +91,9 @@ The project uses a modern, streamlined build system:
 ```
 ├── src/
 │   ├── NDIOutputPlugin.cpp          # Main plugin implementation (modern C API)
+│   ├── UYVYEncode.h                 # Shared BT.709 limited-range encoder (CPU + GPU oracle)
+│   ├── OutputColor.h / CubeLUT.h    # Output Color presets, .cube reader, lsvr_color tag
+│   ├── TimelineColor.h              # Timeline Color = Auto: OFX colourspace + Resolve settings
 │   ├── NDIOutputPlugin.h            # Header file
 │   └── LSVR.NDIOutput.png           # Plugin icon
 ├── scripts/

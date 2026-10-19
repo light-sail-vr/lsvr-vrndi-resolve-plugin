@@ -470,6 +470,54 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** scratch sender → SDK 6.0.1 → `ndi_verify --patches`, RGBA vs RGBX, truncating vs rounding quantizer, `--color bgra` vs `fastest`.
 **Rule:** don't assume a vendor's converter is a reference — put it through the same patch chart as your own code.
 
+### 2026-10-19 — An OpenFX node sees the timeline colour space, not Resolve's output (#57 Parts 2–3)
+**Symptom:** (audit finding) on DaVinci Wide Gamut/Intermediate or ACEScct projects the NDI stream was the flat log picture, while Resolve's viewer showed the graded display image.
+**Root cause:** the Resolve 21 manual's processing-order chart (p. 3407) runs Color-page nodes, OpenFX included, in "Timeline Processing". The Output LUT and the RCM output conversion / ACES RRT+ODT run after them. The plugin was streaming exactly what it was handed.
+**Fix:** the Output Color group (`src/OutputColor.h`): Passthrough (default), seven display-to-display presets, or a 3D `.cube` LUT, applied per output pixel between the box/warp sample and the encode on every path. The node's output to Resolve stays an untouched copy. Timeline Color = Auto works out the input space (entry below). For log timelines the faithful route is a Resolve-generated LUT, since Resolve's DRT isn't public.
+**Validated by:** `make test` (presets against published BT.2087 / P3 matrices and a double-precision reference over 33³ for all 42 pairs, worst 0.14 code), `make test-metal` (byte-identical CPU↔Metal incl. LUTs), and a scratch OFX host running the real plugin binary through NDI SDK 6.0.1. Rec.709 G2.4 → sRGB and → P3-D65 G2.2 matched a double-precision expectation within 1 code on every patch, an identity LUT was transparent, a malformed LUT fell back to Passthrough with its reason in Stream Status, and node output was bit-identical in every mode. Tier 2 in Resolve with a generated LUT on a DWG timeline is owed (Matt).
+**Rule:** anything an OFX node streams is in the timeline colour space — ask what that space is before calling a stream "Resolve's picture".
+
+### 2026-10-19 — NDI's colour metadata can't name the spaces we stream; a custom per-frame tag can (#57 Part 4)
+**Symptom:** (audit finding) a P3-D65 Gamma 2.2 stream had no way to say so. Receivers assume BT.709.
+**Root cause:** `ndi_color_info` (SDK 6.0 docs p. 39) defines only bt_601/709/2020/2100 primaries and bt_601/709/2020/HLG/PQ transfers. There's no P3-D65 and no gamma 2.2/2.4/2.6, and the Standard SDK may not carry HDR metadata at all.
+**Fix:** when the stream's space is known, every video frame's `p_metadata` carries `<lsvr_color primaries="bt_709|p3_d65|bt_2020" transfer="gamma_2.2|gamma_2.4|gamma_2.6|srgb" matrix="bt_709" range="limited"/>`. The strings are static, so they outlive async sends, and the stall keepalive resends the tag of the frame it repeats. `ndi_color_info` is never sent. `ndi_verify` reports the tag and `--expect-color` asserts it. VR.NDI reading it is a Quest-repo ticket.
+**Validated by:** `make test` (tag format + round-trip parse); SDK 6.0.1 sender → SpeedHQ → `ndi_verify`: the tag arrived on 62/62 frames. Through the scratch OFX host, the plugin labelled Passthrough (when Resolve reports the timeline space), presets and LUT File correctly, and sent no tag when the space was unknown or a LUT was invalid.
+**Rule:** when a protocol's standard metadata can't describe your signal, send your own well-named tag rather than a wrong standard one — and give the reference receiver a way to assert it.
+
+### 2026-10-19 — Resolve's colour settings over scripting have stale fields (#57 Part 3)
+**Symptom:** (found while building Timeline Color = Auto) a project in combined-name mode with a `DaVinci WG/Intermediate` timeline reported `colorSpaceTimelineGamma = ST2084 1000 nit`. Switching to ACES left `colorSpaceTimeline = P3-DCI`.
+**Root cause:** Resolve 21.1 keeps the last value of every field that the current mode doesn't use and still returns it. Probed on a scratch project through the scripting API (then deleted): combined names when `separateColorSpaceAndGamma = 0` (`Rec.709 Gamma 2.4`, `P3-D65` = gamma 2.6, `Rec.709 (Scene)` default, `DaVinci WG/Intermediate`…), gamut + gamma names when it is `1`. Under `acescct`/`acescc`, the gamut fields are left over from RCM. Unmanaged YRGB labels its timeline `Rec.709 (Scene)` although it has no output conversion.
+**Fix:** `src/TimelineColor.h` reads the mode first and ignores the fields that mode doesn't use. Unmanaged `(Scene)` resolves to Gamma 2.4 (BT.1886), RCM `(Scene)` and log spaces to scene-referred (Stream Status warns when a preset is used on them). The watcher helpers send the six fields as an `@color` line. Full value lists in docs/2026-10-19-ofx-colour-management-probe.md.
+**Validated by:** `make test` (`test_timeline_color`, built from the probed strings incl. the stale-field cases). Both helpers run standalone against live Resolve 21.1 and print the `@color` line. Through the scratch OFX host, Auto re-resolved from "unknown" to the live project's settings within ~2 s, and showed the scene-referred warning on an RCM DWG project.
+**Rule:** read a Resolve setting only after the setting that decides whether it's in use — the API happily returns values the current mode ignores.
+
+### 2026-10-19 — Transfer curves on the GPU: no pow() under fast math, and a uniform table is wrong near black (#57 Part 2)
+**Symptom:** (design) the presets need x^2.2…x^(1/2.6) and the sRGB curve on CPU, Metal and CUDA, byte-identical.
+**Root cause:** Metal compiles with fast math, so `pow()` is approximate and differs from the CPU. A uniform lookup table is too coarse where x^(1/γ) has infinite slope: with 4096 linear-domain entries, linear 1e-5 encodes ~1.5 codes too dark.
+**Fix:** tables indexed by the float's own bit pattern, exponent plus the top 6 mantissa bits (64 segments per octave from 2^-24 to 1, 1,539 entries), linearly interpolated with an explicit fma. That gives uniform relative precision, and the index is integer arithmetic on every backend. The shader takes its constants from `OutputColor.h` through a generated prelude, so the two can't drift.
+**Validated by:** `make test` (worst 0.14 code vs double over 33³ + a 4096-step ramp for all 42 pairs); `make test-metal` byte-identical on every pair; the CUDA mirror byte-identical under a CPU emulation of the kernels (entry below).
+**Rule:** for byte-identical transcendental curves across GPUs, precompute tables on the CPU and index them by bit pattern, not by value — the error stays relative everywhere, including near black.
+
+### 2026-10-19 — A third of the LUTs Resolve ships are 1D or shaper+3D; real files use BMD_TITLE and unquoted TITLE (#57 Part 2)
+**Symptom:** a scan of all 109 `.cube` files under `/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT` with the new reader rejected 9 3D cubes as malformed.
+**Root cause:** two title spellings the Adobe spec doesn't have: Blackmagic's own `BMD_TITLE "…"` and Sony's unquoted `TITLE<TAB>text`. The other 58 rejections are genuine 1D LUTs or 1D shaper + 3D files (`LUT_1D_SIZE`/`LUT_1D_INPUT_RANGE`), out of scope for #57.
+**Fix:** `src/CubeLUT.h` accepts both title forms (metadata only) and keeps rejecting unknown keywords, which could change what the data means. All 51 3D cubes Resolve ships now parse. `TimelineItem.ExportLUT` returned false for a generator item, so the in-test fixtures are hand-built and the shipped LUTs are the third-party check.
+**Validated by:** `make test` (`test_cube_lut`, new title cases); the shipped-LUT scan (51 parsed, 58 refused as 1D/shaper); 3,000,000 random decimals in six formats parsed identically to `strtof`.
+**Rule:** run a new file-format reader over every real file of that type on the machine before shipping it — the host's own files are the cheapest third-party corpus there is.
+
+### 2026-10-19 — CUDA kernels can run on macOS through a mock runtime; the plugin can run without Resolve through a mock host (#57)
+**Symptom:** (workflow) this branch changes CUDA kernels and the whole plugin integration, but Tier 0 on the Mac compiles neither the CUDA module nor anything Resolve-hosted, and Tier 1 needs a sudo install and a human.
+**Fix:** two scratch harnesses, neither committed. (1) A ~40-line mock `cuda_runtime.h` that turns `kernel<<<grid, block>>>(…)` into nested loops over blocks and threads, with host-memory `cudaMalloc` and a synchronous `cudaLaunchHostFunc`. `src/CudaGPUAcceleration.cu` and `tests/test_cuda_downscale.cpp` then compile with clang and run. (2) A ~250-line OFX host (property, parameter and image-effect suites; variadic `paramGetValue` by param type) that `dlopen`s the built `.ofx` and drives describe → createInstance → instanceChanged → render on CPU frames, with `ndi_verify` receiving.
+**Validated by:** the CUDA test passed 23/23 under emulation (all colour cases byte-identical) before Windows CI ever saw it. The OFX host exercised every Output Color mode on the real binary, including the live watcher against Resolve.
+**Rule:** when a backend or host can't run on the dev machine, emulate its calling convention cheaply rather than shipping untested logic — the harness only has to be faithful to the contract the code relies on.
+
+### 2026-10-19 — The macOS plugin, release builds included, compiles at -O0 (observation, unfixed)
+**Symptom:** the CPU converter took ~60 ms per 1080p frame in a profile of the colour stage. The same code takes 3.5 ms at -O2.
+**Root cause:** the Makefile's `CXXFLAGS` carry no optimisation flag, and `scripts/package_release.sh` builds with `make dev`. The Metal fast path doesn't care, but every CPU-path frame (CPU-buffer renders, the RGBA path, the CPU fallback) runs ~17× slower than it could. Windows builds use CMake's Release configuration (optimised).
+**Fix:** none in #57. Adding `-O2` is a one-line change but alters a shipping build. Retest Tier 0–2 if it's taken.
+**Validated by:** scratch timing of `convertRGBAToUYVYFlipped` at 1920×1080: -O0 60 / 200 / 225 ms (none / preset / 33-pt LUT), -O2 3.5 / 12.9 / 18.3 ms.
+**Rule:** check what optimisation level a Makefile actually passes before reading CPU timings from it.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
