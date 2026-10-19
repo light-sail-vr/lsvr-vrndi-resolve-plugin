@@ -2661,7 +2661,6 @@ static void refreshSTMaps(NDIInstanceData* data)
 static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread)
 {
     const ndi_tlcolor::OutputChoice& out = data->colorOutput;
-    const bool outPreset = (out.kind == ndi_tlcolor::OutputChoice::kPreset);
 
     ndi_tlcolor::Resolved timeline;
     std::string source;
@@ -2677,14 +2676,15 @@ static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread)
         }
 #ifdef NDI_TIMELINE_WATCH
         // An OFX answer that names no usable space (e.g. the generic
-        // ofx_display_sdr) still lets the scripting answer in. The watcher
-        // only runs when something needs it: a display-space conversion
-        // starts it; Passthrough and LUT File use its answer for the frame
-        // tag when it's running anyway (registering the listener is free).
+        // ofx_display_sdr) still lets the scripting answer in. Passthrough
+        // and display-space outputs start the watcher — Passthrough needs
+        // the answer to label the stream, a conversion needs its input
+        // space. LUT File doesn't: the LUT defines the whole conversion and
+        // LUT Produces the label.
         if (timeline.kind == ndi_tlcolor::kUnknown) {
             if (onMainThread) {
                 ndi_timelinewatch::setColorListener(&timelineColorChanged);
-                if (outPreset) {
+                if (out.kind != ndi_tlcolor::OutputChoice::kLutFile) {
                     ndi_timelinewatch::ensureStarted(&timelineClipChanged);
                 }
                 data->haveWatcherColor = ndi_timelinewatch::currentTimelineColor(&data->watcherColor);

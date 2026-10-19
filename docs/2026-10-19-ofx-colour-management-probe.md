@@ -51,7 +51,7 @@ The watcher helper (`src/ndi_timeline_watch.lua`, Python fallback `src/ndi_timel
 @color<TAB>colorScienceMode<TAB>separate<TAB>timeline<TAB>timelineGamma<TAB>output<TAB>outputGamma
 ```
 
-`'!'` lines are still status messages; every other line is still the clip path. The plugin starts the watcher for Timeline Color = Auto with a display-space NDI Output. A watcher already running for the camera-clip feature also feeds the frame tag.
+`'!'` lines are still status messages; every other line is still the clip path. The plugin starts the watcher whenever Timeline Color is Auto and NDI Output isn't LUT File. Passthrough needs the answer to label the stream, a display space needs it as the conversion's input. LUT File doesn't need it: the LUT defines the conversion, and LUT Produces sets the label. Verified (L) with a live Resolve 21.1 on its default unmanaged project: a default node (Passthrough, Auto) streamed `color: passthrough (Rec.709 G2.4)` with the Rec.709 G2.4 tag on every frame.
 
 **Values Resolve 21.1 returns** (L, probed 2026-10-19 on a scratch project through the scripting API, then deleted):
 
