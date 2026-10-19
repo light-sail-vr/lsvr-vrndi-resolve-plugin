@@ -28,7 +28,7 @@ Canonical instructions for building, installing, and verifying the NDI Output OF
 make dev
 ```
 
-Incremental build; produces `NDIOutput.ofx.bundle/` in the repo root. `make` (default target) is identical — despite older docs, **no target auto-increments the version**. `make clean` removes the bundle, all object files, and the `build/` test-binary directory.
+Incremental build; produces `NDIOutput.ofx.bundle/` in the repo root. `make` (default target) is identical — despite older docs, **no target auto-increments the version**. `make clean` removes the bundle, all object files, and the `build/` test-binary directory (including `build/ndi_verify` — rebuild it with `make ndi-verify`). The plugin compiles at `-O2` (since 1.17; earlier builds had no optimisation flag at all); `make dev OPTFLAGS="-O0 -g"` gives a debuggable build. After changing compiler or linker flags, `make clean` first — make tracks sources, not the Makefile.
 
 The plugin links against zlib (`-lz`, for the STMap EXR reader's Zip-compressed chunks) and, on macOS, AppKit + UniformTypeIdentifiers (for the Browse buttons' native open panel, `src/MacFileDialog.mm`). All ship with the macOS SDK — no extra install. The Windows build gets its zlib from vcpkg and its Browse dialogs from `src/WinFileDialog.cpp` (IFileOpenDialog; ole32 + shell32) — see the Windows section.
 

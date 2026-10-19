@@ -512,11 +512,11 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** the CUDA test passed 23/23 under emulation (all colour cases byte-identical) before Windows CI ever saw it. The OFX host exercised every Output Color mode on the real binary, including the live watcher against Resolve.
 **Rule:** when a backend or host can't run on the dev machine, emulate its calling convention cheaply rather than shipping untested logic — the harness only has to be faithful to the contract the code relies on.
 
-### 2026-10-19 — The macOS plugin, release builds included, compiles at -O0 (observation, unfixed)
+### 2026-10-19 — The macOS plugin, release builds included, compiled at -O0 (fixed for 1.17)
 **Symptom:** the CPU converter took ~60 ms per 1080p frame in a profile of the colour stage. The same code takes 3.5 ms at -O2.
 **Root cause:** the Makefile's `CXXFLAGS` carry no optimisation flag, and `scripts/package_release.sh` builds with `make dev`. The Metal fast path doesn't care, but every CPU-path frame (CPU-buffer renders, the RGBA path, the CPU fallback) runs ~17× slower than it could. Windows builds use CMake's Release configuration (optimised).
-**Fix:** none in #57. Adding `-O2` is a one-line change but alters a shipping build. Retest Tier 0–2 if it's taken.
-**Validated by:** scratch timing of `convertRGBAToUYVYFlipped` at 1920×1080: -O0 60 / 200 / 225 ms (none / preset / 33-pt LUT), -O2 3.5 / 12.9 / 18.3 ms.
+**Fix:** the Makefile compiles with `OPTFLAGS ?= -O2` (Matt's call on #57); `make dev OPTFLAGS="-O0 -g"` restores a debug build. Every byte-identity contract survives because the colour and encode maths use explicit fma, which the optimiser can't rewrite.
+**Validated by:** scratch timing of `convertRGBAToUYVYFlipped` at 1920×1080: -O0 60 / 200 / 225 ms (none / preset / 33-pt LUT), -O2 3.5 / 12.9 / 18.3 ms. After the switch: clean `make dev` (also universal arm64 + x86_64) with no warnings; `make test` and the header seams' tests rebuilt at -O2 pass; `make test-metal` passes against the -O2 object. Through the scratch OFX host, the CPU path with a preset went from 11 to 40 frames in 2 s (the harness's own pacing limit), still within 1 code of the double-precision expectation. Tier 1–2 with the -O2 build is owed.
 **Rule:** check what optimisation level a Makefile actually passes before reading CPU timings from it.
 
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)

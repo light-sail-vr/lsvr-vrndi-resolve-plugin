@@ -25,9 +25,15 @@ ARCHFLAGS ?=
 # third_party/braw holds the vendored (Boost-licensed) Blackmagic RAW API
 # header + dispatch shim; the framework itself is resolved at runtime from the
 # host app (Resolve ships it), so nothing Blackmagic is linked or bundled.
+# -O2: the plugin shipped unoptimised until 1.17 (no -O flag at all), which
+# left the CPU paths (CPU-buffer renders, Optimal Color Format off, the CPU
+# fallback) ~17x slower than they need be (LEARNINGS 2026-10-19). The GPU
+# kernels compile at runtime and are unaffected. After changing these flags,
+# force a rebuild: make tracks sources, not the Makefile.
 CXX = c++
-CXXFLAGS = -c -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -Ithird_party/braw
-OBJCXXFLAGS = -c -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -x objective-c++
+OPTFLAGS ?= -O2
+CXXFLAGS = -c $(OPTFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -Ithird_party/braw
+OBJCXXFLAGS = -c $(OPTFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -x objective-c++
 # -headerpad_max_install_names: `make install`/`make bench` rewrite the NDI
 # dylib reference to its absolute SDK path with install_name_tool, which fails
 # ("larger updated load commands do not fit") when that path is long.
