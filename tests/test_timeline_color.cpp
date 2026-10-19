@@ -122,14 +122,6 @@ int main()
                "ACEScc timelines are log");
     }
 
-    // --- Resolve's output space (for the Stream Status hint) -------------------
-    {
-        expect(isDisplay(outputFromSettings(settings("davinciYRGBColorManagedv2", "0", "DaVinci WG/Intermediate", "",
-                                                     "Rec.709 Gamma 2.4", "Gamma 2.6")),
-                         kRec709Gamma24),
-               "output space resolves the same way (combined mode ignores the stale gamma)");
-    }
-
     // --- OFX 1.5 colourspace identifiers ----------------------------------------
     {
         expect(isDisplay(fromOfxColourspace("rec1886_rec709_display"), kRec709Gamma24), "rec1886_rec709_display");
@@ -147,6 +139,77 @@ int main()
         expect(fromOfxColourspace("ofx_display_sdr").kind == kUnknown, "generic SDR display names no exact space");
         expect(fromOfxColourspace("").kind == kUnknown && fromOfxColourspace("ofx_raw").kind == kUnknown,
                "empty and raw are unknown");
+    }
+
+    // --- the NDI Output choice, as projects save it --------------------------------
+    {
+        expect(decodeOutputChoice(0).kind == OutputChoice::kPassthrough, "choice 0 is Passthrough");
+        expect(decodeOutputChoice(1).kind == OutputChoice::kPreset && decodeOutputChoice(1).space == kRec709Gamma24,
+               "choice 1 is the first display space");
+        expect(decodeOutputChoice(7).kind == OutputChoice::kPreset && decodeOutputChoice(7).space == kRec2020Gamma24,
+               "choice 7 is Rec.2020 Gamma 2.4");
+        expect(decodeOutputChoice(8).kind == OutputChoice::kLutFile, "choice 8 is LUT File, fixed forever");
+        expect(decodeOutputChoice(-1).kind == OutputChoice::kPassthrough &&
+                   decodeOutputChoice(99).kind == OutputChoice::kPassthrough,
+               "out-of-range choices stream untouched");
+        expect(decodeTimelineChoice(0) == -1 && decodeTimelineChoice(4) == kP3D65Gamma22 &&
+                   decodeTimelineChoice(42) == -1,
+               "Timeline Color: 0 and out-of-range mean Auto");
+    }
+
+    // --- what the stream carries, and what Stream Status says -----------------------
+    {
+        Resolved rec709;
+        rec709.kind = kDisplay;
+        rec709.space = kRec709Gamma24;
+        rec709.label = "Rec.709 Gamma 2.4";
+        Resolved dwg;
+        dwg.kind = kSceneReferred;
+        dwg.label = "DaVinci WG/Intermediate";
+        const Resolved unknown;
+
+        OutputPlan p = planOutput(decodeOutputChoice(0), rec709, nullptr);
+        expect(p.inSpace == -1 && p.tagSpace == kRec709Gamma24 && p.status == "color: passthrough (Rec.709 G2.4)",
+               "Passthrough of a known display timeline: no transform, tagged with the timeline space");
+        p = planOutput(decodeOutputChoice(0), unknown, nullptr);
+        expect(p.tagSpace == -1 && p.status.empty(), "Passthrough of an unknown timeline: no tag, no status");
+        p = planOutput(decodeOutputChoice(0), dwg, nullptr);
+        expect(p.tagSpace == -1 &&
+                   p.status == "color: passthrough — timeline is DaVinci WG/Intermediate, not a display picture",
+               "Passthrough of a log timeline says so and is not tagged");
+
+        p = planOutput(decodeOutputChoice(4), rec709, nullptr);  // P3-D65 Gamma 2.2
+        expect(p.inSpace == kRec709Gamma24 && p.outSpace == kP3D65Gamma22 && p.tagSpace == kP3D65Gamma22 &&
+                   p.status == "color: Rec.709 G2.4 → P3-D65 G2.2",
+               "preset from a known timeline");
+        p = planOutput(decodeOutputChoice(1), rec709, nullptr);
+        expect(p.inSpace == p.outSpace && p.status == "color: Rec.709 G2.4 → Rec.709 G2.4 (no conversion)",
+               "preset equal to the timeline: no conversion");
+        p = planOutput(decodeOutputChoice(3), unknown, nullptr);
+        expect(p.inSpace == kRec709Gamma24 &&
+                   p.status == "color: Rec.709 G2.4 → sRGB — timeline colour unknown, assuming Rec.709 G2.4",
+               "preset from an unknown timeline assumes Rec.709 G2.4 and says so");
+        p = planOutput(decodeOutputChoice(1), dwg, nullptr);
+        expect(p.status == "color: Rec.709 G2.4 → Rec.709 G2.4 (no conversion) — WARNING: timeline is DaVinci "
+                           "WG/Intermediate (scene-referred/log), use LUT File",
+               "preset on a log timeline warns");
+
+        LutInfo lut;
+        lut.valid = true;
+        lut.fileName = "show.cube";
+        lut.producesSpace = kDisplayP3;
+        p = planOutput(decodeOutputChoice(8), dwg, &lut);
+        expect(p.tagSpace == kDisplayP3 && p.status == "color: LUT 'show.cube' → Display P3",
+               "a valid LUT labels the stream with what it produces");
+        LutInfo bad;
+        bad.error = "line 3: expected 3 numbers, found 2";
+        p = planOutput(decodeOutputChoice(8), rec709, &bad);
+        expect(p.tagSpace == kRec709Gamma24 &&
+                   p.status == "color: LUT invalid (line 3: expected 3 numbers, found 2) — passthrough",
+               "an invalid LUT falls back to Passthrough (and its tag) with the reason");
+        p = planOutput(decodeOutputChoice(8), rec709, nullptr);
+        expect(p.status == "color: LUT File selected but no LUT set — passthrough" && p.tagSpace == kRec709Gamma24,
+               "LUT File with no file set");
     }
 
     if (failures) {

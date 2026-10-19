@@ -36,6 +36,10 @@
     so "(Scene)" there means Rec.709/Rec.2020 gamma 2.4. Under RCM the same
     name really is scene-referred.
 
+  planOutput() then decides what the stream carries for the NDI Output
+  choice — the preset pair, the frame tag's space and the Stream Status text
+  — from the resolved timeline (and, for LUT File, the loaded LUT's state).
+
   Kept free of OFX/NDI/host dependencies (tests/test_timeline_color.cpp).
 */
 
@@ -190,17 +194,6 @@ inline Resolved timelineFromSettings(const Settings& s)
                                s.scienceMode == "davinciYRGB");
 }
 
-// Resolve's own output space (what its viewer/deliverables carry) — only a
-// hint for Stream Status: the node never sees it.
-inline Resolved outputFromSettings(const Settings& s)
-{
-    if (detail::isAces(s)) {
-        return detail::make(kUnknown, -1, "ACES output transform");
-    }
-    return detail::resolveName(s.outputSpace, s.outputGamma, s.separateGamma == "1",
-                               s.scienceMode == "davinciYRGB");
-}
-
 // An OFX 1.5 native colourspace identifier (kOfxImageClipPropColourspace).
 inline Resolved fromOfxColourspace(const std::string& id)
 {
@@ -224,6 +217,105 @@ inline Resolved fromOfxColourspace(const std::string& id)
     }
     if (id.compare(0, 4, "lin_") == 0 || detail::has(id, "log")) return make(kSceneReferred, -1, id);
     return make(kUnknown, -1, id);
+}
+
+// --- the Output Color choice params, as projects save them ---------------------
+// Projects save choice INDICES. Timeline Color: 0 = Auto, then the display
+// spaces. NDI Output: 0 = Passthrough, 1..7 = the display spaces, 8 = LUT
+// File — fixed. A display space added later must go AFTER LUT File in that
+// list (and get its own branch below), or saved LUT File projects would
+// silently change meaning.
+constexpr int kOutputChoicePassthrough = 0;
+constexpr int kOutputChoiceLutFile = 8;
+static_assert(ndi_color::kDisplaySpaceCount == kOutputChoiceLutFile - 1,
+              "NDI Output choice indices are saved in projects: append new display spaces after LUT File");
+
+struct OutputChoice {
+    enum Kind { kPassthrough, kPreset, kLutFile };
+    Kind kind = kPassthrough;
+    int space = -1;  // the display space, for kPreset
+};
+
+inline OutputChoice decodeOutputChoice(int choice)
+{
+    OutputChoice c;
+    if (choice >= 1 && choice < kOutputChoiceLutFile) {
+        c.kind = OutputChoice::kPreset;
+        c.space = choice - 1;
+    } else if (choice == kOutputChoiceLutFile) {
+        c.kind = OutputChoice::kLutFile;
+    }
+    return c;  // anything else streams untouched
+}
+
+// Timeline Color: the explicit display space, or -1 for Auto.
+inline int decodeTimelineChoice(int choice)
+{
+    return (choice >= 1 && choice <= ndi_color::kDisplaySpaceCount) ? choice - 1 : -1;
+}
+
+// The LUT File state planOutput needs (the plugin loads the file).
+struct LutInfo {
+    bool valid = false;
+    std::string error;     // why it was rejected
+    std::string fileName;  // for Stream Status
+    int producesSpace = 0; // LUT Produces
+};
+
+struct OutputPlan {
+    int inSpace = -1;      // preset conversion inSpace -> outSpace; -1 = none
+    int outSpace = -1;
+    bool useLut = false;   // stream through the LUT
+    int tagSpace = -1;     // lsvr_color label, -1 = no tag
+    std::string status;    // Stream Status suffix ("" = nothing to say)
+};
+
+// What the stream carries for NDI Output `out`, given the resolved timeline
+// and (LUT File only) the loaded LUT, or null when no file is set. A
+// display-space output from a timeline that isn't a known display space
+// assumes Rec.709 Gamma 2.4 — and says so, or warns when the timeline is
+// scene-referred/log or HDR (only a LUT can turn those into a display
+// picture). Passthrough, and LUT File falling back to it, label the stream
+// with the timeline's space when it is a known display space.
+inline OutputPlan planOutput(const OutputChoice& out, const Resolved& timeline, const LutInfo* lut)
+{
+    using ndi_color::displaySpaceShortName;
+    const bool timelineDisplay = (timeline.kind == kDisplay);
+    OutputPlan p;
+    p.tagSpace = timelineDisplay ? timeline.space : -1;  // what Passthrough streams
+    if (out.kind == OutputChoice::kPreset) {
+        p.inSpace = timelineDisplay ? timeline.space : kRec709Gamma24;
+        p.outSpace = out.space;
+        p.tagSpace = out.space;
+        p.status = std::string("color: ") + displaySpaceShortName(p.inSpace) + " → " + displaySpaceShortName(p.outSpace);
+        if (p.inSpace == p.outSpace) {
+            p.status += " (no conversion)";
+        }
+        if (timeline.kind == kSceneReferred) {
+            p.status += " — WARNING: timeline is " + timeline.label + " (scene-referred/log), use LUT File";
+        } else if (timeline.kind == kHdr) {
+            p.status += " — WARNING: timeline is HDR (" + timeline.label + "), use LUT File";
+        } else if (!timelineDisplay) {
+            p.status += " — timeline colour unknown" +
+                        (timeline.label.empty() ? std::string() : " (" + timeline.label + ")") +
+                        ", assuming Rec.709 G2.4";
+        }
+    } else if (out.kind == OutputChoice::kLutFile) {
+        if (!lut) {
+            p.status = "color: LUT File selected but no LUT set — passthrough";
+        } else if (lut->valid) {
+            p.useLut = true;
+            p.tagSpace = lut->producesSpace;
+            p.status = "color: LUT '" + lut->fileName + "' → " + displaySpaceShortName(lut->producesSpace);
+        } else {
+            p.status = "color: LUT invalid (" + lut->error + ") — passthrough";
+        }
+    } else if (timelineDisplay) {
+        p.status = std::string("color: passthrough (") + displaySpaceShortName(timeline.space) + ")";
+    } else if (timeline.kind == kSceneReferred || timeline.kind == kHdr) {
+        p.status = "color: passthrough — timeline is " + timeline.label + ", not a display picture";
+    }
+    return p;
 }
 
 } // namespace ndi_tlcolor

@@ -272,8 +272,6 @@ static void ndiWinLog(const char* fmt, ...)
 #define kParamColorLutSpace "ndiColorLutSpace"
 #define kParamColorLutSpaceLabel "LUT Produces"
 #define kParamColorLutSpaceHint "The display space the LUT outputs. Labels the stream (lsvr_color frame tag) for receivers that read it, such as VR.NDI."
-#define kColorOutputPassthrough 0
-#define kColorOutputLutFile (1 + ndi_color::kDisplaySpaceCount) // after the seven display spaces
 
 // GPU Acceleration Parameters
 #define kParamGPUAcceleration "gpuAcceleration"
@@ -461,7 +459,8 @@ static void* nativeUploadForQueue(NativeUploadCache& cache, NativeGPUContextRef 
     std::lock_guard<std::mutex> lock(cache.mutex);
     if (!buffer) {
         cache.failed = true;
-        NDI_LOG("%s: GPU upload failed (%zu bytes) — using the CPU fallback", what, bytes);
+        NDI_LOG_TEXT((std::string(what) + ": GPU upload failed (" + std::to_string(bytes) +
+                      " bytes) — using the CPU fallback").c_str());
         return nullptr;
     }
     auto inserted = cache.bufferByDevice.emplace(deviceKey, buffer);
@@ -944,11 +943,17 @@ struct NDIInstanceData {
     // active transform, its frame tag and Stream Status text swap under
     // colorMutex, held only for pointer/string copies.
     std::mutex colorConfigMutex;
-    int colorTimelineChoice = 0;       // 0 = Auto, else display space + 1
-    int colorOutputChoice = kColorOutputPassthrough;  // 1..7 = display space + 1, 8 = LUT File
+    int colorTimelineSpace = -1;       // Timeline Color: display space, -1 = Auto
+    ndi_tlcolor::OutputChoice colorOutput;  // NDI Output, decoded (ndi_tlcolor::decodeOutputChoice)
     std::string colorLutPathWanted;
     int colorLutSpaceChoice = 0;       // display space the LUT produces
     std::string ofxColourspace;        // kOfxImageClipPropColourspace on the source clip ("" = none)
+    // The watcher's latest timeline settings, copied in by main-thread
+    // refreshes and the watcher's own callback — so a render-thread refresh
+    // never touches the watcher's mutex (its reader can hold it across a
+    // helper spawn or reap).
+    ndi_tlcolor::Settings watcherColor;
+    bool haveWatcherColor = false;
     std::mutex colorMutex;
     std::shared_ptr<ColorEntry> colorEntry;  // null = passthrough
     const char* colorTag = nullptr;          // lsvr_color XML for the stream's space, or null
@@ -2472,10 +2477,14 @@ static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread);
 // transform, and a .cube re-parse must not run under the registry lock.
 static void timelineColorChanged()
 {
+    ndi_tlcolor::Settings settings;
+    const bool have = ndi_timelinewatch::currentTimelineColor(&settings);
     std::lock_guard<std::mutex> lock(gInstanceRegistryMutex);
     for (NDIInstanceData* data : gInstanceRegistry) {
         std::lock_guard<std::mutex> colorLock(data->colorConfigMutex);
-        if (data->colorTimelineChoice == 0 && data->colorOutputChoice != kColorOutputLutFile) {
+        data->watcherColor = settings;
+        data->haveWatcherColor = have;
+        if (data->colorTimelineSpace < 0 && data->colorOutput.kind != ndi_tlcolor::OutputChoice::kLutFile) {
             refreshOutputColorLocked(data, false);
         }
     }
@@ -2629,33 +2638,31 @@ static void refreshSTMaps(NDIInstanceData* data)
 // says the timeline colour space is.
 //
 // Timeline Color = Auto resolves in this order (Part 3): the source clip's
-// OFX 1.5 colourspace when Resolve reports one (read at render), else the
-// timeline colour settings the watcher helper reports through Resolve's
-// scripting API, else unknown — and a display-space NDI Output then assumes
-// Rec.709 Gamma 2.4 and says so. Stream Status carries the resolved
-// conversion and warns when the timeline is scene-referred/log or HDR while
-// a preset is selected (only a LUT can turn those into a display picture).
+// OFX 1.5 colourspace when Resolve reports a usable one (read at render),
+// else the timeline colour settings the watcher helper reports through
+// Resolve's scripting API, else unknown. ndi_tlcolor::planOutput then
+// decides the conversion, the tag and the Stream Status text (assumptions
+// and warnings included) — this function only gathers its inputs, acquires
+// the transform and swaps it in.
 //
-// Caller holds data->colorConfigMutex. Never blocks the render path: the
-// swap at the end holds colorMutex for pointer copies only, and the render
-// thread only reaches here through try_lock, and neither it nor the watcher
-// thread ever in LUT File mode (no .cube parsing off the main thread).
-// `onMainThread` gates what only the host's main thread should do: starting
-// the watcher and pre-warming the GPU upload.
+// Caller holds data->colorConfigMutex. Safe off the main thread: the render
+// thread only gets here through try_lock and never in LUT File mode, the
+// watcher thread never in LUT File mode either (no .cube parsing off the
+// main thread), and neither touches the watcher's own lock — they use the
+// instance's watcherColor snapshot. `onMainThread` gates what only the
+// host's main thread does: refreshing that snapshot, starting the watcher
+// and pre-warming the GPU upload.
 // ---------------------------------------------------------------------------
 static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread)
 {
-    using ndi_color::displaySpaceShortName;
-    const int timelineChoice = data->colorTimelineChoice;
-    const int outChoice = data->colorOutputChoice;
-    const bool outPreset = (outChoice >= 1 && outChoice <= ndi_color::kDisplaySpaceCount);
-    const bool outLut = (outChoice == kColorOutputLutFile);
+    const ndi_tlcolor::OutputChoice& out = data->colorOutput;
+    const bool outPreset = (out.kind == ndi_tlcolor::OutputChoice::kPreset);
 
     ndi_tlcolor::Resolved timeline;
     std::string source;
-    if (timelineChoice >= 1 && timelineChoice <= ndi_color::kDisplaySpaceCount) {
+    if (data->colorTimelineSpace >= 0) {
         timeline.kind = ndi_tlcolor::kDisplay;
-        timeline.space = timelineChoice - 1;
+        timeline.space = data->colorTimelineSpace;
         timeline.label = ndi_color::displaySpaceName(timeline.space);
         source = "set";
     } else {
@@ -2664,78 +2671,48 @@ static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread)
             source = "OFX colourspace '" + data->ofxColourspace + "'";
         }
 #ifdef NDI_TIMELINE_WATCH
-        // The watcher only runs when something needs it: start it for a
-        // display-space conversion, which can't be right without the input
-        // space. Passthrough and LUT File only use the answer for the frame
-        // tag, so they take it when the watcher is running anyway.
         // An OFX answer that names no usable space (e.g. the generic
-        // ofx_display_sdr) still lets the scripting answer in.
+        // ofx_display_sdr) still lets the scripting answer in. The watcher
+        // only runs when something needs it: a display-space conversion
+        // starts it; Passthrough and LUT File use its answer for the frame
+        // tag when it's running anyway (registering the listener is free).
         if (timeline.kind == ndi_tlcolor::kUnknown) {
             if (onMainThread) {
-                // Registering is free and lets a watcher started by the
-                // camera-clip feature feed the frame tag too.
                 ndi_timelinewatch::setColorListener(&timelineColorChanged);
                 if (outPreset) {
                     ndi_timelinewatch::ensureStarted(&timelineClipChanged);
                 }
+                data->haveWatcherColor = ndi_timelinewatch::currentTimelineColor(&data->watcherColor);
             }
-            ndi_tlcolor::Settings settings;
-            if (ndi_timelinewatch::currentTimelineColor(&settings)) {
-                const ndi_tlcolor::Resolved fromSettings = ndi_tlcolor::timelineFromSettings(settings);
+            if (data->haveWatcherColor) {
+                const ndi_tlcolor::Resolved fromSettings = ndi_tlcolor::timelineFromSettings(data->watcherColor);
                 if (fromSettings.kind != ndi_tlcolor::kUnknown || timeline.label.empty()) {
                     timeline = fromSettings;
-                    source = "Resolve timeline settings (" + settings.scienceMode + ")";
+                    source = "Resolve timeline settings (" + data->watcherColor.scienceMode + ")";
                 }
             }
         }
 #endif
     }
-    const bool timelineDisplay = (timeline.kind == ndi_tlcolor::kDisplay);
+
+    std::shared_ptr<ColorEntry> lutEntry;
+    ndi_tlcolor::LutInfo lut;
+    if (out.kind == ndi_tlcolor::OutputChoice::kLutFile && !data->colorLutPathWanted.empty()) {
+        lutEntry = colorAcquireLut(data->colorLutPathWanted);
+        const std::string& path = data->colorLutPathWanted;
+        const size_t slash = path.find_last_of("/\\");
+        lut.valid = lutEntry->valid;
+        lut.error = lutEntry->error;
+        lut.fileName = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        lut.producesSpace = std::max(0, std::min(data->colorLutSpaceChoice, ndi_color::kDisplaySpaceCount - 1));
+    }
+    const ndi_tlcolor::OutputPlan plan = ndi_tlcolor::planOutput(out, timeline, lutEntry ? &lut : nullptr);
 
     std::shared_ptr<ColorEntry> entry;
-    int tagSpace = timelineDisplay ? timeline.space : -1;  // what Passthrough streams
-    std::string status;
-    if (outPreset) {
-        const int outSpace = outChoice - 1;
-        const int inSpace = timelineDisplay ? timeline.space : ndi_color::kRec709Gamma24;
-        if (inSpace != outSpace) {
-            entry = colorAcquirePreset(inSpace, outSpace);
-        }
-        tagSpace = outSpace;
-        status = std::string("color: ") + displaySpaceShortName(inSpace) + " → " + displaySpaceShortName(outSpace);
-        if (inSpace == outSpace) {
-            status += " (no conversion)";
-        }
-        if (timeline.kind == ndi_tlcolor::kSceneReferred) {
-            status += " — WARNING: timeline is " + timeline.label + " (scene-referred/log), use LUT File";
-        } else if (timeline.kind == ndi_tlcolor::kHdr) {
-            status += " — WARNING: timeline is HDR (" + timeline.label + "), use LUT File";
-        } else if (!timelineDisplay) {
-            status += " — timeline colour unknown" +
-                      (timeline.label.empty() ? std::string() : " (" + timeline.label + ")") +
-                      ", assuming Rec.709 G2.4";
-        }
-    } else if (outLut) {
-        if (data->colorLutPathWanted.empty()) {
-            status = "color: LUT File selected but no LUT set — passthrough";
-        } else {
-            std::shared_ptr<ColorEntry> lut = colorAcquireLut(data->colorLutPathWanted);
-            const int lutSpace = std::max(0, std::min(data->colorLutSpaceChoice, ndi_color::kDisplaySpaceCount - 1));
-            if (lut->valid) {
-                entry = lut;
-                tagSpace = lutSpace;
-                const std::string& path = data->colorLutPathWanted;
-                const size_t slash = path.find_last_of("/\\");
-                status = "color: LUT '" + (slash == std::string::npos ? path : path.substr(slash + 1)) + "' → " +
-                         displaySpaceShortName(lutSpace);
-            } else {
-                status = "color: LUT invalid (" + lut->error + ") — passthrough";
-            }
-        }
-    } else if (timelineDisplay) {
-        status = std::string("color: passthrough (") + displaySpaceShortName(timeline.space) + ")";
-    } else if (timeline.kind == ndi_tlcolor::kSceneReferred || timeline.kind == ndi_tlcolor::kHdr) {
-        status = "color: passthrough — timeline is " + timeline.label + ", not a display picture";
+    if (plan.useLut) {
+        entry = lutEntry;
+    } else if (plan.inSpace >= 0 && plan.inSpace != plan.outSpace) {
+        entry = colorAcquirePreset(plan.inSpace, plan.outSpace);
     }
 
 #ifdef NDI_GPU_NATIVE
@@ -2755,12 +2732,12 @@ static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread)
         std::lock_guard<std::mutex> lock(data->colorMutex);
         old = std::move(data->colorEntry);
         data->colorEntry = entry;
-        data->colorTag = ndi_color::colorTagXml(tagSpace);
-        changed = (data->colorStatus != status);
-        data->colorStatus = status;
+        data->colorTag = ndi_color::colorTagXml(plan.tagSpace);
+        changed = (data->colorStatus != plan.status);
+        data->colorStatus = plan.status;
     }
     if (changed) {
-        NDI_LOG_TEXT(("Output Color: " + (status.empty() ? std::string("passthrough") : status) +
+        NDI_LOG_TEXT(("Output Color: " + (plan.status.empty() ? std::string("passthrough") : plan.status) +
                       (source.empty() ? std::string(" [timeline colour: not reported]")
                                       : " [timeline colour from " + source + "]"))
                          .c_str());
@@ -2803,7 +2780,7 @@ static void updateParamVisibility(NDIInstanceData* data)
 #endif
     // Output Color: the LUT fields only in LUT File mode, where Timeline
     // Color doesn't apply (the LUT defines the whole conversion).
-    const bool lutMode = (data->colorOutputChoice == kColorOutputLutFile);
+    const bool lutMode = (data->colorOutput.kind == ndi_tlcolor::OutputChoice::kLutFile);
     setParamSecret(data->colorTimelineParam, lutMode);
     setParamSecret(data->colorLutParam, !lutMode);
     setParamSecret(data->colorLutSpaceParam, !lutMode);
@@ -2879,8 +2856,8 @@ static void readInstanceParams(NDIInstanceData* myData)
     gParamHost->paramGetValue(myData->colorLutParam, &colorLutPath);
     gParamHost->paramGetValue(myData->colorLutSpaceParam, &colorLutSpace);
     std::lock_guard<std::mutex> colorLock(myData->colorConfigMutex);
-    myData->colorTimelineChoice = colorTimeline;
-    myData->colorOutputChoice = colorOutput;
+    myData->colorTimelineSpace = ndi_tlcolor::decodeTimelineChoice(colorTimeline);
+    myData->colorOutput = ndi_tlcolor::decodeOutputChoice(colorOutput);
     myData->colorLutPathWanted = colorLutPath ? colorLutPath : "";
     myData->colorLutSpaceChoice = colorLutSpace;
 }
@@ -3206,7 +3183,8 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
                 }
                 NDI_LOG_TEXT(("OFX colourspace: source clip '" + (seen.empty() ? std::string("(not set)") : seen) +
                               "', output clip '" + outSeen + "'").c_str());
-                if (myData->colorTimelineChoice == 0 && myData->colorOutputChoice != kColorOutputLutFile) {
+                if (myData->colorTimelineSpace < 0 &&
+                    myData->colorOutput.kind != ndi_tlcolor::OutputChoice::kLutFile) {
                     refreshOutputColorLocked(myData, false);
                 }
             }
@@ -3750,7 +3728,8 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
 
     // Output Color group (issue #57). Choice options are append-only —
     // projects save the index — and the display-space order is
-    // ndi_color::DisplaySpace's.
+    // ndi_color::DisplaySpace's; see ndi_tlcolor::decodeOutputChoice for
+    // the NDI Output indices (LUT File stays 8).
     OfxPropertySetHandle colorTimelineProps = NULL;
     gParamHost->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorTimeline, &colorTimelineProps);
     gPropHost->propSetString(colorTimelineProps, kOfxPropLabel, 0, kParamColorTimelineLabel);
@@ -3773,8 +3752,9 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     for (int i = 0; i < ndi_color::kDisplaySpaceCount; ++i) {
         gPropHost->propSetString(colorOutputProps, kOfxParamPropChoiceOption, i + 1, ndi_color::displaySpaceName(i));
     }
-    gPropHost->propSetString(colorOutputProps, kOfxParamPropChoiceOption, kColorOutputLutFile, "LUT File");
-    gPropHost->propSetInt(colorOutputProps, kOfxParamPropDefault, 0, kColorOutputPassthrough);
+    gPropHost->propSetString(colorOutputProps, kOfxParamPropChoiceOption, ndi_tlcolor::kOutputChoiceLutFile,
+                             "LUT File");
+    gPropHost->propSetInt(colorOutputProps, kOfxParamPropDefault, 0, ndi_tlcolor::kOutputChoicePassthrough);
     gPropHost->propSetInt(colorOutputProps, kOfxParamPropAnimates, 0, 0);
     gPropHost->propSetString(colorOutputProps, kOfxParamPropParent, 0, "outputColorGroup");
 
