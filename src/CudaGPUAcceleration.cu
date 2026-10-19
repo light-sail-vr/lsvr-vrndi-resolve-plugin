@@ -27,6 +27,7 @@
 #include <cuda_runtime.h>
 
 #include "CudaGPUAcceleration.h"
+#include "OutputColor.h"  // Output Color layouts/constants, shared with the CPU reference
 
 #include <chrono>
 #include <condition_variable>
@@ -73,6 +74,8 @@ struct CudaConvertParams {
     unsigned divisor;
     unsigned mapWidth;
     unsigned mapHeight;
+    unsigned colorMode;      // ndi_color::Mode — 0 = no Output Color transform
+    unsigned lutSize;
 };
 
 __device__ __forceinline__ float cudaClamp01(float v)
@@ -164,6 +167,70 @@ __device__ __forceinline__ void cudaWarpSampleRGB(const float* src, const float*
     rgb[2] = cudaClamp01(sum2 * invCount);
 }
 
+// Output Color stage (issue #57 Part 2): mirrors ndi_color::tableLookup and
+// ndi_color::applyTransform (src/OutputColor.h) step for step — explicit fmaf
+// for every multiply-add, exact power-of-two scales, the table index taken
+// from the float's bit pattern. The ndi_color constexpr scalars are usable in
+// device code directly (CUDA's constexpr-variable rule), so the constants
+// cannot drift from the CPU reference.
+__device__ __forceinline__ float cudaTableLookup(const float* t, float x)
+{
+    if (x < ndi_color::kTableFloor) {
+        const float s = x * ndi_color::kTableFloorInv;
+        return fmaf(t[1] - t[0], s, t[0]);
+    }
+    const unsigned bits = __float_as_uint(x);
+    unsigned i = (bits >> ndi_color::kTableShift) - ndi_color::kTableBase + 1u;
+    if (i > ndi_color::kTableLastIndex) i = ndi_color::kTableLastIndex;
+    const float f = static_cast<float>(bits & ndi_color::kTableMantMask) * ndi_color::kTableMantScale;
+    return fmaf(t[i + 1] - t[i], f, t[i]);
+}
+
+__device__ __forceinline__ void cudaApplyColor(float rgb[3], const float* color, unsigned mode,
+                                               unsigned lutSize)
+{
+    if (mode == ndi_color::kModeMatrix) {
+        const float* dec = color + ndi_color::kDecodeOffset;
+        const float* enc = color + ndi_color::kEncodeOffset;
+        const float* m = color + ndi_color::kMatrixOffset;
+        const float r = cudaTableLookup(dec, rgb[0]);
+        const float g = cudaTableLookup(dec, rgb[1]);
+        const float b = cudaTableLookup(dec, rgb[2]);
+        const float r2 = fmaf(m[0], r, fmaf(m[1], g, m[2] * b));
+        const float g2 = fmaf(m[3], r, fmaf(m[4], g, m[5] * b));
+        const float b2 = fmaf(m[6], r, fmaf(m[7], g, m[8] * b));
+        rgb[0] = cudaTableLookup(enc, cudaClamp01(r2));
+        rgb[1] = cudaTableLookup(enc, cudaClamp01(g2));
+        rgb[2] = cudaTableLookup(enc, cudaClamp01(b2));
+    } else if (mode == ndi_color::kModeLut3D) {
+        const int n = static_cast<int>(lutSize);
+        const float top = static_cast<float>(n - 1);
+        int idx[3];
+        float frac[3];
+        for (int c = 0; c < 3; ++c) {
+            const float s = fminf(fmaxf(fmaf(rgb[c], color[ndi_color::kLutScaleOffset + c],
+                                             color[ndi_color::kLutBiasOffset + c]), 0.0f), top);
+            int i = static_cast<int>(s);  // s >= 0: truncation is floor
+            if (i > n - 2) i = n - 2;
+            idx[c] = i;
+            frac[c] = s - static_cast<float>(i);
+        }
+        const float* lut = color + ndi_color::kLutDataOffset;
+        const int dr = 3, dg = n * 3, db = n * n * 3;
+        const int base = ((idx[2] * n + idx[1]) * n + idx[0]) * 3;
+        for (int ch = 0; ch < 3; ++ch) {
+            const float* p = lut + base + ch;
+            const float a00 = fmaf(p[dr] - p[0], frac[0], p[0]);
+            const float a10 = fmaf(p[dg + dr] - p[dg], frac[0], p[dg]);
+            const float a01 = fmaf(p[db + dr] - p[db], frac[0], p[db]);
+            const float a11 = fmaf(p[db + dg + dr] - p[db + dg], frac[0], p[db + dg]);
+            const float b0 = fmaf(a10 - a00, frac[1], a00);
+            const float b1 = fmaf(a11 - a01, frac[1], a01);
+            rgb[ch] = cudaClamp01(fmaf(b1 - b0, frac[2], b0));
+        }
+    }
+}
+
 // Limited-range quantization, mirroring ndi_uyvy::quantize
 // (src/UYVYEncode.h): scale*v + offset as one fma, clamped, rounded half-up.
 __device__ __forceinline__ unsigned char cudaQuantize(float v, float scale, float offset,
@@ -197,7 +264,7 @@ __device__ __forceinline__ void cudaEmitUYVY(unsigned char* dst, unsigned outWid
 }
 
 __global__ void downscaleRGBAToUYVYKernel(const float* __restrict__ src, unsigned char* dst,
-                                          CudaConvertParams p)
+                                          const float* __restrict__ color, CudaConvertParams p)
 {
     const unsigned gx = blockIdx.x * blockDim.x + threadIdx.x;
     const unsigned oy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -206,8 +273,10 @@ __global__ void downscaleRGBAToUYVYKernel(const float* __restrict__ src, unsigne
 
     float rgb1[3], rgb2[3];
     cudaBoxSampleRGB(src, p, x0, oy, rgb1);
+    cudaApplyColor(rgb1, color, p.colorMode, p.lutSize);
     if (x0 + 1 < p.outWidth) {
         cudaBoxSampleRGB(src, p, x0 + 1, oy, rgb2);
+        cudaApplyColor(rgb2, color, p.colorMode, p.lutSize);
     } else {
         rgb2[0] = rgb1[0]; rgb2[1] = rgb1[1]; rgb2[2] = rgb1[2];
     }
@@ -215,7 +284,8 @@ __global__ void downscaleRGBAToUYVYKernel(const float* __restrict__ src, unsigne
 }
 
 __global__ void warpRGBAToUYVYKernel(const float* __restrict__ src, unsigned char* dst,
-                                     const float* __restrict__ mapUV, CudaConvertParams p)
+                                     const float* __restrict__ mapUV, const float* __restrict__ color,
+                                     CudaConvertParams p)
 {
     const unsigned gx = blockIdx.x * blockDim.x + threadIdx.x;
     const unsigned oy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -224,8 +294,10 @@ __global__ void warpRGBAToUYVYKernel(const float* __restrict__ src, unsigned cha
 
     float rgb1[3], rgb2[3];
     cudaWarpSampleRGB(src, mapUV, p, x0, oy, rgb1);
+    cudaApplyColor(rgb1, color, p.colorMode, p.lutSize);
     if (x0 + 1 < p.outWidth) {
         cudaWarpSampleRGB(src, mapUV, p, x0 + 1, oy, rgb2);
+        cudaApplyColor(rgb2, color, p.colorMode, p.lutSize);
     } else {
         rgb2[0] = rgb1[0]; rgb2[1] = rgb1[1]; rgb2[2] = rgb1[2];
     }
@@ -464,6 +536,28 @@ static bool validWarpMap(void* mapDeviceBuffer, int mapWidth, int mapHeight)
     return tracked == 0 || tracked >= neededBytes;
 }
 
+// A usable colour descriptor: none, or a known mode whose buffer holds the
+// whole flattened transform (src/OutputColor.h layouts). Size is checkable
+// for module-allocated buffers (the plugin uploads through
+// cuda_gpu_create_device_buffer_for_stream, so its colour buffers are).
+static bool validColor(const cuda_color_desc* color)
+{
+    if (!color || color->mode == ndi_color::kModeNone) return true;
+    if (!color->buffer) return false;
+    size_t neededFloats = 0;
+    if (color->mode == ndi_color::kModeMatrix) {
+        neededFloats = ndi_color::kMatrixDataSize;
+    } else if (color->mode == ndi_color::kModeLut3D) {
+        if (color->lutSize < ndi_cube::kMinSize || color->lutSize > ndi_cube::kMaxSize) return false;
+        const size_t n = static_cast<size_t>(color->lutSize);
+        neededFloats = ndi_color::kLutDataOffset + n * n * n * 3;
+    } else {
+        return false;
+    }
+    const size_t tracked = trackedBufferBytes(color->buffer);
+    return tracked == 0 || tracked >= neededFloats * sizeof(float);
+}
+
 // Geometry gate shared by every convert entry point; mirrors the Metal
 // module so both platforms refuse the same sources (odd widths can't pack
 // 4:2:2 rows cleanly — the caller falls back to the CPU path).
@@ -486,25 +580,28 @@ static bool srcBufferLargeEnough(void* srcDeviceBuffer, int srcHeight, int srcRo
 }
 
 static void launchConvertKernel(cudaStream_t stream, void* srcDeviceBuffer, void* dstDeviceBuffer,
-                                void* mapDeviceBuffer, const CudaConvertParams& p)
+                                void* mapDeviceBuffer, const cuda_color_desc* color,
+                                const CudaConvertParams& p)
 {
     const dim3 block(16, 16, 1);
     const dim3 grid(((p.outWidth / 2) + block.x - 1) / block.x,
                     (p.outHeight + block.y - 1) / block.y, 1);
     const float* src = static_cast<const float*>(srcDeviceBuffer);
+    // Never dereferenced at colorMode 0.
+    const float* colorData = (p.colorMode != 0u) ? static_cast<const float*>(color->buffer) : nullptr;
     if (mapDeviceBuffer) {
         const float* mapUV = static_cast<const float*>(mapDeviceBuffer);
         warpRGBAToUYVYKernel<<<grid, block, 0, stream>>>(
-            src, static_cast<unsigned char*>(dstDeviceBuffer), mapUV, p);
+            src, static_cast<unsigned char*>(dstDeviceBuffer), mapUV, colorData, p);
     } else {
         downscaleRGBAToUYVYKernel<<<grid, block, 0, stream>>>(
-            src, static_cast<unsigned char*>(dstDeviceBuffer), p);
+            src, static_cast<unsigned char*>(dstDeviceBuffer), colorData, p);
     }
 }
 
 static CudaConvertParams makeParams(int srcWidth, int srcHeight, int srcRowFloats,
                                     int divisor, int outWidth, int outHeight,
-                                    int mapWidth, int mapHeight)
+                                    int mapWidth, int mapHeight, const cuda_color_desc* color)
 {
     CudaConvertParams p;
     p.srcWidth = static_cast<unsigned>(srcWidth);
@@ -515,6 +612,9 @@ static CudaConvertParams makeParams(int srcWidth, int srcHeight, int srcRowFloat
     p.divisor = static_cast<unsigned>(divisor);
     p.mapWidth = static_cast<unsigned>(mapWidth);
     p.mapHeight = static_cast<unsigned>(mapHeight);
+    const bool haveColor = color && color->mode != ndi_color::kModeNone;
+    p.colorMode = haveColor ? static_cast<unsigned>(color->mode) : 0u;
+    p.lutSize = haveColor ? static_cast<unsigned>(color->lutSize) : 0u;
     return p;
 }
 
@@ -526,9 +626,11 @@ static bool runConvertKernel(CudaGPUContextRef context, void* cudaStream, void* 
                              void* mapDeviceBuffer, int mapWidth, int mapHeight,
                              int divisor,
                              int outWidth, int outHeight,
+                             const cuda_color_desc* color,
                              void* cpuOut, size_t outBytes, const char* label)
 {
     if (!context || !srcDeviceBuffer || !cpuOut) return false;
+    if (!validColor(color)) return false;
     if (!validConvertGeometry(srcWidth, srcHeight, srcRowFloats, divisor, outWidth, outHeight)) {
         return false;
     }
@@ -560,8 +662,8 @@ static bool runConvertKernel(CudaGPUContextRef context, void* cudaStream, void* 
     }
 
     const CudaConvertParams p = makeParams(srcWidth, srcHeight, srcRowFloats,
-                                           divisor, outWidth, outHeight, mapWidth, mapHeight);
-    launchConvertKernel(stream, srcDeviceBuffer, context->stagingDev, mapDeviceBuffer, p);
+                                           divisor, outWidth, outHeight, mapWidth, mapHeight, color);
+    launchConvertKernel(stream, srcDeviceBuffer, context->stagingDev, mapDeviceBuffer, color, p);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         CUDA_LOG("Blocking convert: kernel launch failed: %s", cudaGetErrorString(err));
@@ -590,12 +692,13 @@ bool cuda_gpu_buffer_downscale_to_uyvy(CudaGPUContextRef context,
                                        int srcWidth, int srcHeight, int srcRowFloats,
                                        int divisor,
                                        int outWidth, int outHeight,
+                                       const cuda_color_desc* color,
                                        unsigned char* uyvyOut)
 {
     const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2;
     return runConvertKernel(context, cudaStream, srcDeviceBuffer,
                             srcWidth, srcHeight, srcRowFloats, nullptr, 0, 0, divisor,
-                            outWidth, outHeight, uyvyOut, outBytes, "UYVY");
+                            outWidth, outHeight, color, uyvyOut, outBytes, "UYVY");
 }
 
 bool cuda_gpu_buffer_warp_to_uyvy(CudaGPUContextRef context,
@@ -605,6 +708,7 @@ bool cuda_gpu_buffer_warp_to_uyvy(CudaGPUContextRef context,
                                   void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                   int divisor,
                                   int outWidth, int outHeight,
+                                  const cuda_color_desc* color,
                                   unsigned char* uyvyOut)
 {
     if (!mapDeviceBuffer) return false;
@@ -612,7 +716,7 @@ bool cuda_gpu_buffer_warp_to_uyvy(CudaGPUContextRef context,
     return runConvertKernel(context, cudaStream, srcDeviceBuffer,
                             srcWidth, srcHeight, srcRowFloats,
                             mapDeviceBuffer, mapWidth, mapHeight, divisor,
-                            outWidth, outHeight, uyvyOut, outBytes, "warp UYVY");
+                            outWidth, outHeight, color, uyvyOut, outBytes, "warp UYVY");
 }
 
 // Non-blocking variant: enqueue only. Validation mirrors runConvertKernel so
@@ -627,9 +731,11 @@ static cuda_submit_status submitConvertInternal(CudaGPUContextRef context,
                                                 void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                                 int divisor,
                                                 int outWidth, int outHeight,
+                                                const cuda_color_desc* color,
                                                 cuda_downscale_done_fn done, void* user)
 {
     if (!context || !srcDeviceBuffer || !done) return CUDA_SUBMIT_INVALID;
+    if (!validColor(color)) return CUDA_SUBMIT_INVALID;
     if (!validConvertGeometry(srcWidth, srcHeight, srcRowFloats, divisor, outWidth, outHeight)) {
         return CUDA_SUBMIT_INVALID;
     }
@@ -681,9 +787,9 @@ static cuda_submit_status submitConvertInternal(CudaGPUContextRef context,
     slot->outBytes = outBytes;
 
     const CudaConvertParams p = makeParams(srcWidth, srcHeight, srcRowFloats,
-                                           divisor, outWidth, outHeight, mapWidth, mapHeight);
+                                           divisor, outWidth, outHeight, mapWidth, mapHeight, color);
     cudaEventRecord(slot->evStart, stream);
-    launchConvertKernel(stream, srcDeviceBuffer, slot->devBuffer, mapDeviceBuffer, p);
+    launchConvertKernel(stream, srcDeviceBuffer, slot->devBuffer, mapDeviceBuffer, color, p);
     cudaError_t err = cudaGetLastError();
     const bool kernelLaunched = (err == cudaSuccess);
     if (err == cudaSuccess) err = cudaEventRecord(slot->evEnd, stream);
@@ -716,12 +822,13 @@ cuda_submit_status cuda_gpu_downscale_submit(CudaGPUContextRef context,
                                              int srcWidth, int srcHeight, int srcRowFloats,
                                              int divisor,
                                              int outWidth, int outHeight,
+                                             const cuda_color_desc* color,
                                              cuda_downscale_done_fn done, void* user)
 {
     return submitConvertInternal(context, cudaStream, srcDeviceBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  nullptr, 0, 0, divisor,
-                                 outWidth, outHeight, done, user);
+                                 outWidth, outHeight, color, done, user);
 }
 
 cuda_submit_status cuda_gpu_warp_submit(CudaGPUContextRef context,
@@ -731,13 +838,14 @@ cuda_submit_status cuda_gpu_warp_submit(CudaGPUContextRef context,
                                         void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                         int divisor,
                                         int outWidth, int outHeight,
+                                        const cuda_color_desc* color,
                                         cuda_downscale_done_fn done, void* user)
 {
     if (!mapDeviceBuffer) return CUDA_SUBMIT_INVALID;
     return submitConvertInternal(context, cudaStream, srcDeviceBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  mapDeviceBuffer, mapWidth, mapHeight, divisor,
-                                 outWidth, outHeight, done, user);
+                                 outWidth, outHeight, color, done, user);
 }
 
 void cuda_gpu_downscale_release(CudaGPUContextRef context, void* slot)

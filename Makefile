@@ -54,7 +54,7 @@ dev: $(BUNDLE_EXECUTABLE)
 # --expect assertions. Needs the NDI SDK; no Resolve. Builds only.
 ndi-verify:
 	mkdir -p build
-	$(CXX) -std=c++17 -O2 -I$(NDI_INCLUDE) tools/ndi_verify.cpp \
+	$(CXX) -std=c++17 -O2 -Isrc -I$(NDI_INCLUDE) tools/ndi_verify.cpp \
 		-o build/ndi_verify -headerpad_max_install_names $(NDI_LIB)
 	install_name_tool -change "@rpath/libndi.dylib" $(NDI_LIB) build/ndi_verify
 	@echo "built build/ndi_verify — run ./build/ndi_verify --help"
@@ -68,6 +68,12 @@ test:
 	./build/test_stream_resolution
 	$(CXX) -Isrc tests/test_uyvy_encode.cpp -o build/test_uyvy_encode
 	./build/test_uyvy_encode
+	$(CXX) -Isrc tests/test_cube_lut.cpp -o build/test_cube_lut
+	./build/test_cube_lut
+	$(CXX) -Isrc tests/test_output_color.cpp -o build/test_output_color
+	./build/test_output_color
+	$(CXX) -Isrc tests/test_timeline_color.cpp -o build/test_timeline_color
+	./build/test_timeline_color
 	$(CXX) -Isrc tests/test_stereo_pair.cpp -o build/test_stereo_pair
 	./build/test_stereo_pair
 	$(CXX) -Isrc tests/test_platform_paths.cpp -o build/test_platform_paths

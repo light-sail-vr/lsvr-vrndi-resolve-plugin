@@ -13,6 +13,20 @@ extern "C" {
 // Opaque handle for Metal GPU context
 typedef struct MetalGPUContext* MetalGPUContextRef;
 
+// Output Color stage (issue #57 Part 2) for every convert entry point below:
+// an ndi_color::Transform (src/OutputColor.h) whose `data` was uploaded to a
+// buffer on the queue's device (metal_gpu_create_shared_buffer_for_queue).
+// The kernels apply it per output pixel between the box/warp sample and the
+// UYVY encode, byte-identical to ndi_color::applyTransform. NULL, or mode 0,
+// means no transform — the output is then exactly the passthrough bytes. A
+// descriptor whose buffer is missing or too small for its mode is refused
+// like any other invalid input (INVALID / false).
+typedef struct {
+    void* buffer;   // id<MTLBuffer> holding Transform::data
+    int mode;       // ndi_color::Mode: 0 none, 1 preset matrix, 2 3D LUT
+    int lutSize;    // lattice points per axis (mode 2 only)
+} metal_color_desc;
+
 // Initialize Metal GPU context
 MetalGPUContextRef metal_gpu_init(void);
 
@@ -23,11 +37,12 @@ void metal_gpu_shutdown(MetalGPUContextRef context);
 // BT.709 limited range): uploads it and runs the fused kernel at divisor 1.
 // Returns false for anything that kernel refuses (e.g. odd widths) — the
 // caller falls back to the CPU converter (src/UYVYEncode.h).
-bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context, 
-                                   const float* rgbaData, 
+bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context,
+                                   const float* rgbaData,
                                    unsigned char* uyvyData,
-                                   int width, 
-                                   int height);
+                                   int width,
+                                   int height,
+                                   const metal_color_desc* color);
 
 // ---------------------------------------------------------------------------
 // GPU-native fast path (issue #5): the host hands the frame as an id<MTLBuffer>
@@ -47,6 +62,7 @@ bool metal_gpu_buffer_downscale_to_uyvy(MetalGPUContextRef context,
                                         int srcWidth, int srcHeight, int srcRowFloats,
                                         int divisor,
                                         int outWidth, int outHeight,
+                                        const metal_color_desc* color,
                                         unsigned char* uyvyOut);
 
 // ---------------------------------------------------------------------------
@@ -69,6 +85,7 @@ bool metal_gpu_buffer_warp_to_uyvy(MetalGPUContextRef context,
                                    void* mapMetalBuffer, int mapWidth, int mapHeight,
                                    int divisor,
                                    int outWidth, int outHeight,
+                                   const metal_color_desc* color,
                                    unsigned char* uyvyOut);
 
 // ---------------------------------------------------------------------------
@@ -113,6 +130,7 @@ metal_submit_status metal_gpu_downscale_submit(MetalGPUContextRef context,
                                                int srcWidth, int srcHeight, int srcRowFloats,
                                                int divisor,
                                                int outWidth, int outHeight,
+                                               const metal_color_desc* color,
                                                metal_downscale_done_fn done, void* user);
 
 // Non-blocking STMap warp: identical contract to metal_gpu_downscale_submit
@@ -126,6 +144,7 @@ metal_submit_status metal_gpu_warp_submit(MetalGPUContextRef context,
                                           void* mapMetalBuffer, int mapWidth, int mapHeight,
                                           int divisor,
                                           int outWidth, int outHeight,
+                                          const metal_color_desc* color,
                                           metal_downscale_done_fn done, void* user);
 
 void metal_gpu_downscale_release(MetalGPUContextRef context, void* slot);

@@ -7,6 +7,7 @@
 // Build & run: make test-metal (macOS with any Metal device; skips cleanly without one)
 
 #include "MetalGPUAcceleration.h"
+#include "OutputColor.h"
 #include "STMap.h"
 #include "StreamResolution.h"
 #include "UYVYEncode.h"
@@ -124,7 +125,7 @@ int main()
             referenceUYVY(small.data(), outW, outH, expected);
             bool ran = metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, srcBuf,
                                                           srcW, srcH, c.rowFloats, c.divisor,
-                                                          outW, outH, actual.data());
+                                                          outW, outH, nullptr, actual.data());
             char name[128];
             std::snprintf(name, sizeof(name), "UYVY kernel matches CPU reference (%s)", c.name);
             check(ran && compareBuffers(actual.data(), expected.data(), expected.size(), 0, name), name);
@@ -156,12 +157,12 @@ int main()
         fillFrame(frame, srcW, srcH, srcW * 4);
         std::vector<uint8_t> expected, actual(static_cast<size_t>(srcW) * srcH * 2, 0);
         referenceUYVY(frame.data(), srcW, srcH, expected);
-        bool ran = metal_gpu_convert_rgba_to_uyvy(ctx, frame.data(), actual.data(), srcW, srcH);
+        bool ran = metal_gpu_convert_rgba_to_uyvy(ctx, frame.data(), actual.data(), srcW, srcH, nullptr);
         check(ran && compareBuffers(actual.data(), expected.data(), expected.size(), 0,
                                     "CPU-buffer UYVY"),
               "CPU-buffer convert matches CPU reference byte-for-byte");
         std::vector<uint8_t> odd(static_cast<size_t>(srcW - 1) * srcH * 2, 0);
-        check(!metal_gpu_convert_rgba_to_uyvy(ctx, frame.data(), odd.data(), srcW - 1, srcH),
+        check(!metal_gpu_convert_rgba_to_uyvy(ctx, frame.data(), odd.data(), srcW - 1, srcH, nullptr),
               "CPU-buffer convert refuses odd widths (CPU converter takes them)");
     }
 
@@ -223,7 +224,7 @@ int main()
             AsyncCapture cap;
             bool submitted = metal_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                         srcW, srcH, srcW * 4, 2, outW, outH,
-                                                        onDone, &cap) == METAL_SUBMIT_OK;
+                                                        nullptr, onDone, &cap) == METAL_SUBMIT_OK;
             bool done = submitted && waitFired(cap, 1);
             check(done && cap.ok && cap.out.size() == expected.size() &&
                       compareBuffers(cap.out.data(), expected.data(), expected.size(), 0,
@@ -240,13 +241,13 @@ int main()
             for (int i = 0; i < 4; ++i) {
                 if (metal_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                srcW, srcH, srcW * 4, 2, outW, outH,
-                                               onDone, &caps[i]) == METAL_SUBMIT_OK) {
+                                               nullptr, onDone, &caps[i]) == METAL_SUBMIT_OK) {
                     ++accepted;
                 }
             }
             bool fifthRefused = metal_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                            srcW, srcH, srcW * 4, 2, outW, outH,
-                                                           onDone, &caps[4]) == METAL_SUBMIT_BUSY;
+                                                           nullptr, onDone, &caps[4]) == METAL_SUBMIT_BUSY;
             bool allFired = true;
             for (int i = 0; i < 4; ++i) {
                 allFired = allFired && waitFired(caps[i], 1);
@@ -255,7 +256,7 @@ int main()
             AsyncCapture after;
             bool afterOk = (metal_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                        srcW, srcH, srcW * 4, 2, outW, outH,
-                                                       onDone, &after) == METAL_SUBMIT_OK) &&
+                                                       nullptr, onDone, &after) == METAL_SUBMIT_OK) &&
                            waitFired(after, 1);
             if (after.slot) metal_gpu_downscale_release(ctx, after.slot);
             check(accepted == 4 && fifthRefused && allFired && afterOk,
@@ -301,11 +302,11 @@ int main()
                 std::vector<uint8_t> warped(plain.size(), 1);
                 bool ranPlain = metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, srcBuf,
                                                                    srcW, srcH, srcW * 4, divisor,
-                                                                   outW, outH, plain.data());
+                                                                   outW, outH, nullptr, plain.data());
                 bool ranWarp = metal_gpu_buffer_warp_to_uyvy(ctx, nullptr, srcBuf,
                                                              srcW, srcH, srcW * 4,
                                                              identBuf, srcW, srcH, divisor,
-                                                             outW, outH, warped.data());
+                                                             outW, outH, nullptr, warped.data());
                 char name[128];
                 std::snprintf(name, sizeof(name),
                               "identity-map warp UYVY == downscale kernel (divisor %d)", divisor);
@@ -356,7 +357,7 @@ int main()
                 bool ran = metal_gpu_buffer_warp_to_uyvy(ctx, nullptr, wsrcBuf,
                                                          srcW, srcH, c.rowFloats,
                                                          mapBuf, mapW, mapH, c.divisor,
-                                                         outW, outH, actual.data());
+                                                         outW, outH, nullptr, actual.data());
                 char name[128];
                 std::snprintf(name, sizeof(name), "warp UYVY matches CPU reference (%s)", c.name);
                 check(ran && compareBuffers(actual.data(), expected.data(), expected.size(), 0, name),
@@ -394,12 +395,12 @@ int main()
             bool ranBlocking = metal_gpu_buffer_warp_to_uyvy(ctx, nullptr, srcBuf,
                                                              srcW, srcH, srcW * 4,
                                                              mapBuf, mapW, mapH, 2,
-                                                             outW, outH, blocking.data());
+                                                             outW, outH, nullptr, blocking.data());
             AsyncCapture cap;
             bool submitted = metal_gpu_warp_submit(ctx, nullptr, srcBuf,
                                                    srcW, srcH, srcW * 4,
                                                    mapBuf, mapW, mapH, 2, outW, outH,
-                                                   onDone, &cap) == METAL_SUBMIT_OK;
+                                                   nullptr, onDone, &cap) == METAL_SUBMIT_OK;
             bool done = false;
             if (submitted) {
                 std::unique_lock<std::mutex> lock(cap.m);
@@ -420,13 +421,13 @@ int main()
             bool nullRefused = !metal_gpu_buffer_warp_to_uyvy(ctx, nullptr, srcBuf,
                                                               srcW, srcH, srcW * 4,
                                                               nullptr, mapW, mapH, 1,
-                                                              outW, outH, outBytes.data());
+                                                              outW, outH, nullptr, outBytes.data());
             void* tiny = metal_gpu_create_shared_buffer(ctx, nullptr, 16);
             auto noopDone = [](void*, void*, const void*, size_t, double, bool) {};
             bool tinyRefused = metal_gpu_warp_submit(ctx, nullptr, srcBuf,
                                                      srcW, srcH, srcW * 4,
                                                      tiny, mapW, mapH, 1, outW, outH,
-                                                     noopDone, nullptr) == METAL_SUBMIT_INVALID;
+                                                     nullptr, noopDone, nullptr) == METAL_SUBMIT_INVALID;
             metal_gpu_release_buffer(tiny);
             check(nullRefused && tinyRefused, "warp refuses null/undersized map buffers as invalid");
         }
@@ -434,6 +435,236 @@ int main()
         metal_gpu_release_buffer(mapBuf);
         metal_gpu_release_buffer(identBuf);
         metal_gpu_release_buffer(srcBuf);
+    }
+
+    // ------------------------------------------------------------------
+    // Output Color stage (issue #57 Part 2): every preset pair and 3D LUTs,
+    // through the downscale and warp kernels, blocking and async, must be
+    // byte-identical to the CPU converter running ndi_color::applyTransform.
+    // ------------------------------------------------------------------
+    {
+        // A frame carrying the full 33^3 sweep, then a fine grey ramp.
+        const int sw = 198, sh = 182;
+        std::vector<float> sweep(static_cast<size_t>(sw) * sh * 4);
+        for (int k = 0; k < sw * sh; ++k) {
+            float* px = sweep.data() + static_cast<size_t>(k) * 4;
+            if (k < 33 * 33 * 33) {
+                px[0] = (k % 33) / 32.0f;
+                px[1] = (k / 33 % 33) / 32.0f;
+                px[2] = (k / 1089) / 32.0f;
+            } else {
+                px[0] = px[1] = px[2] = static_cast<float>(k - 33 * 33 * 33) / (sw * sh - 33 * 33 * 33 - 1);
+            }
+            px[3] = 1.0f;
+        }
+        void* sweepBuf = metal_gpu_create_shared_buffer(ctx, sweep.data(), sweep.size() * sizeof(float));
+
+        auto cpuRef = [](const float* src, int w, int h, const ndi_color::Transform& t,
+                         std::vector<uint8_t>& out) {
+            out.assign(static_cast<size_t>(w) * h * 2, 0);
+            ndi_uyvy::convertRGBAToUYVYFlipped(src, w, h, out.data(),
+                                               [&](float* rgb) { ndi_color::applyTransform(t, rgb); });
+        };
+        struct Uploaded {
+            void* buffer = nullptr;
+            metal_color_desc desc = {nullptr, 0, 0};
+        };
+        auto upload = [&](const ndi_color::Transform& t) {
+            Uploaded u;
+            u.buffer = metal_gpu_create_shared_buffer(ctx, t.data.data(), t.data.size() * sizeof(float));
+            u.desc.buffer = u.buffer;
+            u.desc.mode = t.mode;
+            u.desc.lutSize = t.lutSize;
+            return u;
+        };
+
+        // Every preset pair over the sweep frame, divisor 1.
+        int pairs = 0, exact = 0;
+        for (int a = 0; a < ndi_color::kDisplaySpaceCount; ++a) {
+            for (int b = 0; b < ndi_color::kDisplaySpaceCount; ++b) {
+                if (a == b) continue;
+                ndi_color::Transform t;
+                ndi_color::buildPreset(a, b, &t);
+                Uploaded u = upload(t);
+                std::vector<uint8_t> expected, actual(static_cast<size_t>(sw) * sh * 2, 0);
+                cpuRef(sweep.data(), sw, sh, t, expected);
+                const bool ran = metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                    sw, sh, &u.desc, actual.data());
+                ++pairs;
+                if (ran && compareBuffers(actual.data(), expected.data(), expected.size(), 0,
+                                          ndi_color::displaySpaceName(b))) {
+                    ++exact;
+                }
+                metal_gpu_release_buffer(u.buffer);
+            }
+        }
+        {
+            char name[128];
+            std::snprintf(name, sizeof(name), "all %d preset pairs byte-identical to the CPU over a 33^3 sweep",
+                          pairs);
+            check(pairs == 42 && exact == pairs, name);
+        }
+
+        // Box average THEN transform: divisor 2, padded rows, one preset.
+        {
+            const int rowFloats = (srcW + 2) * 4;
+            std::vector<float> frame;
+            fillFrame(frame, srcW, srcH, rowFloats);
+            void* buf = metal_gpu_create_shared_buffer(ctx, frame.data(), frame.size() * sizeof(float));
+            int outW = 0, outH = 0;
+            ndi_stream::outputDims(srcW, srcH, 2, &outW, &outH);
+            std::vector<float> small(static_cast<size_t>(outW) * outH * 4);
+            ndi_stream::downscaleRGBABox(frame.data(), srcW, srcH, rowFloats, 2, small.data(), outW, outH);
+            ndi_color::Transform t;
+            ndi_color::buildPreset(ndi_color::kRec709Gamma24, ndi_color::kP3D65Gamma22, &t);
+            Uploaded u = upload(t);
+            std::vector<uint8_t> expected, actual(static_cast<size_t>(outW) * outH * 2, 0);
+            cpuRef(small.data(), outW, outH, t, expected);
+            const bool ran = metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, buf, srcW, srcH, rowFloats, 2,
+                                                                outW, outH, &u.desc, actual.data());
+            check(ran && compareBuffers(actual.data(), expected.data(), expected.size(), 0, "preset divisor 2"),
+                  "preset after a divisor-2 box on padded rows matches the CPU");
+            metal_gpu_release_buffer(u.buffer);
+            metal_gpu_release_buffer(buf);
+        }
+
+        // LUTs: an identity cube is the passthrough bytes; a curved cube with a
+        // wide domain, and a 65-point one, match the CPU exactly.
+        auto lattice = [](int n, float dmin, float dmax, bool curved) {
+            ndi_cube::CubeLUT lut;
+            lut.size = n;
+            for (int c = 0; c < 3; ++c) {
+                lut.domainMin[c] = dmin;
+                lut.domainMax[c] = dmax;
+            }
+            const double step = (static_cast<double>(dmax) - dmin) / (n - 1);
+            for (int b = 0; b < n; ++b)
+                for (int g = 0; g < n; ++g)
+                    for (int r = 0; r < n; ++r) {
+                        const double R = dmin + r * step, G = dmin + g * step, B = dmin + b * step;
+                        if (curved) {
+                            lut.rgb.push_back(static_cast<float>(0.9 * std::pow(std::fabs(R), 1.7) + 0.1 * G));
+                            lut.rgb.push_back(static_cast<float>(std::sqrt(std::fabs(G)) * 0.8 + 0.2 * B));
+                            lut.rgb.push_back(static_cast<float>(1.05 * B - 0.03 * R));
+                        } else {
+                            lut.rgb.push_back(static_cast<float>(R));
+                            lut.rgb.push_back(static_cast<float>(G));
+                            lut.rgb.push_back(static_cast<float>(B));
+                        }
+                    }
+            return lut;
+        };
+        {
+            ndi_color::Transform ident;
+            ndi_color::buildLut(lattice(33, 0.0f, 1.0f, false), &ident);
+            Uploaded u = upload(ident);
+            std::vector<uint8_t> plain(static_cast<size_t>(sw) * sh * 2, 0), viaLut(plain.size(), 1);
+            const bool ranPlain = metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                     sw, sh, nullptr, plain.data());
+            const bool ranLut = metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                   sw, sh, &u.desc, viaLut.data());
+            check(ranPlain && ranLut && std::memcmp(plain.data(), viaLut.data(), plain.size()) == 0,
+                  "identity 33-point LUT streams the passthrough bytes");
+            metal_gpu_release_buffer(u.buffer);
+        }
+        for (int n : {17, 65}) {
+            ndi_color::Transform t;
+            ndi_color::buildLut(lattice(n, -0.1f, 1.2f, true), &t);
+            Uploaded u = upload(t);
+            std::vector<uint8_t> expected, actual(static_cast<size_t>(sw) * sh * 2, 0);
+            cpuRef(sweep.data(), sw, sh, t, expected);
+            const bool ran = metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                sw, sh, &u.desc, actual.data());
+            char name[128];
+            std::snprintf(name, sizeof(name), "curved %d-point LUT, wide domain, matches the CPU byte-for-byte", n);
+            check(ran && compareBuffers(actual.data(), expected.data(), expected.size(), 0, name), name);
+            metal_gpu_release_buffer(u.buffer);
+        }
+
+        // Warp + colour, and the async path: a smooth map warp with a preset
+        // matches the CPU warp + transform; async equals blocking.
+        {
+            const int mw = 120, mh = 96;
+            std::vector<float> mapUV(static_cast<size_t>(mw) * mh * 2);
+            for (int row = 0; row < mh; ++row)
+                for (int x = 0; x < mw; ++x) {
+                    const float xn = (x + 0.5f) / mw, yn = (mh - 1 - row + 0.5f) / mh;
+                    mapUV[(static_cast<size_t>(row) * mw + x) * 2 + 0] = 0.05f + 0.9f * xn * xn;
+                    mapUV[(static_cast<size_t>(row) * mw + x) * 2 + 1] = 0.1f + 0.75f * yn + 0.1f * xn;
+                }
+            void* mapBuf = metal_gpu_create_shared_buffer(ctx, mapUV.data(), mapUV.size() * sizeof(float));
+            ndi_color::Transform t;
+            ndi_color::buildPreset(ndi_color::kRec2020Gamma24, ndi_color::kSRGB, &t);
+            Uploaded u = upload(t);
+            int ow = 0, oh = 0;
+            ndi_stream::outputDims(mw, mh, 2, &ow, &oh);
+            std::vector<float> small(static_cast<size_t>(ow) * oh * 4);
+            ndi_stmap::warpRGBABox(sweep.data(), sw, sh, sw * 4, mapUV.data(), mw, mh, 2, small.data(), ow, oh);
+            std::vector<uint8_t> expected, warped(static_cast<size_t>(ow) * oh * 2, 1);
+            cpuRef(small.data(), ow, oh, t, expected);
+            const bool ranWarp = metal_gpu_buffer_warp_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, mapBuf,
+                                                               mw, mh, 2, ow, oh, &u.desc, warped.data());
+            check(ranWarp && compareBuffers(warped.data(), expected.data(), expected.size(), 0, "warp + preset"),
+                  "warp (divisor 2) + preset matches the CPU warp + transform");
+
+            struct Cap {
+                std::mutex m;
+                std::condition_variable cv;
+                bool fired = false, ok = false;
+                std::vector<uint8_t> out;
+                void* slot = nullptr;
+            } cap;
+            auto onDone = [](void* user, void* slot, const void* outPtr, size_t outBytes, double, bool ok) {
+                Cap* c = static_cast<Cap*>(user);
+                std::lock_guard<std::mutex> lock(c->m);
+                c->ok = ok;
+                c->slot = slot;
+                c->out.assign(static_cast<const uint8_t*>(outPtr), static_cast<const uint8_t*>(outPtr) + outBytes);
+                c->fired = true;
+                c->cv.notify_all();
+            };
+            bool done = false;
+            if (metal_gpu_warp_submit(ctx, nullptr, sweepBuf, sw, sh, sw * 4, mapBuf, mw, mh, 2, ow, oh, &u.desc,
+                                      onDone, &cap) == METAL_SUBMIT_OK) {
+                std::unique_lock<std::mutex> lock(cap.m);
+                done = cap.cv.wait_for(lock, std::chrono::seconds(5), [&] { return cap.fired; });
+            }
+            check(done && cap.ok && cap.out == warped, "async warp + preset matches the blocking path");
+            if (cap.slot) metal_gpu_downscale_release(ctx, cap.slot);
+
+            // CPU-buffer entry point carries the transform too.
+            std::vector<uint8_t> full, cpuBuf(static_cast<size_t>(sw) * sh * 2, 2);
+            cpuRef(sweep.data(), sw, sh, t, full);
+            const bool ranCpuBuf = metal_gpu_convert_rgba_to_uyvy(ctx, sweep.data(), cpuBuf.data(), sw, sh, &u.desc);
+            check(ranCpuBuf && cpuBuf == full, "CPU-buffer convert + preset matches the CPU");
+
+            metal_gpu_release_buffer(u.buffer);
+            metal_gpu_release_buffer(mapBuf);
+        }
+
+        // A descriptor whose buffer can't hold its transform is refused.
+        {
+            void* tiny = metal_gpu_create_shared_buffer(ctx, nullptr, 64);
+            metal_color_desc lutDesc = {tiny, ndi_color::kModeLut3D, 33};
+            metal_color_desc matDesc = {tiny, ndi_color::kModeMatrix, 0};
+            metal_color_desc noBuf = {nullptr, ndi_color::kModeMatrix, 0};
+            metal_color_desc badMode = {tiny, 7, 0};
+            std::vector<uint8_t> out(static_cast<size_t>(sw) * sh * 2, 0);
+            auto noopDone = [](void*, void*, const void*, size_t, double, bool) {};
+            const bool refused =
+                !metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &lutDesc,
+                                                    out.data()) &&
+                !metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &matDesc,
+                                                    out.data()) &&
+                !metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &badMode,
+                                                    out.data()) &&
+                metal_gpu_downscale_submit(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &noBuf, noopDone,
+                                           nullptr) == METAL_SUBMIT_INVALID;
+            check(refused, "undersized, missing or unknown colour descriptors are refused");
+            metal_gpu_release_buffer(tiny);
+        }
+
+        metal_gpu_release_buffer(sweepBuf);
     }
 
     metal_gpu_shutdown(ctx);

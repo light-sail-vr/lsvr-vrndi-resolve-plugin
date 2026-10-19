@@ -11,8 +11,10 @@
   interpreter (fusionscript), so the plugin spawns ONE long-running helper
   that polls GetCurrentTimeline().GetCurrentVideoItem() ~2x/s and prints the
   clip path per poll; a reader thread here dedupes and fans changes out
-  through the registered callback. The helper is src/ndi_timeline_watch.lua
-  under Resolve's OWN bundled interpreter (`fuscript -q -l lua`: macOS
+  through the registered callback. Since issue #57 it also reports the
+  timeline's colour settings ("@color" lines) for Timeline Color = Auto.
+  The helper is src/ndi_timeline_watch.lua under Resolve's OWN bundled
+  interpreter (`fuscript -q -l lua`: macOS
   Contents/Libraries/Fusion/fuscript, Windows fuscript.exe beside Resolve.exe)
   — nothing to install (issue #34: both OSes ship a python at the canonical
   path that isn't one — Apple's CLT shim, the Store alias stub — which spawns
@@ -45,6 +47,8 @@
 #include <functional>
 #include <string>
 
+#include "TimelineColor.h"
+
 namespace ndi_timelinewatch {
 
 // Start the helper + reader thread (idempotent; the first call's callback
@@ -58,6 +62,16 @@ std::string currentClipPath();
 // False until the helper produces its first report, or after it dies (it is
 // respawned with backoff). *detail carries a human-readable reason for logs.
 bool healthy(std::string* detail);
+
+// Timeline colour settings (issue #57 Part 3, Timeline Color = Auto): the
+// helper also reports the current timeline's colour settings as an "@color"
+// line (src/TimelineColor.h) when they change. The listener fires on the
+// reader thread after each change (idempotent: the first listener set wins);
+// currentTimelineColor returns the latest settings, false until the helper
+// has reported any. Both work whether or not the watcher was started for
+// the camera-clip feature — the plugin starts it for whichever needs it.
+void setColorListener(std::function<void()> onColorChange);
+bool currentTimelineColor(ndi_tlcolor::Settings* out);
 
 // Stop the helper and reader thread (plugin unload).
 void shutdown();

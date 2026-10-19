@@ -21,6 +21,11 @@
 // specific receiver's settings (VR.NDI Quest native uses highest + best, so
 // a UYVY sender arrives there as P216).
 //
+// It also reports the plugin's per-frame colour label (issue #57 Part 4): the
+// lsvr_color XML in each video frame's metadata, which names the stream's
+// display space (NDI's own ndi_color_info can't name P3-D65 or gamma 2.2).
+// `--expect-color "P3-D65 Gamma 2.2"` (or `none`) asserts it.
+//
 // `--patches` reads back the patch chart (scripts/gen_patch_chart.py, issue
 // #57): it averages the centre of each patch of the last frame, prints the
 // received 8-bit R'G'B' next to the chart's source values, and fails when a
@@ -35,6 +40,8 @@
 #include <cstdio>
 
 #include <Processing.NDI.Lib.h>
+
+#include "OutputColor.h"  // lsvr_color tag parsing (src/, issue #57)
 
 #include <algorithm>
 #include <chrono>
@@ -67,6 +74,7 @@ struct Options {
     std::string expectFourCC;
     bool listOnly = false;
     bool quiet = false;
+    std::string expectColor;   // display-space name, or "none"
     bool patches = false;
     std::string patchRegion = "full";
     int patchTolerance = 2;
@@ -78,6 +86,7 @@ void usage()
         "usage: ndi_verify [--source <substring>] [--duration <s>] [--find-timeout <s>]\n"
         "                  [--bandwidth highest|lowest] [--color fastest|best|uyvy|bgra]\n"
         "                  [--expect WxH] [--expect-fps N] [--expect-fourcc UYVY]\n"
+        "                  [--expect-color \"Rec.709 Gamma 2.4\"|none]\n"
         "                  [--dump out.ppm] [--iface en0] [--list] [--quiet]\n"
         "                  [--patches [--patch-region full|left|right|top|bottom]\n"
         "                             [--patch-tolerance N]]\n"
@@ -111,6 +120,7 @@ bool parseArgs(int argc, char** argv, Options* o)
         }
         else if (a == "--expect-fps") { if (!next(&v)) return false; o->expectFps = std::atof(v.c_str()); }
         else if (a == "--expect-fourcc") { if (!next(&o->expectFourCC)) return false; }
+        else if (a == "--expect-color") { if (!next(&o->expectColor)) return false; }
         else if (a == "--dump") { if (!next(&o->dumpPath)) return false; }
         else if (a == "--iface") { if (!next(&o->iface)) return false; }
         else if (a == "--list") { o->listOnly = true; }
@@ -524,6 +534,10 @@ int main(int argc, char** argv)
     std::vector<uint8_t> keepData; // copy of the last frame for --dump
     Clock::time_point windowStart;
     Clock::time_point lastFrameAt;
+    std::string lastFrameMetadata;   // the last frame's per-frame XML (lsvr_color lives here)
+    uint64_t framesWithColorTag = 0;
+    int colorTagChanges = 0;
+    std::string lastColorTag;
     const auto connectDeadline = Clock::now() + std::chrono::seconds(15);
     bool started = false;
     std::vector<double> gapsMs;
@@ -554,6 +568,15 @@ int main(int argc, char** argv)
         }
         lastFrameAt = arrived;
         ++frames;
+        lastFrameMetadata = v.p_metadata ? v.p_metadata : "";
+        {
+            int space = -1;
+            const std::string tag = ndi_color::parseColorTag(v.p_metadata, &space)
+                                        ? std::string(ndi_color::displaySpaceName(space)) : std::string();
+            if (!tag.empty()) ++framesWithColorTag;
+            if (frames > 1 && tag != lastColorTag) ++colorTagChanges;
+            lastColorTag = tag;
+        }
         if (!haveGeom || g != geom) {
             if (haveGeom) ++geometryChanges;
             geom = g;
@@ -617,6 +640,14 @@ int main(int argc, char** argv)
         std::printf("sdk counters: video total %lld, dropped %lld (receiver too slow to dequeue); queue depth %d\n",
                     static_cast<long long>(total.video_frames), static_cast<long long>(dropped.video_frames), queue.video_frames);
         if (geometryChanges) std::printf("geometry changed %d time(s) during the window\n", geometryChanges);
+        if (!lastColorTag.empty()) {
+            std::printf("color tag: %s on %llu/%llu frames (lsvr_color)%s\n", lastColorTag.c_str(),
+                        static_cast<unsigned long long>(framesWithColorTag), static_cast<unsigned long long>(frames),
+                        colorTagChanges ? "  <- CHANGED during the window" : "");
+        } else {
+            std::printf("color tag: none on the last frame (stream space unknown, or a sender without lsvr_color)\n");
+        }
+        if (!lastFrameMetadata.empty()) std::printf("frame metadata: %s\n", lastFrameMetadata.c_str());
         if (keep.p_data) {
             std::printf("last frame content: mean luma %.1f/255, busy adjacent-pixel pairs %.2f%%%s\n", meanLuma,
                         busyShare * 100.0,
@@ -646,6 +677,13 @@ int main(int argc, char** argv)
         if (!opt.expectFourCC.empty() && fourccName(geom.fourcc) != opt.expectFourCC) {
             std::printf("MISMATCH: expected FourCC %s, got %s\n", opt.expectFourCC.c_str(), fourccName(geom.fourcc).c_str());
             exitCode = 1;
+        }
+        if (!opt.expectColor.empty()) {
+            const std::string got = lastColorTag.empty() ? "none" : lastColorTag;
+            if (got != opt.expectColor) {
+                std::printf("MISMATCH: expected color tag %s, got %s\n", opt.expectColor.c_str(), got.c_str());
+                exitCode = 1;
+            }
         }
         if (keep.p_data && !lastLuma.empty() && meanLuma < 1.0) {
             std::printf("MISMATCH: last frame is black\n");

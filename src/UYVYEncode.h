@@ -77,10 +77,18 @@ inline void encodeMacropixel(float r1, float g1, float b1,
 inline float clamp01(float v) { return std::fmax(0.0f, std::fmin(1.0f, v)); }
 
 // Full-frame converter: tightly packed float RGBA, bottom-up rows (OFX) →
-// top-down UYVY (NDI), width*height*2 bytes. An odd trailing pixel pairs
-// with itself and writes only its Cb/Y half, so an odd width can never
-// write past its row (the pre-#57 converter overran by two bytes).
-inline void convertRGBAToUYVYFlipped(const float* src, int width, int height, uint8_t* dst)
+// top-down UYVY (NDI), width*height*2 bytes. Each pixel is clamped to [0,1],
+// handed to `transform(float rgb[3])` (the Output Color stage, issue #57
+// Part 2 — it must keep values in [0,1]), then encoded. An odd trailing
+// pixel pairs with itself and writes only its Cb/Y half, so an odd width can
+// never write past its row (the pre-#57 converter overran by two bytes).
+struct NoTransform {
+    void operator()(float*) const {}
+};
+
+template <typename PixelTransform>
+inline void convertRGBAToUYVYFlipped(const float* src, int width, int height, uint8_t* dst,
+                                     const PixelTransform& transform)
 {
     for (int y = 0; y < height; ++y) {
         const int srcRow = height - 1 - y; // OFX is bottom-up, NDI top-down
@@ -88,9 +96,12 @@ inline void convertRGBAToUYVYFlipped(const float* src, int width, int height, ui
             const float* p1 = src + (static_cast<long long>(srcRow) * width + x) * 4;
             const bool hasSecond = (x + 1 < width);
             const float* p2 = hasSecond ? p1 + 4 : p1;
+            float a[3] = {clamp01(p1[0]), clamp01(p1[1]), clamp01(p1[2])};
+            float b[3] = {clamp01(p2[0]), clamp01(p2[1]), clamp01(p2[2])};
+            transform(a);
+            transform(b);
             uint8_t m[4];
-            encodeMacropixel(clamp01(p1[0]), clamp01(p1[1]), clamp01(p1[2]),
-                             clamp01(p2[0]), clamp01(p2[1]), clamp01(p2[2]), m);
+            encodeMacropixel(a[0], a[1], a[2], b[0], b[1], b[2], m);
             uint8_t* out = dst + (static_cast<long long>(y) * width + x) * 2;
             out[0] = m[0];
             out[1] = m[1];
@@ -100,6 +111,11 @@ inline void convertRGBAToUYVYFlipped(const float* src, int width, int height, ui
             }
         }
     }
+}
+
+inline void convertRGBAToUYVYFlipped(const float* src, int width, int height, uint8_t* dst)
+{
+    convertRGBAToUYVYFlipped(src, width, height, dst, NoTransform());
 }
 
 } // namespace ndi_uyvy

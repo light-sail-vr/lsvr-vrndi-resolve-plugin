@@ -6,8 +6,10 @@
 // #57); the module compiles with -fmad=false and mirrors the CPU arithmetic
 // operation-for-operation to earn it. Also covers the passthrough
 // copy, the full-frame readback used by the CPU fallback, the non-blocking
-// slot ring, and the STMap warp kernels against the ndi_stmap::warpRGBABox
-// CPU reference (identity map ≡ the plain downscale kernels, byte-for-byte).
+// slot ring, the STMap warp kernels against the ndi_stmap::warpRGBABox
+// CPU reference (identity map ≡ the plain downscale kernels, byte-for-byte),
+// and the Output Color stage (every preset pair, 3D LUTs) against
+// ndi_color::applyTransform (issue #57).
 // Build & run: ctest -R test_cuda_downscale (Windows with any CUDA device;
 // skips cleanly without one — hosted CI compiles it but has no GPU).
 
@@ -15,6 +17,7 @@
 #include "STMap.h"
 #include "StreamResolution.h"
 #include "UYVYEncode.h"
+#include "OutputColor.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -130,7 +133,7 @@ int main()
             referenceUYVY(small.data(), outW, outH, expected);
             bool ran = cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, srcBuf,
                                                          srcW, srcH, c.rowFloats, c.divisor,
-                                                         outW, outH, actual.data());
+                                                         outW, outH, nullptr, actual.data());
             char name[128];
             std::snprintf(name, sizeof(name), "UYVY kernel byte-identical to CPU reference (%s)", c.name);
             check(ran && compareExact(actual.data(), expected.data(), expected.size(), name), name);
@@ -215,7 +218,7 @@ int main()
             AsyncCapture cap;
             bool submitted = cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                        srcW, srcH, srcW * 4, 2, outW, outH,
-                                                       onDone, &cap) == CUDA_SUBMIT_OK;
+                                                       nullptr, onDone, &cap) == CUDA_SUBMIT_OK;
             bool done = submitted && waitFired(cap, 1);
             check(done && cap.ok && cap.out.size() == expected.size() &&
                       compareExact(cap.out.data(), expected.data(), expected.size(),
@@ -232,13 +235,13 @@ int main()
             for (int i = 0; i < 4; ++i) {
                 if (cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                               srcW, srcH, srcW * 4, 2, outW, outH,
-                                              onDone, &caps[i]) == CUDA_SUBMIT_OK) {
+                                              nullptr, onDone, &caps[i]) == CUDA_SUBMIT_OK) {
                     ++accepted;
                 }
             }
             bool fifthRefused = cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                           srcW, srcH, srcW * 4, 2, outW, outH,
-                                                          onDone, &caps[4]) == CUDA_SUBMIT_BUSY;
+                                                          nullptr, onDone, &caps[4]) == CUDA_SUBMIT_BUSY;
             bool allFired = true;
             for (int i = 0; i < 4; ++i) {
                 allFired = allFired && waitFired(caps[i], 1);
@@ -247,7 +250,7 @@ int main()
             AsyncCapture after;
             bool afterOk = (cuda_gpu_downscale_submit(ctx, nullptr, srcBuf,
                                                       srcW, srcH, srcW * 4, 2, outW, outH,
-                                                      onDone, &after) == CUDA_SUBMIT_OK) &&
+                                                      nullptr, onDone, &after) == CUDA_SUBMIT_OK) &&
                            waitFired(after, 1);
             if (after.slot) cuda_gpu_downscale_release(ctx, after.slot);
             check(accepted == 4 && fifthRefused && allFired && afterOk,
@@ -292,11 +295,11 @@ int main()
                 std::vector<uint8_t> warped(plain.size(), 1);
                 bool ranPlain = cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, srcBuf,
                                                                   srcW, srcH, srcW * 4, divisor,
-                                                                  outW, outH, plain.data());
+                                                                  outW, outH, nullptr, plain.data());
                 bool ranWarp = cuda_gpu_buffer_warp_to_uyvy(ctx, nullptr, srcBuf,
                                                             srcW, srcH, srcW * 4,
                                                             identBuf, srcW, srcH, divisor,
-                                                            outW, outH, warped.data());
+                                                            outW, outH, nullptr, warped.data());
                 char name[128];
                 std::snprintf(name, sizeof(name),
                               "identity-map warp UYVY == downscale kernel (divisor %d)", divisor);
@@ -347,7 +350,7 @@ int main()
                 bool ran = cuda_gpu_buffer_warp_to_uyvy(ctx, nullptr, wsrcBuf,
                                                         srcW, srcH, c.rowFloats,
                                                         mapBuf, mapW, mapH, c.divisor,
-                                                        outW, outH, actual.data());
+                                                        outW, outH, nullptr, actual.data());
                 char name[128];
                 std::snprintf(name, sizeof(name), "warp UYVY byte-identical to CPU reference (%s)", c.name);
                 check(ran && compareExact(actual.data(), expected.data(), expected.size(), name),
@@ -385,12 +388,12 @@ int main()
             bool ranBlocking = cuda_gpu_buffer_warp_to_uyvy(ctx, nullptr, srcBuf,
                                                             srcW, srcH, srcW * 4,
                                                             mapBuf, mapW, mapH, 2,
-                                                            outW, outH, blocking.data());
+                                                            outW, outH, nullptr, blocking.data());
             AsyncCapture cap;
             bool submitted = cuda_gpu_warp_submit(ctx, nullptr, srcBuf,
                                                   srcW, srcH, srcW * 4,
                                                   mapBuf, mapW, mapH, 2, outW, outH,
-                                                  onDone, &cap) == CUDA_SUBMIT_OK;
+                                                  nullptr, onDone, &cap) == CUDA_SUBMIT_OK;
             bool done = false;
             if (submitted) {
                 std::unique_lock<std::mutex> lock(cap.m);
@@ -413,13 +416,13 @@ int main()
             bool nullRefused = !cuda_gpu_buffer_warp_to_uyvy(ctx, nullptr, srcBuf,
                                                              srcW, srcH, srcW * 4,
                                                              nullptr, mapW, mapH, 1,
-                                                             outW, outH, outBytes.data());
+                                                             outW, outH, nullptr, outBytes.data());
             void* tiny = cuda_gpu_create_device_buffer(ctx, nullptr, 16);
             auto noopDone = [](void*, void*, const void*, size_t, double, bool) {};
             bool tinyRefused = cuda_gpu_warp_submit(ctx, nullptr, srcBuf,
                                                     srcW, srcH, srcW * 4,
                                                     tiny, mapW, mapH, 1, outW, outH,
-                                                    noopDone, nullptr) == CUDA_SUBMIT_INVALID;
+                                                    nullptr, noopDone, nullptr) == CUDA_SUBMIT_INVALID;
             cuda_gpu_release_buffer(tiny);
             check(nullRefused && tinyRefused, "warp refuses null/undersized map buffers as invalid");
         }
@@ -427,6 +430,230 @@ int main()
         cuda_gpu_release_buffer(mapBuf);
         cuda_gpu_release_buffer(identBuf);
         cuda_gpu_release_buffer(srcBuf);
+    }
+
+    // ------------------------------------------------------------------
+    // Output Color stage (issue #57 Part 2): every preset pair and 3D LUTs,
+    // through the downscale and warp kernels, blocking and async, must be
+    // byte-identical to the CPU converter running ndi_color::applyTransform.
+    // ------------------------------------------------------------------
+    {
+        // A frame carrying the full 33^3 sweep, then a fine grey ramp.
+        const int sw = 198, sh = 182;
+        std::vector<float> sweep(static_cast<size_t>(sw) * sh * 4);
+        for (int k = 0; k < sw * sh; ++k) {
+            float* px = sweep.data() + static_cast<size_t>(k) * 4;
+            if (k < 33 * 33 * 33) {
+                px[0] = (k % 33) / 32.0f;
+                px[1] = (k / 33 % 33) / 32.0f;
+                px[2] = (k / 1089) / 32.0f;
+            } else {
+                px[0] = px[1] = px[2] = static_cast<float>(k - 33 * 33 * 33) / (sw * sh - 33 * 33 * 33 - 1);
+            }
+            px[3] = 1.0f;
+        }
+        void* sweepBuf = cuda_gpu_create_device_buffer(ctx, sweep.data(), sweep.size() * sizeof(float));
+
+        auto cpuRef = [](const float* src, int w, int h, const ndi_color::Transform& t,
+                         std::vector<uint8_t>& out) {
+            out.assign(static_cast<size_t>(w) * h * 2, 0);
+            ndi_uyvy::convertRGBAToUYVYFlipped(src, w, h, out.data(),
+                                               [&](float* rgb) { ndi_color::applyTransform(t, rgb); });
+        };
+        struct Uploaded {
+            void* buffer = nullptr;
+            cuda_color_desc desc = {nullptr, 0, 0};
+        };
+        auto upload = [&](const ndi_color::Transform& t) {
+            Uploaded u;
+            u.buffer = cuda_gpu_create_device_buffer(ctx, t.data.data(), t.data.size() * sizeof(float));
+            u.desc.buffer = u.buffer;
+            u.desc.mode = t.mode;
+            u.desc.lutSize = t.lutSize;
+            return u;
+        };
+
+        // Every preset pair over the sweep frame, divisor 1.
+        int pairs = 0, exact = 0;
+        for (int a = 0; a < ndi_color::kDisplaySpaceCount; ++a) {
+            for (int b = 0; b < ndi_color::kDisplaySpaceCount; ++b) {
+                if (a == b) continue;
+                ndi_color::Transform t;
+                ndi_color::buildPreset(a, b, &t);
+                Uploaded u = upload(t);
+                std::vector<uint8_t> expected, actual(static_cast<size_t>(sw) * sh * 2, 0);
+                cpuRef(sweep.data(), sw, sh, t, expected);
+                const bool ran = cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                    sw, sh, &u.desc, actual.data());
+                ++pairs;
+                if (ran && compareExact(actual.data(), expected.data(), expected.size(),
+                                          ndi_color::displaySpaceName(b))) {
+                    ++exact;
+                }
+                cuda_gpu_release_buffer(u.buffer);
+            }
+        }
+        {
+            char name[128];
+            std::snprintf(name, sizeof(name), "all %d preset pairs byte-identical to the CPU over a 33^3 sweep",
+                          pairs);
+            check(pairs == 42 && exact == pairs, name);
+        }
+
+        // Box average THEN transform: divisor 2, padded rows, one preset.
+        {
+            const int rowFloats = (srcW + 2) * 4;
+            std::vector<float> frame;
+            fillFrame(frame, srcW, srcH, rowFloats);
+            void* buf = cuda_gpu_create_device_buffer(ctx, frame.data(), frame.size() * sizeof(float));
+            int outW = 0, outH = 0;
+            ndi_stream::outputDims(srcW, srcH, 2, &outW, &outH);
+            std::vector<float> small(static_cast<size_t>(outW) * outH * 4);
+            ndi_stream::downscaleRGBABox(frame.data(), srcW, srcH, rowFloats, 2, small.data(), outW, outH);
+            ndi_color::Transform t;
+            ndi_color::buildPreset(ndi_color::kRec709Gamma24, ndi_color::kP3D65Gamma22, &t);
+            Uploaded u = upload(t);
+            std::vector<uint8_t> expected, actual(static_cast<size_t>(outW) * outH * 2, 0);
+            cpuRef(small.data(), outW, outH, t, expected);
+            const bool ran = cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, buf, srcW, srcH, rowFloats, 2,
+                                                                outW, outH, &u.desc, actual.data());
+            check(ran && compareExact(actual.data(), expected.data(), expected.size(), "preset divisor 2"),
+                  "preset after a divisor-2 box on padded rows matches the CPU");
+            cuda_gpu_release_buffer(u.buffer);
+            cuda_gpu_release_buffer(buf);
+        }
+
+        // LUTs: an identity cube is the passthrough bytes; a curved cube with a
+        // wide domain, and a 65-point one, match the CPU exactly.
+        auto lattice = [](int n, float dmin, float dmax, bool curved) {
+            ndi_cube::CubeLUT lut;
+            lut.size = n;
+            for (int c = 0; c < 3; ++c) {
+                lut.domainMin[c] = dmin;
+                lut.domainMax[c] = dmax;
+            }
+            const double step = (static_cast<double>(dmax) - dmin) / (n - 1);
+            for (int b = 0; b < n; ++b)
+                for (int g = 0; g < n; ++g)
+                    for (int r = 0; r < n; ++r) {
+                        const double R = dmin + r * step, G = dmin + g * step, B = dmin + b * step;
+                        if (curved) {
+                            lut.rgb.push_back(static_cast<float>(0.9 * std::pow(std::fabs(R), 1.7) + 0.1 * G));
+                            lut.rgb.push_back(static_cast<float>(std::sqrt(std::fabs(G)) * 0.8 + 0.2 * B));
+                            lut.rgb.push_back(static_cast<float>(1.05 * B - 0.03 * R));
+                        } else {
+                            lut.rgb.push_back(static_cast<float>(R));
+                            lut.rgb.push_back(static_cast<float>(G));
+                            lut.rgb.push_back(static_cast<float>(B));
+                        }
+                    }
+            return lut;
+        };
+        {
+            ndi_color::Transform ident;
+            ndi_color::buildLut(lattice(33, 0.0f, 1.0f, false), &ident);
+            Uploaded u = upload(ident);
+            std::vector<uint8_t> plain(static_cast<size_t>(sw) * sh * 2, 0), viaLut(plain.size(), 1);
+            const bool ranPlain = cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                     sw, sh, nullptr, plain.data());
+            const bool ranLut = cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                   sw, sh, &u.desc, viaLut.data());
+            check(ranPlain && ranLut && std::memcmp(plain.data(), viaLut.data(), plain.size()) == 0,
+                  "identity 33-point LUT streams the passthrough bytes");
+            cuda_gpu_release_buffer(u.buffer);
+        }
+        for (int n : {17, 65}) {
+            ndi_color::Transform t;
+            ndi_color::buildLut(lattice(n, -0.1f, 1.2f, true), &t);
+            Uploaded u = upload(t);
+            std::vector<uint8_t> expected, actual(static_cast<size_t>(sw) * sh * 2, 0);
+            cpuRef(sweep.data(), sw, sh, t, expected);
+            const bool ran = cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1,
+                                                                sw, sh, &u.desc, actual.data());
+            char name[128];
+            std::snprintf(name, sizeof(name), "curved %d-point LUT, wide domain, matches the CPU byte-for-byte", n);
+            check(ran && compareExact(actual.data(), expected.data(), expected.size(), name), name);
+            cuda_gpu_release_buffer(u.buffer);
+        }
+
+        // Warp + colour, and the async path: a smooth map warp with a preset
+        // matches the CPU warp + transform; async equals blocking.
+        {
+            const int mw = 120, mh = 96;
+            std::vector<float> mapUV(static_cast<size_t>(mw) * mh * 2);
+            for (int row = 0; row < mh; ++row)
+                for (int x = 0; x < mw; ++x) {
+                    const float xn = (x + 0.5f) / mw, yn = (mh - 1 - row + 0.5f) / mh;
+                    mapUV[(static_cast<size_t>(row) * mw + x) * 2 + 0] = 0.05f + 0.9f * xn * xn;
+                    mapUV[(static_cast<size_t>(row) * mw + x) * 2 + 1] = 0.1f + 0.75f * yn + 0.1f * xn;
+                }
+            void* mapBuf = cuda_gpu_create_device_buffer(ctx, mapUV.data(), mapUV.size() * sizeof(float));
+            ndi_color::Transform t;
+            ndi_color::buildPreset(ndi_color::kRec2020Gamma24, ndi_color::kSRGB, &t);
+            Uploaded u = upload(t);
+            int ow = 0, oh = 0;
+            ndi_stream::outputDims(mw, mh, 2, &ow, &oh);
+            std::vector<float> small(static_cast<size_t>(ow) * oh * 4);
+            ndi_stmap::warpRGBABox(sweep.data(), sw, sh, sw * 4, mapUV.data(), mw, mh, 2, small.data(), ow, oh);
+            std::vector<uint8_t> expected, warped(static_cast<size_t>(ow) * oh * 2, 1);
+            cpuRef(small.data(), ow, oh, t, expected);
+            const bool ranWarp = cuda_gpu_buffer_warp_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, mapBuf,
+                                                               mw, mh, 2, ow, oh, &u.desc, warped.data());
+            check(ranWarp && compareExact(warped.data(), expected.data(), expected.size(), "warp + preset"),
+                  "warp (divisor 2) + preset matches the CPU warp + transform");
+
+            struct Cap {
+                std::mutex m;
+                std::condition_variable cv;
+                bool fired = false, ok = false;
+                std::vector<uint8_t> out;
+                void* slot = nullptr;
+            } cap;
+            auto onDone = [](void* user, void* slot, const void* outPtr, size_t outBytes, double, bool ok) {
+                Cap* c = static_cast<Cap*>(user);
+                std::lock_guard<std::mutex> lock(c->m);
+                c->ok = ok;
+                c->slot = slot;
+                c->out.assign(static_cast<const uint8_t*>(outPtr), static_cast<const uint8_t*>(outPtr) + outBytes);
+                c->fired = true;
+                c->cv.notify_all();
+            };
+            bool done = false;
+            if (cuda_gpu_warp_submit(ctx, nullptr, sweepBuf, sw, sh, sw * 4, mapBuf, mw, mh, 2, ow, oh, &u.desc,
+                                      onDone, &cap) == CUDA_SUBMIT_OK) {
+                std::unique_lock<std::mutex> lock(cap.m);
+                done = cap.cv.wait_for(lock, std::chrono::seconds(5), [&] { return cap.fired; });
+            }
+            check(done && cap.ok && cap.out == warped, "async warp + preset matches the blocking path");
+            if (cap.slot) cuda_gpu_downscale_release(ctx, cap.slot);
+
+            cuda_gpu_release_buffer(u.buffer);
+            cuda_gpu_release_buffer(mapBuf);
+        }
+
+        // A descriptor whose buffer can't hold its transform is refused.
+        {
+            void* tiny = cuda_gpu_create_device_buffer(ctx, nullptr, 64);
+            cuda_color_desc lutDesc = {tiny, ndi_color::kModeLut3D, 33};
+            cuda_color_desc matDesc = {tiny, ndi_color::kModeMatrix, 0};
+            cuda_color_desc noBuf = {nullptr, ndi_color::kModeMatrix, 0};
+            cuda_color_desc badMode = {tiny, 7, 0};
+            std::vector<uint8_t> out(static_cast<size_t>(sw) * sh * 2, 0);
+            auto noopDone = [](void*, void*, const void*, size_t, double, bool) {};
+            const bool refused =
+                !cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &lutDesc,
+                                                    out.data()) &&
+                !cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &matDesc,
+                                                    out.data()) &&
+                !cuda_gpu_buffer_downscale_to_uyvy(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &badMode,
+                                                    out.data()) &&
+                cuda_gpu_downscale_submit(ctx, nullptr, sweepBuf, sw, sh, sw * 4, 1, sw, sh, &noBuf, noopDone,
+                                           nullptr) == CUDA_SUBMIT_INVALID;
+            check(refused, "undersized, missing or unknown colour descriptors are refused");
+            cuda_gpu_release_buffer(tiny);
+        }
+
+        cuda_gpu_release_buffer(sweepBuf);
     }
 
     cuda_gpu_shutdown(ctx);

@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 #import <os/log.h>
 #include "MetalGPUAcceleration.h"
+#include "OutputColor.h"
 #include <stdio.h>
 #include <string.h>
 #include <chrono>
@@ -56,6 +57,8 @@ struct MetalDownscaleParams {
     uint32_t outWidth;
     uint32_t outHeight;
     uint32_t divisor;
+    uint32_t colorMode;   // ndi_color::Mode — 0 = no Output Color transform
+    uint32_t lutSize;
 };
 
 // Must match the WarpParams struct inside the shader source below.
@@ -68,9 +71,13 @@ struct MetalWarpParams {
     uint32_t divisor;
     uint32_t mapWidth;
     uint32_t mapHeight;
+    uint32_t colorMode;
+    uint32_t lutSize;
 };
 
-// Metal shader source code
+// Metal shader source code. The NDI_* table/layout constants it uses are
+// #defined by shaderSource() from src/OutputColor.h, so the kernels can
+// never drift from the CPU reference.
 static const char* metalShaderSource = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -91,7 +98,79 @@ struct DownscaleParams {
     uint outWidth;
     uint outHeight;
     uint divisor;
+    uint colorMode;      // 0 = none, NDI_COLOR_MATRIX, NDI_COLOR_LUT3D
+    uint lutSize;
 };
+
+// ---------------------------------------------------------------------------
+// Output Color stage (issue #57 Part 2): mirrors ndi_color::tableLookup and
+// ndi_color::applyTransform (src/OutputColor.h) step for step — explicit fma
+// for every multiply-add, exact power-of-two scales, the table index taken
+// from the float's bit pattern. Runs per output pixel between the box/warp
+// sample and the UYVY encode; colorMode 0 skips it, leaving the passthrough
+// bytes untouched.
+// ---------------------------------------------------------------------------
+
+static inline float color_clamp01(float v) {
+    return fmax(0.0f, fmin(1.0f, v));
+}
+
+static inline float table_lookup(device const float* t, float x) {
+    if (x < 1.0f / NDI_TABLE_FLOOR_INV) {
+        float s = x * NDI_TABLE_FLOOR_INV;
+        return fma(t[1] - t[0], s, t[0]);
+    }
+    uint bits = as_type<uint>(x);
+    uint i = min((bits >> NDI_TABLE_SHIFT) - NDI_TABLE_BASE + 1u, NDI_TABLE_LAST);
+    float f = float(bits & NDI_TABLE_MANT_MASK) * (1.0f / NDI_TABLE_MANT_DIV);
+    return fma(t[i + 1u] - t[i], f, t[i]);
+}
+
+static inline float3 apply_color(float3 rgb, device const float* color, uint mode, uint lutSize) {
+    if (mode == NDI_COLOR_MATRIX) {
+        device const float* dec = color;
+        device const float* enc = color + NDI_TABLE_SIZE;
+        device const float* m = color + 2u * NDI_TABLE_SIZE;
+        float r = table_lookup(dec, rgb.r);
+        float g = table_lookup(dec, rgb.g);
+        float b = table_lookup(dec, rgb.b);
+        float r2 = fma(m[0], r, fma(m[1], g, m[2] * b));
+        float g2 = fma(m[3], r, fma(m[4], g, m[5] * b));
+        float b2 = fma(m[6], r, fma(m[7], g, m[8] * b));
+        return float3(table_lookup(enc, color_clamp01(r2)),
+                      table_lookup(enc, color_clamp01(g2)),
+                      table_lookup(enc, color_clamp01(b2)));
+    }
+    if (mode == NDI_COLOR_LUT3D) {
+        int n = int(lutSize);
+        float top = float(n - 1);
+        float in[3] = {rgb.r, rgb.g, rgb.b};
+        int idx[3];
+        float frac[3];
+        for (int c = 0; c < 3; ++c) {
+            float s = fmin(fmax(fma(in[c], color[c], color[3 + c]), 0.0f), top);
+            int i = min(int(s), n - 2);
+            idx[c] = i;
+            frac[c] = s - float(i);
+        }
+        device const float* lut = color + NDI_LUT_DATA;
+        int dr = 3, dg = n * 3, db = n * n * 3;
+        int base = ((idx[2] * n + idx[1]) * n + idx[0]) * 3;
+        float out[3];
+        for (int ch = 0; ch < 3; ++ch) {
+            device const float* p = lut + base + ch;
+            float a00 = fma(p[dr] - p[0], frac[0], p[0]);
+            float a10 = fma(p[dg + dr] - p[dg], frac[0], p[dg]);
+            float a01 = fma(p[db + dr] - p[db], frac[0], p[db]);
+            float a11 = fma(p[db + dg + dr] - p[db + dg], frac[0], p[db + dg]);
+            float b0 = fma(a10 - a00, frac[1], a00);
+            float b1 = fma(a11 - a01, frac[1], a01);
+            out[ch] = color_clamp01(fma(b1 - b0, frac[2], b0));
+        }
+        return float3(out[0], out[1], out[2]);
+    }
+    return rgb;
+}
 
 // Shared packing tail of the fused kernels (downscale and STMap-warp
 // variants): two sampled pixels -> one UYVY macropixel, BT.709 limited range
@@ -139,12 +218,15 @@ static inline float3 box_sample_rgb(device const float* src,
 kernel void downscale_rgba_to_uyvy(device const float* src [[buffer(0)]],
                                    device uchar4* dst [[buffer(1)]],
                                    constant DownscaleParams& p [[buffer(2)]],
+                                   device const float* color [[buffer(4)]],
                                    uint2 gid [[thread_position_in_grid]]) {
     uint x0 = gid.x * 2;
     if (x0 >= p.outWidth || gid.y >= p.outHeight) return;
 
-    float3 rgb1 = box_sample_rgb(src, p, x0, gid.y);
-    float3 rgb2 = (x0 + 1 < p.outWidth) ? box_sample_rgb(src, p, x0 + 1, gid.y) : rgb1;
+    float3 rgb1 = apply_color(box_sample_rgb(src, p, x0, gid.y), color, p.colorMode, p.lutSize);
+    float3 rgb2 = (x0 + 1 < p.outWidth)
+        ? apply_color(box_sample_rgb(src, p, x0 + 1, gid.y), color, p.colorMode, p.lutSize)
+        : rgb1;
     emit_uyvy(dst, p.outWidth, gid, rgb1, rgb2);
 }
 
@@ -166,6 +248,8 @@ struct WarpParams {
     uint divisor;
     uint mapWidth;
     uint mapHeight;
+    uint colorMode;
+    uint lutSize;
 };
 
 // Bilinear source fetch with integer clamps on every index so even a
@@ -222,17 +306,54 @@ kernel void warp_rgba_to_uyvy(device const float* src [[buffer(0)]],
                               device uchar4* dst [[buffer(1)]],
                               constant WarpParams& p [[buffer(2)]],
                               device const float* mapUV [[buffer(3)]],
+                              device const float* color [[buffer(4)]],
                               uint2 gid [[thread_position_in_grid]]) {
     uint x0 = gid.x * 2;
     if (x0 >= p.outWidth || gid.y >= p.outHeight) return;
 
-    float3 rgb1 = warp_sample_rgb(src, mapUV, p, x0, gid.y);
-    float3 rgb2 = (x0 + 1 < p.outWidth) ? warp_sample_rgb(src, mapUV, p, x0 + 1, gid.y) : rgb1;
+    float3 rgb1 = apply_color(warp_sample_rgb(src, mapUV, p, x0, gid.y), color, p.colorMode, p.lutSize);
+    float3 rgb2 = (x0 + 1 < p.outWidth)
+        ? apply_color(warp_sample_rgb(src, mapUV, p, x0 + 1, gid.y), color, p.colorMode, p.lutSize)
+        : rgb1;
     emit_uyvy(dst, p.outWidth, gid, rgb1, rgb2);
 }
 )";
 
 static MetalFastPathState* fastPathForDevice(MetalGPUContextRef context, id<MTLDevice> device);
+
+// The shader source with its Output Color constants prepended, taken from
+// src/OutputColor.h so the kernels and the CPU reference share one
+// definition. All integers: the float constants are formed in the shader as
+// exact power-of-two quotients.
+static NSString* shaderSource(void)
+{
+    static_assert(ndi_color::kTableMantScale == 1.0f / static_cast<float>(1u << ndi_color::kTableShift),
+                  "the shader forms the mantissa scale as 1/(1 << shift)");
+    static_assert(ndi_color::kTableFloorInv == 16777216.0f && ndi_color::kTableOctaves == 24,
+                  "the shader's floor constant is 2^24");
+    static_assert(ndi_color::kDecodeOffset == 0 && ndi_color::kEncodeOffset == ndi_color::kTableSize &&
+                      ndi_color::kMatrixOffset == 2 * ndi_color::kTableSize &&
+                      ndi_color::kLutScaleOffset == 0 && ndi_color::kLutBiasOffset == 3,
+                  "apply_color hard-codes these layout offsets");
+    char prelude[640];
+    snprintf(prelude, sizeof(prelude),
+             "#define NDI_TABLE_SIZE %uu\n"
+             "#define NDI_TABLE_SHIFT %uu\n"
+             "#define NDI_TABLE_BASE %uu\n"
+             "#define NDI_TABLE_LAST %uu\n"
+             "#define NDI_TABLE_MANT_MASK %uu\n"
+             "#define NDI_TABLE_MANT_DIV %u.0f\n"
+             "#define NDI_TABLE_FLOOR_INV 16777216.0f\n"
+             "#define NDI_COLOR_MATRIX %uu\n"
+             "#define NDI_COLOR_LUT3D %uu\n"
+             "#define NDI_LUT_DATA %uu\n",
+             static_cast<unsigned>(ndi_color::kTableSize), static_cast<unsigned>(ndi_color::kTableShift),
+             static_cast<unsigned>(ndi_color::kTableBase), static_cast<unsigned>(ndi_color::kTableLastIndex),
+             static_cast<unsigned>(ndi_color::kTableMantMask), 1u << ndi_color::kTableShift,
+             static_cast<unsigned>(ndi_color::kModeMatrix), static_cast<unsigned>(ndi_color::kModeLut3D),
+             static_cast<unsigned>(ndi_color::kLutDataOffset));
+    return [NSString stringWithFormat:@"%s%s", prelude, metalShaderSource];
+}
 
 bool metal_gpu_is_available(void) {
     @autoreleasepool {
@@ -354,8 +475,7 @@ static MetalFastPathState* fastPathForDevice(MetalGPUContextRef context, id<MTLD
     }
 
     NSError* error = nil;
-    NSString* shaderSource = [NSString stringWithUTF8String:metalShaderSource];
-    id<MTLLibrary> library = [device newLibraryWithSource:shaderSource options:nil error:&error];
+    id<MTLLibrary> library = [device newLibraryWithSource:shaderSource() options:nil error:&error];
     if (!library) {
         METAL_LOG("Fast path: failed to compile library for device %{public}s: %{public}s",
                   [[device name] UTF8String], [[error localizedDescription] UTF8String]);
@@ -401,13 +521,19 @@ static id<MTLComputePipelineState> convertPipeline(MetalFastPathState* fastPath,
     return warp ? fastPath->warpUyvyPipeline : fastPath->uyvyPipeline;
 }
 
-// Bind the geometry params (and for warp the map buffer) for either kernel
-// family. Buffer indices: 0=src, 1=dst, 2=params, 3=map (warp only).
+// Bind the geometry params (and for warp the map buffer) plus the Output
+// Color buffer for either kernel family. Buffer indices: 0=src, 1=dst,
+// 2=params, 3=map (warp only), 4=colour. With no transform, index 4 gets the
+// source buffer as a placeholder — the kernel never reads it at colorMode 0.
 static void encodeConvertParams(id<MTLComputeCommandEncoder> encoder,
                                 int srcWidth, int srcHeight, int srcRowFloats,
                                 int divisor, int outWidth, int outHeight,
-                                id<MTLBuffer> mapBuffer, int mapWidth, int mapHeight)
+                                id<MTLBuffer> mapBuffer, int mapWidth, int mapHeight,
+                                const metal_color_desc* color, id<MTLBuffer> srcBuffer)
 {
+    const bool haveColor = color && color->mode != ndi_color::kModeNone;
+    const uint32_t colorMode = haveColor ? static_cast<uint32_t>(color->mode) : 0u;
+    const uint32_t lutSize = haveColor ? static_cast<uint32_t>(color->lutSize) : 0u;
     if (mapBuffer) {
         MetalWarpParams params;
         params.srcWidth = (uint32_t)srcWidth;
@@ -418,6 +544,8 @@ static void encodeConvertParams(id<MTLComputeCommandEncoder> encoder,
         params.divisor = (uint32_t)divisor;
         params.mapWidth = (uint32_t)mapWidth;
         params.mapHeight = (uint32_t)mapHeight;
+        params.colorMode = colorMode;
+        params.lutSize = lutSize;
         [encoder setBytes:&params length:sizeof(params) atIndex:2];
         [encoder setBuffer:mapBuffer offset:0 atIndex:3];
     } else {
@@ -428,8 +556,31 @@ static void encodeConvertParams(id<MTLComputeCommandEncoder> encoder,
         params.outWidth = (uint32_t)outWidth;
         params.outHeight = (uint32_t)outHeight;
         params.divisor = (uint32_t)divisor;
+        params.colorMode = colorMode;
+        params.lutSize = lutSize;
         [encoder setBytes:&params length:sizeof(params) atIndex:2];
     }
+    [encoder setBuffer:(haveColor ? static_cast<id<MTLBuffer>>(color->buffer) : srcBuffer) offset:0 atIndex:4];
+}
+
+// A usable colour descriptor: none, or a known mode whose buffer holds the
+// whole flattened transform (src/OutputColor.h layouts).
+static bool validColor(const metal_color_desc* color)
+{
+    if (!color || color->mode == ndi_color::kModeNone) return true;
+    id<MTLBuffer> buffer = static_cast<id<MTLBuffer>>(color->buffer);
+    if (!buffer) return false;
+    size_t neededFloats = 0;
+    if (color->mode == ndi_color::kModeMatrix) {
+        neededFloats = ndi_color::kMatrixDataSize;
+    } else if (color->mode == ndi_color::kModeLut3D) {
+        if (color->lutSize < ndi_cube::kMinSize || color->lutSize > ndi_cube::kMaxSize) return false;
+        const size_t n = static_cast<size_t>(color->lutSize);
+        neededFloats = ndi_color::kLutDataOffset + n * n * n * 3;
+    } else {
+        return false;
+    }
+    return buffer.length >= neededFloats * sizeof(float);
 }
 
 // A usable map buffer holds mapWidth*mapHeight interleaved (u,v) float pairs.
@@ -463,6 +614,7 @@ static bool runConvertKernel(MetalGPUContextRef context, void* commandQueue, voi
                                void* mapMetalBuffer, int mapWidth, int mapHeight,
                                int divisor,
                                int outWidth, int outHeight,
+                               const metal_color_desc* color,
                                void* cpuOut, size_t outBytes, const char* label)
 {
     if (!context || !srcMetalBuffer || !cpuOut) return false;
@@ -475,6 +627,9 @@ static bool runConvertKernel(MetalGPUContextRef context, void* commandQueue, voi
     id<MTLBuffer> mapBuffer = static_cast<id<MTLBuffer>>(mapMetalBuffer);
     const bool warp = (mapMetalBuffer != nullptr);
     if (warp && !validWarpMap(mapBuffer, mapWidth, mapHeight)) {
+        return false;
+    }
+    if (!validColor(color)) {
         return false;
     }
 
@@ -513,7 +668,8 @@ static bool runConvertKernel(MetalGPUContextRef context, void* commandQueue, voi
         [encoder setBuffer:srcBuffer offset:0 atIndex:0];
         [encoder setBuffer:staging offset:0 atIndex:1];
         encodeConvertParams(encoder, srcWidth, srcHeight, srcRowFloats,
-                            divisor, outWidth, outHeight, warp ? mapBuffer : nil, mapWidth, mapHeight);
+                            divisor, outWidth, outHeight, warp ? mapBuffer : nil, mapWidth, mapHeight,
+                            color, srcBuffer);
 
         MTLSize threadsPerThreadgroup = MTLSizeMake(16, 16, 1);
         MTLSize threadgroupsPerGrid = MTLSizeMake(
@@ -550,12 +706,13 @@ bool metal_gpu_buffer_downscale_to_uyvy(MetalGPUContextRef context,
                                         int srcWidth, int srcHeight, int srcRowFloats,
                                         int divisor,
                                         int outWidth, int outHeight,
+                                        const metal_color_desc* color,
                                         unsigned char* uyvyOut)
 {
     const size_t outBytes = static_cast<size_t>(outWidth) * static_cast<size_t>(outHeight) * 2;
     return runConvertKernel(context, commandQueue, srcMetalBuffer,
                               srcWidth, srcHeight, srcRowFloats, nullptr, 0, 0, divisor,
-                              outWidth, outHeight, uyvyOut, outBytes, "UYVY");
+                              outWidth, outHeight, color, uyvyOut, outBytes, "UYVY");
 }
 
 bool metal_gpu_buffer_warp_to_uyvy(MetalGPUContextRef context,
@@ -565,6 +722,7 @@ bool metal_gpu_buffer_warp_to_uyvy(MetalGPUContextRef context,
                                    void* mapMetalBuffer, int mapWidth, int mapHeight,
                                    int divisor,
                                    int outWidth, int outHeight,
+                                   const metal_color_desc* color,
                                    unsigned char* uyvyOut)
 {
     if (!mapMetalBuffer) return false;
@@ -572,7 +730,7 @@ bool metal_gpu_buffer_warp_to_uyvy(MetalGPUContextRef context,
     return runConvertKernel(context, commandQueue, srcMetalBuffer,
                               srcWidth, srcHeight, srcRowFloats,
                               mapMetalBuffer, mapWidth, mapHeight, divisor,
-                              outWidth, outHeight, uyvyOut, outBytes, "warp UYVY");
+                              outWidth, outHeight, color, uyvyOut, outBytes, "warp UYVY");
 }
 
 // Non-blocking variant (issue #5, v1.6.0): encode + commit only. See the
@@ -588,9 +746,11 @@ static metal_submit_status submitConvertInternal(MetalGPUContextRef context,
                                                  void* mapMetalBuffer, int mapWidth, int mapHeight,
                                                  int divisor,
                                                  int outWidth, int outHeight,
+                                                 const metal_color_desc* color,
                                                  metal_downscale_done_fn done, void* user)
 {
     if (!context || !srcMetalBuffer || !done) return METAL_SUBMIT_INVALID;
+    if (!validColor(color)) return METAL_SUBMIT_INVALID;
     if (srcWidth <= 0 || srcHeight <= 0 || srcRowFloats < srcWidth * 4 ||
         divisor <= 0 || outWidth < 2 || (outWidth % 2) != 0 || outHeight <= 0) {
         return METAL_SUBMIT_INVALID;
@@ -654,7 +814,8 @@ static metal_submit_status submitConvertInternal(MetalGPUContextRef context,
         [encoder setBuffer:srcBuffer offset:0 atIndex:0];
         [encoder setBuffer:slot->buffer offset:0 atIndex:1];
         encodeConvertParams(encoder, srcWidth, srcHeight, srcRowFloats,
-                            divisor, outWidth, outHeight, warp ? mapBuffer : nil, mapWidth, mapHeight);
+                            divisor, outWidth, outHeight, warp ? mapBuffer : nil, mapWidth, mapHeight,
+                            color, srcBuffer);
 
         MTLSize threadsPerThreadgroup = MTLSizeMake(16, 16, 1);
         MTLSize threadgroupsPerGrid = MTLSizeMake(
@@ -687,12 +848,13 @@ metal_submit_status metal_gpu_downscale_submit(MetalGPUContextRef context,
                                                int srcWidth, int srcHeight, int srcRowFloats,
                                                int divisor,
                                                int outWidth, int outHeight,
+                                               const metal_color_desc* color,
                                                metal_downscale_done_fn done, void* user)
 {
     return submitConvertInternal(context, commandQueue, srcMetalBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  nullptr, 0, 0, divisor,
-                                 outWidth, outHeight, done, user);
+                                 outWidth, outHeight, color, done, user);
 }
 
 metal_submit_status metal_gpu_warp_submit(MetalGPUContextRef context,
@@ -702,13 +864,14 @@ metal_submit_status metal_gpu_warp_submit(MetalGPUContextRef context,
                                           void* mapMetalBuffer, int mapWidth, int mapHeight,
                                           int divisor,
                                           int outWidth, int outHeight,
+                                          const metal_color_desc* color,
                                           metal_downscale_done_fn done, void* user)
 {
     if (!mapMetalBuffer) return METAL_SUBMIT_INVALID;
     return submitConvertInternal(context, commandQueue, srcMetalBuffer,
                                  srcWidth, srcHeight, srcRowFloats,
                                  mapMetalBuffer, mapWidth, mapHeight, divisor,
-                                 outWidth, outHeight, done, user);
+                                 outWidth, outHeight, color, done, user);
 }
 
 void metal_gpu_downscale_release(MetalGPUContextRef context, void* slot)
@@ -858,7 +1021,8 @@ bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context,
                                    const float* rgbaData,
                                    unsigned char* uyvyData,
                                    int width,
-                                   int height) {
+                                   int height,
+                                   const metal_color_desc* color) {
     if (!context || !rgbaData || !uyvyData || width <= 0 || height <= 0) return false;
 
     @autoreleasepool {
@@ -873,7 +1037,7 @@ bool metal_gpu_convert_rgba_to_uyvy(MetalGPUContextRef context,
         const size_t uyvyBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 2;
         const bool ok = runConvertKernel(context, nullptr, rgbaBuffer, width, height, width * 4,
                                          nullptr, 0, 0, 1, width, height,
-                                         uyvyData, uyvyBytes, "CPU-buffer UYVY");
+                                         color, uyvyData, uyvyBytes, "CPU-buffer UYVY");
         [rgbaBuffer release];
         return ok;
     }

@@ -41,6 +41,9 @@ int gHelperFd = -1;                // read end of the helper's stdout pipe
 std::function<void(const std::string&)> gOnChange;
 std::string gCurrentPath;
 bool gHaveReport = false;
+std::function<void()> gOnColor;    // timeline colour listener (issue #57)
+ndi_tlcolor::Settings gColor;      // latest "@color" report
+bool gHaveColor = false;
 std::string gHealthDetail = "not started";
 
 // Resolve a path relative to this binary (the .ofx inside the bundle):
@@ -249,6 +252,30 @@ void readerLoop()
                 }
                 continue;
             }
+            if (line[0] == '@') {
+                // Timeline colour settings (issue #57 Part 3) — deduped,
+                // fanned out to the colour listener. Other '@' tags are
+                // ignored, so a newer helper never reads as a clip path.
+                ndi_tlcolor::Settings settings;
+                if (!ndi_tlcolor::parseColorLine(line, &settings)) {
+                    continue;
+                }
+                std::function<void()> onColor;
+                {
+                    std::lock_guard<std::mutex> lock(gMutex);
+                    if (gHaveColor && gColor == settings) {
+                        continue;
+                    }
+                    gColor = settings;
+                    gHaveColor = true;
+                    onColor = gOnColor;
+                }
+                WATCH_LOG(("timeline colour: " + settings.scienceMode + ", timeline '" + settings.timelineSpace + "' / '" + settings.timelineGamma + "', output '" + settings.outputSpace + "' / '" + settings.outputGamma + "'").c_str());
+                if (onColor) {
+                    onColor();
+                }
+                continue;
+            }
             std::function<void(const std::string&)> onChange;
             std::string changed;
             bool fire = false;
@@ -320,6 +347,23 @@ std::string currentClipPath()
     return gCurrentPath;
 }
 
+void setColorListener(std::function<void()> onColorChange)
+{
+    std::lock_guard<std::mutex> lock(gMutex);
+    if (!gOnColor) {
+        gOnColor = std::move(onColorChange);
+    }
+}
+
+bool currentTimelineColor(ndi_tlcolor::Settings* out)
+{
+    std::lock_guard<std::mutex> lock(gMutex);
+    if (gHaveColor && out) {
+        *out = gColor;
+    }
+    return gHaveColor;
+}
+
 bool healthy(std::string* detail)
 {
     std::lock_guard<std::mutex> lock(gMutex);
@@ -370,6 +414,8 @@ void shutdown()
     }
     gStarted = false;
     gOnChange = nullptr;
+    gOnColor = nullptr;
+    gHaveColor = false;
     setHealthLocked(false, "stopped");
 }
 
