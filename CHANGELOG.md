@@ -12,7 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Optimal Color Format off now sends RGBX instead of RGBA** (#57). NDI converts that path itself, and with an alpha channel its decoder was off by up to 16 codes on saturated colours (blue 255 arrived as 239). Without alpha the worst error is 4 codes. The stream never carried a meaningful alpha; receivers show it opaque either way. Optimal Color Format on (the default) is the accurate path.
-
 - **The macOS plugin is now built with compiler optimisation.** Earlier releases shipped unoptimised, which made the CPU paths (frames Resolve hands over in CPU memory, Optimal Color Format off, the CPU fallback) roughly 17 times slower than necessary. The Metal path was not affected.
 
 ### Added
