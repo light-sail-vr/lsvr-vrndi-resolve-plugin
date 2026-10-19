@@ -5,10 +5,13 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.17.0] - Unreleased
 
 ### Fixed
 - **Stream levels: every UYVY stream now changes visibly** (#57). The encoder wrote full-range Y'CbCr (black at 0, white at 255), but NDI is a limited-range format, so NDI's decoder (and VR.NDI) crushed everything below about 6% to black, clipped everything above about 92% to white, added about 16% extra contrast and saturation, and tinted neutrals slightly green. The plugin now encodes BT.709 limited range (black 16, white 235, neutral chroma 128) on every path — CPU, Metal and CUDA. **Existing streams look lower in contrast than before: that is the fix.** Shadows and highlights that used to vanish are back, and greys are neutral. Measured through NDI's own decoder, every patch of the new test chart now lands within 1 code of the source (it was off by up to 20). Optimal Color Format off (RGBA) is unchanged; NDI converts that path itself.
+
+### Changed
+- **Optimal Color Format off now sends RGBX instead of RGBA** (#57). NDI converts that path itself, and with an alpha channel its decoder was off by up to 16 codes on saturated colours (blue 255 arrived as 239). Without alpha the worst error is 4 codes. The stream never carried a meaningful alpha; receivers show it opaque either way. Optimal Color Format on (the default) is the accurate path.
 
 ### Added
 - **Output Color group** (#57). Choose what colour the stream carries, independently of Resolve's own output: **Passthrough** (default, unchanged behaviour), one of seven display spaces (Rec.709 Gamma 2.4 and 2.2, sRGB, P3-D65 Gamma 2.2 and 2.6, Display P3, Rec.2020 Gamma 2.4), or a 3D **LUT File** (`.cube`, up to 65 points, with a Browse button). An OpenFX node sees the *timeline* colour space, not the output: Resolve's output colour conversion runs after every node, so on a log timeline (DaVinci Wide Gamut/Intermediate, ACEScct) the stream is the flat log picture. For those, generate a LUT from a Color Space Transform node in Resolve and use LUT File. Display spaces convert display to display, and colours outside the target gamut clip. The node's own output back to Resolve never changes. Costs nothing measurable on the GPU path. On the CPU fallback path a display space adds about 9 ms per 1080p frame in the Windows build; the macOS build is slower there (it is compiled without optimisation, see LEARNINGS).

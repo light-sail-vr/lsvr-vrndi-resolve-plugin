@@ -466,8 +466,8 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 ### 2026-10-19 — NDI's own RGBA path is not accurate either (#57)
 **Symptom:** the issue assumed Optimal Color Format off was already correct ("NDI does that conversion itself"). Measured with the patch chart, it isn't.
 **Root cause:** NDI SDK 6.0.1's RGB→YUV encode runs 2–4 codes low in blue (grey 128 → 128,128,126; 255 → 255,255,253). With an alpha channel (the plugin's RGBA FourCC arrives as UYVA) NDI's own UYVA→BGRA decoder is much worse: blue 255 → 239, magenta → 251,0,240. The plugin's truncating 8-bit RGBA quantizer is not the cause (rounding changes nothing measurable). RGBX (no alpha) brings the worst error down to 4 codes.
-**Fix:** none yet — reported on #57. Optimal Color Format off cannot meet a ±2 bar through NDI's converter; switching that path's FourCC to RGBX (dropping alpha) is the cheap improvement if wanted.
-**Validated by:** scratch sender → SDK 6.0.1 → `ndi_verify --patches`, RGBA vs RGBX, truncating vs rounding quantizer, `--color bgra` vs `fastest`.
+**Fix:** the RGBA path now sends `NDIlib_FourCC_type_RGBX` (Matt's call on #57); the stream never needed alpha. That takes the worst error from 16 to 4 codes. The remaining 2–4 codes, mostly low blue, are NDI's own RGB→YUV encode, so Optimal Color Format off still can't meet a ±2 bar. Optimal Color Format on (our encoder) does.
+**Validated by:** scratch sender → SDK 6.0.1 → `ndi_verify --patches`, RGBA vs RGBX, truncating vs rounding quantizer, `--color bgra` vs `fastest`; then the plugin itself through the scratch OFX host with Optimal Color Format off: worst 4 codes via NDI's decoder.
 **Rule:** don't assume a vendor's converter is a reference — put it through the same patch chart as your own code.
 
 ### 2026-10-19 — An OpenFX node sees the timeline colour space, not Resolve's output (#57 Parts 2–3)

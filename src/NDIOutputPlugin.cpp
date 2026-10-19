@@ -1236,7 +1236,12 @@ static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
 
     switch (meta.format) {
         case ndi_stereo::WireFormat::RGBA8:
-            frame.FourCC = NDIlib_FourCC_type_RGBA;
+            // Sent as RGBX: NDI ignores the fourth byte. With an alpha
+            // channel NDI carries the stream as UYVA, and its own UYVA->BGRA
+            // decoder is off by up to 16 codes on saturated colours; without
+            // one its RGB path stays within 4 (measured, issue #57). The
+            // stream never needed alpha — receivers show it opaque.
+            frame.FourCC = NDIlib_FourCC_type_RGBX;
             frame.line_stride_in_bytes = meta.width * 4;
             break;
         case ndi_stereo::WireFormat::UYVY8:
