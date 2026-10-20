@@ -114,6 +114,29 @@ int main()
         expect(timelineFromSettings(settings(rcm, "1", "Rec.2020", "Rec.2100 HLG")).kind == kHdr, "HLG is HDR");
     }
 
+    // --- RCM with output = timeline: no output conversion, as unmanaged --------
+    // Observed 2026-10-20 (Resolve 21.1): a YRGB project switched to RCM's SDR
+    // preset keeps "Rec.709 (Scene)" for input, timeline and output, and the
+    // stale combined-mode output gamma reads "ACEScc".
+    {
+        const char* rcm = "davinciYRGBColorManagedv2";
+        expect(isDisplay(timelineFromSettings(settings(rcm, "0", "Rec.709 (Scene)", "", "Rec.709 (Scene)", "ACEScc")),
+                         kRec709Gamma24),
+               "RCM, timeline = output = 'Rec.709 (Scene)': the node sees Resolve's output, Rec.709 G2.4");
+        expect(isDisplay(timelineFromSettings(settings(rcm, "0", "Rec.2020 (Scene)", "", "Rec.2020 (Scene)")),
+                         kRec2020Gamma24),
+               "RCM, timeline = output = 'Rec.2020 (Scene)': Rec.2020 G2.4");
+        expect(isDisplay(timelineFromSettings(settings(rcm, "1", "Rec.709", "Rec.709", "Rec.709", "Rec.709")),
+                         kRec709Gamma24),
+               "split mode, Rec.709 / Rec.709 on both sides: Rec.709 G2.4");
+        expect(timelineFromSettings(settings(rcm, "1", "Rec.709", "Rec.709", "Rec.709", "Gamma 2.4")).kind ==
+                   kSceneReferred,
+               "split mode, output gamma differs: Resolve converts after the node, so it stays scene-referred");
+        expect(timelineFromSettings(settings(rcm, "0", "DaVinci WG/Intermediate", "", "DaVinci WG/Intermediate"))
+                       .kind == kSceneReferred,
+               "a log output is still log: only the (Scene) display names follow the BT.1886 convention");
+    }
+
     // --- ACES: always ACEScct/ACEScc, whatever stale gamut fields say ----------
     {
         const Resolved cct = timelineFromSettings(settings("acescct", "1", "P3-DCI", "ST2084 1000 nit"));

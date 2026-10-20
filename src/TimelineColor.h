@@ -33,8 +33,11 @@
     stale RCM values; the timeline is ACEScct/ACEScc regardless.
   - Unmanaged DaVinci YRGB has no output conversion and labels its timeline
     "Rec.709 (Scene)" by default; the pixels are graded for a BT.1886 display,
-    so "(Scene)" there means Rec.709/Rec.2020 gamma 2.4. Under RCM the same
-    name really is scene-referred.
+    so "(Scene)" there means Rec.709/Rec.2020 gamma 2.4. The same holds under
+    RCM when the output space equals the timeline's (a YRGB project switched
+    to RCM keeps "Rec.709 (Scene)" for both): the node then sees Resolve's
+    output signal. Under RCM with a different output, "(Scene)" really is
+    scene-referred — Resolve converts it after the node.
 
   planOutput() then decides what the stream carries for the NDI Output
   choice — the preset pair, the frame tag's space and the Stream Status text
@@ -136,7 +139,10 @@ inline bool isSceneName(const std::string& s)
 }
 
 // One colour space as Resolve names it: a combined name, or gamut + gamma.
-inline Resolved resolveName(const std::string& space, const std::string& gamma, bool separate, bool unmanaged)
+// `noOutputConversion`: the node's picture is Resolve's output signal, so the
+// "(Scene)" Rec.709 OETF names follow the BT.1886 convention (gamma 2.4).
+inline Resolved resolveName(const std::string& space, const std::string& gamma, bool separate,
+                            bool noOutputConversion)
 {
     if (!separate) {
         if (isHdrName(space)) return make(kHdr, -1, space);
@@ -145,8 +151,8 @@ inline Resolved resolveName(const std::string& space, const std::string& gamma, 
         if (space == "sRGB") return make(kDisplay, kSRGB, space);
         if (space == "P3-D65") return make(kDisplay, kP3D65Gamma26, space);
         if (space == "Rec.2020 Gamma 2.4") return make(kDisplay, kRec2020Gamma24, space);
-        if (unmanaged && space == "Rec.709 (Scene)") return make(kDisplay, kRec709Gamma24, space);
-        if (unmanaged && space == "Rec.2020 (Scene)") return make(kDisplay, kRec2020Gamma24, space);
+        if (noOutputConversion && space == "Rec.709 (Scene)") return make(kDisplay, kRec709Gamma24, space);
+        if (noOutputConversion && space == "Rec.2020 (Scene)") return make(kDisplay, kRec2020Gamma24, space);
         if (isSceneName(space)) return make(kSceneReferred, -1, space);
         return make(kUnknown, -1, space);
     }
@@ -163,7 +169,7 @@ inline Resolved resolveName(const std::string& space, const std::string& gamma, 
     else if (gamma == "Gamma 2.2") curve = ndi_color::kCurveGamma22;
     else if (gamma == "Gamma 2.6") curve = ndi_color::kCurveGamma26;
     else if (gamma == "sRGB") curve = ndi_color::kCurveSRGB;
-    else if (unmanaged && gamma == "Rec.709") curve = ndi_color::kCurveGamma24;  // see the header note
+    else if (noOutputConversion && gamma == "Rec.709") curve = ndi_color::kCurveGamma24;  // see the header note
     else if (gamma == "Rec.709" || isSceneName(gamma) || isSceneName(space)) return make(kSceneReferred, -1, label);
 
     if (prim == ndi_color::kPrimBT709) {
@@ -182,6 +188,16 @@ inline Resolved resolveName(const std::string& space, const std::string& gamma, 
 
 inline bool isAces(const Settings& s) { return s.scienceMode.compare(0, 4, "aces") == 0; }
 
+// Resolve applies no output conversion: unmanaged YRGB, or a managed project
+// whose output space is its timeline space. Gamma fields count only in split
+// mode; combined mode leaves them stale.
+inline bool noOutputConversion(const Settings& s)
+{
+    if (s.scienceMode == "davinciYRGB") return true;
+    if (s.timelineSpace != s.outputSpace) return false;
+    return s.separateGamma != "1" || s.timelineGamma == s.outputGamma;
+}
+
 } // namespace detail
 
 // The colour space an OpenFX node sees: Resolve's timeline space.
@@ -191,7 +207,7 @@ inline Resolved timelineFromSettings(const Settings& s)
         return detail::make(kSceneReferred, -1, s.scienceMode == "acescc" ? "ACEScc" : "ACEScct");
     }
     return detail::resolveName(s.timelineSpace, s.timelineGamma, s.separateGamma == "1",
-                               s.scienceMode == "davinciYRGB");
+                               detail::noOutputConversion(s));
 }
 
 // An OFX 1.5 native colourspace identifier (kOfxImageClipPropColourspace).

@@ -1,6 +1,6 @@
 # Timeline colour detection: OFX 1.5 colour management and Resolve's settings (issue #57 Part 3)
 
-Status: **partly verified.** The scripting route and the plugin's handling are verified (L). What Resolve 21.1 reports through the OFX 1.5 colour-management API is verified for an unmanaged DaVinci YRGB project (L, 2026-10-20: `Raw` on both clips, no conversion of the node's I/O); colour-managed and ACES projects (cases 2–4 below) are still **(T)**. Fact labels as in LEARNINGS.md: (L) verified locally, (P) primary source, (T) needs testing.
+Status: **partly verified.** The scripting route and the plugin's handling are verified (L). What Resolve 21.1 reports through the OFX 1.5 colour-management API is verified (L, 2026-10-20) for unmanaged DaVinci YRGB, DaVinci YRGB Color Managed and ACEScct projects (cases 1, 2 and 4 below): `Raw` on both clips every time, and no conversion of the node's I/O. Case 3 (RCM with a DaVinci WG/Intermediate timeline) was not run in Resolve. Fact labels as in LEARNINGS.md: (L) verified locally, (P) primary source, (T) needs testing.
 
 ## Why the plugin needs to know
 
@@ -53,7 +53,20 @@ NDI Plugin: OFX colourspace: source clip 'Raw', output clip 'Raw'
 - Resolve does not convert the node's I/O. The Passthrough patch readout (`--color bgra`) was within 1 code of the source on all 24 patches, including 16 and 235. Every display preset matched the standards within 1 code (Rec.2020 within 2; `tools/ndi_color_check.py`).
 - When switching a project to RCM or ACES for cases 2–4, a new `OFX colourspace` line appears only if the value changes. No new line after a render means it's still `Raw`.
 
-Write the results for cases 2–4 into this section, and an entry into LEARNINGS.md. If Resolve reports nothing (style and colourspace both "(not set)"), Auto runs entirely on step 2 below, which is already verified. If Resolve does convert, remove the two `propSetString` lines in `describe`; nothing else depends on them.
+**Result, cases 2 and 4** (L, 2026-10-20, same session and project):
+
+- **Case 2, DaVinci YRGB Color Managed (SDR preset).** The project had been unmanaged, so input, timeline and output all stayed `Rec.709 (Scene)`.
+  - No new `OFX colourspace` line was logged while frames rendered, so the value stayed `Raw`.
+  - The helper reported `davinciYRGBColorManagedv2, timeline 'Rec.709 (Scene)', output 'Rec.709 (Scene)' / 'ACEScc'`; the output gamma is a stale combined-mode field.
+  - Passthrough patches were still within 1 code of the chart: input equals timeline, so there's no conversion before the node, and none at it.
+  - This run exposed a labelling gap. Stream Status read `timeline is Rec.709 (Scene), not a display picture` and the stream went unlabelled, although with output equal to timeline the node's picture *is* Resolve's output. Fixed: `(Scene)` now resolves to Gamma 2.4 whenever Resolve applies no output conversion (§2).
+- **Case 4, ACEScct** (Resolve left IDT/ODT at `No Input Transform` / `No Output Transform`, and the RCM fields stale).
+  - Still `Raw`.
+  - Auto reported `passthrough — timeline is ACEScct, not a display picture`, and the stream went unlabelled, as designed.
+  - The stream's greys are the chart's values on the ACEScct curve: white 255 → 141, 128 → 127, black → 19. So the node sees Resolve's ACEScct timeline picture and nothing else.
+- **Scripting while settings change.** While the project's colour settings were being changed, Resolve's scripting API stopped answering for about 3 minutes; even `GetVersionString` timed out. The helper's ACEScct update landed at 10:27:15, when Resolve answered again. Auto lags Resolve by however long that takes.
+
+Write the result for case 3, if it's ever run, into this section. If Resolve reports nothing (style and colourspace both "(not set)"), Auto runs entirely on step 2 below, which is already verified. If Resolve does convert, remove the two `propSetString` lines in `describe`; nothing else depends on them.
 
 ## 2. Resolve's timeline settings via scripting (verified)
 
@@ -75,7 +88,7 @@ The watcher helper (`src/ndi_timeline_watch.lua`, Python fallback `src/ndi_timel
 
 - In combined mode, `colorSpaceTimelineGamma` still returns the last split-mode value (observed: `ST2084 1000 nit` next to a `DaVinci WG/Intermediate` timeline). The gamma field is ignored unless `separateColorSpaceAndGamma` is `1`.
 - Under `acescct`/`acescc` the gamut/gamma fields are stale RCM values. The timeline is ACEScct/ACEScc regardless.
-- Unmanaged YRGB labels its timeline `Rec.709 (Scene)` by default, but has no output conversion: the pixels are graded for a BT.1886 display. So `(Scene)` there resolves to Rec.709 (or Rec.2020) Gamma 2.4. Under RCM the same name really is scene-referred and triggers the warning.
+- Unmanaged YRGB labels its timeline `Rec.709 (Scene)` by default, but has no output conversion: the pixels are graded for a BT.1886 display. So `(Scene)` there resolves to Rec.709 (or Rec.2020) Gamma 2.4. The same holds under RCM when the output space equals the timeline's (combined names; in split mode gamut and gamma both), which is what a YRGB project switched to RCM keeps (seen 2026-10-20). Under RCM with a different output, Resolve converts after the node, so `(Scene)` there really is scene-referred and triggers the warning.
 
 **Verified live** (L): both helpers run standalone against a running Resolve 21.1 and print `@color⇥davinciYRGB⇥0⇥Rec.709 (Scene)⇥⇥Rec.709 (Scene)⇥`. Through the scratch OFX host with Resolve running, Auto on that unmanaged project re-resolved from "unknown, assuming Rec.709 G2.4" to `color: Rec.709 G2.4 → sRGB [timeline colour from Resolve timeline settings (davinciYRGB)]` within ~2 s. On an RCM `DaVinci WG/Intermediate` → `Rec.709 Gamma 2.4` project it showed `WARNING: timeline is DaVinci WG/Intermediate (scene-referred/log), use LUT File`. External scripting on and off (owed with the in-Resolve run): with it off the helper prints `!scriptapp('Resolve') returned nothing`, Auto stays unknown, and presets assume Rec.709 G2.4 with the warning.
 
