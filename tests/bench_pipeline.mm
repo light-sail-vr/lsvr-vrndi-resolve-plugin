@@ -26,6 +26,7 @@
 // in-host stage timers, not this harness.
 
 #include "MetalGPUAcceleration.h"
+#include "OutputColor.h"
 #include "StreamResolution.h"
 #include "StereoPair.h"
 
@@ -246,7 +247,7 @@ int main()
     const int rowFloatsInt = static_cast<int>(srcRowFloats);
     auto convert = [&](std::vector<uint8_t>& dst) {
         metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, srcBuf, SRC_W, SRC_H, rowFloatsInt,
-                                           DIVISOR, outW, outH, dst.data());
+                                           DIVISOR, outW, outH, nullptr, dst.data());
     };
     auto blitNoWait = [&] { metal_gpu_copy_buffer(ctx, nullptr, srcBuf, blitDst, srcBytes, false); };
 
@@ -269,10 +270,70 @@ int main()
         t.clear();
         for (int i = 0; i < 4; ++i) {
             t.push_back(runMs([&] {
-                metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, srcBuf, SRC_W, SRC_H, rowFloatsInt, 4, qW, qH, quarter.data());
+                metal_gpu_buffer_downscale_to_uyvy(ctx, nullptr, srcBuf, SRC_W, SRC_H, rowFloatsInt, 4, qW, qH,
+                                                   nullptr, quarter.data());
             }));
         }
         printStats("B4 fused convert+readback div4", t);
+    }
+
+    // --- Stage B5: Output Color GPU cost (issue #57) ---------------------------
+    // Kernel execution time (GPUEndTime - GPUStartTime, the in-host "GPU exec"
+    // number) of the async fused kernel at production dims, without a
+    // transform, with a preset, and with a 65-point LUT.
+    {
+        ndi_color::Transform preset, lut;
+        ndi_color::buildPreset(ndi_color::kRec709Gamma24, ndi_color::kP3D65Gamma22, &preset);
+        ndi_cube::CubeLUT cube;
+        cube.size = 65;
+        for (int b = 0; b < 65; ++b)
+            for (int g = 0; g < 65; ++g)
+                for (int r = 0; r < 65; ++r) {
+                    cube.rgb.push_back(0.9f * (r / 64.0f) * (r / 64.0f) + 0.1f * (g / 64.0f));
+                    cube.rgb.push_back(g / 64.0f);
+                    cube.rgb.push_back(1.0f - 0.5f * (b / 64.0f));
+                }
+        ndi_color::buildLut(cube, &lut);
+        void* presetBuf = metal_gpu_create_shared_buffer(ctx, preset.data.data(), preset.data.size() * sizeof(float));
+        void* lutBuf = metal_gpu_create_shared_buffer(ctx, lut.data.data(), lut.data.size() * sizeof(float));
+        const metal_color_desc presetDesc = {presetBuf, preset.mode, 0};
+        const metal_color_desc lutDesc = {lutBuf, lut.mode, lut.lutSize};
+
+        struct GpuTime {
+            std::mutex m;
+            std::condition_variable cv;
+            bool fired = false;
+            double ms = 0.0;
+            void* slot = nullptr;
+        };
+        auto onTimed = [](void* user, void* slot, const void*, size_t, double gpuMs, bool) {
+            GpuTime* g = static_cast<GpuTime*>(user);
+            std::lock_guard<std::mutex> lock(g->m);
+            g->ms = gpuMs;
+            g->slot = slot;
+            g->fired = true;
+            g->cv.notify_all();
+        };
+        auto measure = [&](const metal_color_desc* color, const char* label) {
+            std::vector<double> gpu;
+            for (int i = 0; i < 14; ++i) {
+                GpuTime g;
+                if (metal_gpu_downscale_submit(ctx, nullptr, srcBuf, SRC_W, SRC_H, rowFloatsInt, DIVISOR, outW, outH,
+                                               color, onTimed, &g) != METAL_SUBMIT_OK) {
+                    continue;
+                }
+                std::unique_lock<std::mutex> lock(g.m);
+                g.cv.wait(lock, [&] { return g.fired; });
+                metal_gpu_downscale_release(ctx, g.slot);
+                if (i >= 4) gpu.push_back(g.ms);  // first few: pipeline/page warmup
+            }
+            printStats(label, gpu);
+        };
+        measure(nullptr, "B5 GPU exec div2, no Output Color");
+        measure(&presetDesc, "B5 GPU exec div2, preset 709->P3");
+        measure(&lutDesc, "B5 GPU exec div2, 65-point LUT");
+        metal_gpu_release_buffer(presetBuf);
+        metal_gpu_release_buffer(lutBuf);
     }
 
     t.clear();
@@ -415,7 +476,7 @@ int main()
                 ++sim.pending;
                 if (metal_gpu_downscale_submit(ctx, nullptr, srcBuf, SRC_W, SRC_H,
                                                rowFloatsInt, DIVISOR, outW, outH,
-                                               onDone, tag) != METAL_SUBMIT_OK) {
+                                               nullptr, onDone, tag) != METAL_SUBMIT_OK) {
                     --sim.pending;
                     delete tag;
                     ++dropped;

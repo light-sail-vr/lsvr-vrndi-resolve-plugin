@@ -11,8 +11,8 @@
 #   NDIOutput-<VERSION>-Windows-x64.zip   bare bundle for manual installs
 #   SHA256SUMS-Windows.txt
 #
-# Copy those three onto the macOS release machine's dist\v<VERSION>\ before
-# running scripts/publish_github_release.sh, which attaches them next to the pkg.
+# Release order and upload steps: docs/RELEASING.md (the Mac publishes first;
+# this machine then uploads these three files with `gh release upload`).
 #
 # -AllowStub packages a stub-linked build (no NDI SDK on the machine,
 # which is CI's situation). Such a build loads but never streams, so its

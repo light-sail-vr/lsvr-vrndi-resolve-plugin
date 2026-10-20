@@ -3,6 +3,7 @@
 
 # Build outputs (macOS make build)
 *.o
+src/*.d
 /NDIOutput.ofx.bundle/
 
 # Release packaging output (scripts/package_release.sh)
@@ -27,3 +28,6 @@ x64/
 # Editors
 .vscode/
 .idea/
+
+# Python bytecode (scripts/gen_patch_chart.py imports gen_resolution_chart)
+__pycache__/

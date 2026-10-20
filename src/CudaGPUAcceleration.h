@@ -36,6 +36,20 @@ extern "C" {
 // Opaque handle for the CUDA GPU context
 typedef struct CudaGPUContext* CudaGPUContextRef;
 
+// Output Color stage (issue #57 Part 2) for every convert entry point below
+// — the counterpart of metal_color_desc: an ndi_color::Transform
+// (src/OutputColor.h) whose `data` was uploaded with
+// cuda_gpu_create_device_buffer_for_stream. Applied per output pixel between
+// the box/warp sample and the UYVY encode, byte-identical to
+// ndi_color::applyTransform. NULL, or mode 0, means no transform (the
+// passthrough bytes). A descriptor whose buffer is missing or too small for
+// its mode is refused (INVALID / false).
+typedef struct {
+    void* buffer;   // CUDA device pointer holding Transform::data
+    int mode;       // ndi_color::Mode: 0 none, 1 preset matrix, 2 3D LUT
+    int lutSize;    // lattice points per axis (mode 2 only)
+} cuda_color_desc;
+
 // Initialize / shut down the CUDA GPU context. init returns NULL when CUDA
 // is unusable (no device, no driver) — callers fall back to the CPU path.
 CudaGPUContextRef cuda_gpu_init(void);
@@ -63,6 +77,7 @@ bool cuda_gpu_buffer_downscale_to_uyvy(CudaGPUContextRef context,
                                        int srcWidth, int srcHeight, int srcRowFloats,
                                        int divisor,
                                        int outWidth, int outHeight,
+                                       const cuda_color_desc* color,
                                        unsigned char* uyvyOut);
 
 // ---------------------------------------------------------------------------
@@ -85,6 +100,7 @@ bool cuda_gpu_buffer_warp_to_uyvy(CudaGPUContextRef context,
                                   void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                   int divisor,
                                   int outWidth, int outHeight,
+                                  const cuda_color_desc* color,
                                   unsigned char* uyvyOut);
 
 // ---------------------------------------------------------------------------
@@ -128,6 +144,7 @@ cuda_submit_status cuda_gpu_downscale_submit(CudaGPUContextRef context,
                                              int srcWidth, int srcHeight, int srcRowFloats,
                                              int divisor,
                                              int outWidth, int outHeight,
+                                             const cuda_color_desc* color,
                                              cuda_downscale_done_fn done, void* user);
 
 // Non-blocking STMap warp: identical contract to cuda_gpu_downscale_submit
@@ -141,6 +158,7 @@ cuda_submit_status cuda_gpu_warp_submit(CudaGPUContextRef context,
                                         void* mapDeviceBuffer, int mapWidth, int mapHeight,
                                         int divisor,
                                         int outWidth, int outHeight,
+                                        const cuda_color_desc* color,
                                         cuda_downscale_done_fn done, void* user);
 
 void cuda_gpu_downscale_release(CudaGPUContextRef context, void* slot);
