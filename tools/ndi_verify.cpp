@@ -21,6 +21,18 @@
 // specific receiver's settings (VR.NDI Quest native uses highest + best, so
 // a UYVY sender arrives there as P216).
 //
+// It also reports the plugin's per-frame colour label (issue #57 Part 4): the
+// lsvr_color XML in each video frame's metadata, which names the stream's
+// display space (NDI's own ndi_color_info can't name P3-D65 or gamma 2.2).
+// `--expect-color "P3-D65 Gamma 2.2"` (or `none`) asserts it.
+//
+// `--patches` reads back the patch chart (scripts/gen_patch_chart.py, issue
+// #57): it averages the centre of each patch of the last frame, prints the
+// received 8-bit R'G'B' next to the chart's source values, and fails when a
+// channel is more than --patch-tolerance codes off (default 2 — SpeedHQ is
+// lossy). `--patch-region left|right|top|bottom` reads one eye of a packed
+// stereo frame.
+//
 // macOS developer tool; needs the NDI SDK for Apple. Build: `make ndi-verify`.
 // See BUILD.md "Receiving the stream (test receivers)".
 
@@ -28,6 +40,8 @@
 #include <cstdio>
 
 #include <Processing.NDI.Lib.h>
+
+#include "OutputColor.h"  // lsvr_color tag parsing (src/, issue #57)
 
 #include <algorithm>
 #include <chrono>
@@ -60,6 +74,10 @@ struct Options {
     std::string expectFourCC;
     bool listOnly = false;
     bool quiet = false;
+    std::string expectColor;   // display-space name, or "none"
+    bool patches = false;
+    std::string patchRegion = "full";
+    int patchTolerance = 2;
 };
 
 void usage()
@@ -68,7 +86,10 @@ void usage()
         "usage: ndi_verify [--source <substring>] [--duration <s>] [--find-timeout <s>]\n"
         "                  [--bandwidth highest|lowest] [--color fastest|best|uyvy|bgra]\n"
         "                  [--expect WxH] [--expect-fps N] [--expect-fourcc UYVY]\n"
+        "                  [--expect-color \"Rec.709 Gamma 2.4\"|none]\n"
         "                  [--dump out.ppm] [--iface en0] [--list] [--quiet]\n"
+        "                  [--patches [--patch-region full|left|right|top|bottom]\n"
+        "                             [--patch-tolerance N]]\n"
         "\n"
         "Receives one NDI source and reports its on-wire geometry and cadence.\n"
         "Exit status: 0 = frames received and every --expect matched; 1 = a mismatch;\n"
@@ -99,10 +120,14 @@ bool parseArgs(int argc, char** argv, Options* o)
         }
         else if (a == "--expect-fps") { if (!next(&v)) return false; o->expectFps = std::atof(v.c_str()); }
         else if (a == "--expect-fourcc") { if (!next(&o->expectFourCC)) return false; }
+        else if (a == "--expect-color") { if (!next(&o->expectColor)) return false; }
         else if (a == "--dump") { if (!next(&o->dumpPath)) return false; }
         else if (a == "--iface") { if (!next(&o->iface)) return false; }
         else if (a == "--list") { o->listOnly = true; }
         else if (a == "--quiet") { o->quiet = true; }
+        else if (a == "--patches") { o->patches = true; }
+        else if (a == "--patch-region") { if (!next(&o->patchRegion)) return false; }
+        else if (a == "--patch-tolerance") { if (!next(&v)) return false; o->patchTolerance = std::atoi(v.c_str()); }
         else if (a == "-h" || a == "--help") { usage(); return false; }
         else { std::fprintf(stderr, "unknown argument '%s'\n", a.c_str()); usage(); return false; }
     }
@@ -112,6 +137,15 @@ bool parseArgs(int argc, char** argv, Options* o)
     }
     if (o->color != "fastest" && o->color != "best" && o->color != "uyvy" && o->color != "bgra") {
         std::fprintf(stderr, "--color must be fastest, best, uyvy or bgra\n");
+        return false;
+    }
+    if (o->patchRegion != "full" && o->patchRegion != "left" && o->patchRegion != "right" &&
+        o->patchRegion != "top" && o->patchRegion != "bottom") {
+        std::fprintf(stderr, "--patch-region must be full, left, right, top or bottom\n");
+        return false;
+    }
+    if (o->patchTolerance < 0) {
+        std::fprintf(stderr, "--patch-tolerance must be >= 0\n");
         return false;
     }
     return true;
@@ -230,70 +264,158 @@ std::vector<uint8_t> lumaPlane(const NDIlib_video_frame_v2_t& f)
     }
 }
 
-// Writes the frame as a binary PPM (RGB8, top-down). UYVY/P216 are converted
-// with Rec.709 limited-range maths (the same as the plugin's encoder and the
-// Quest app's decoder); RGB formats pass through.
+// One pixel of the frame as 8-bit-scale R'G'B' (0..255, unrounded), top-down
+// coordinates. UYVY/P216 are decoded with BT.709 limited-range maths — the
+// inverse of the plugin's encoder since issue #57 (builds before that encoded
+// FULL range, so their dumps show crushed blacks and clipped whites) and the
+// same as NDI's own decoder and the Quest app's. RGB formats pass through.
+// Returns false for a FourCC it doesn't handle.
+bool pixelRGB(const NDIlib_video_frame_v2_t& f, int x, int y, float rgb[3])
+{
+    auto yuv = [&](float Y, float U, float V) {
+        const float yn = (Y - 16.0f) / 219.0f, u = (U - 128.0f) / 112.0f, v = (V - 128.0f) / 112.0f;
+        const float r = yn + v * (1.0f - 0.2126f);
+        const float b = yn + u * (1.0f - 0.0722f);
+        const float g = (yn - 0.2126f * r - 0.0722f * b) / (1.0f - 0.2126f - 0.0722f);
+        rgb[0] = r * 255.0f;
+        rgb[1] = g * 255.0f;
+        rgb[2] = b * 255.0f;
+    };
+    switch (f.FourCC) {
+        case NDIlib_FourCC_video_type_UYVY:
+        case NDIlib_FourCC_video_type_UYVA: {
+            const int stride = f.line_stride_in_bytes ? f.line_stride_in_bytes : f.xres * 2;
+            const uint8_t* src = f.p_data + static_cast<size_t>(y) * stride;
+            const uint8_t* pair = src + (x & ~1) * 2;
+            yuv(src[x * 2 + 1], pair[0], pair[2]);
+            return true;
+        }
+        case NDIlib_FourCC_video_type_P216:
+        case NDIlib_FourCC_video_type_PA16: {
+            const int stride = f.line_stride_in_bytes ? f.line_stride_in_bytes : f.xres * 2;
+            const uint16_t* ly = reinterpret_cast<const uint16_t*>(f.p_data + static_cast<size_t>(y) * stride);
+            const uint16_t* cc = reinterpret_cast<const uint16_t*>(f.p_data + static_cast<size_t>(stride) * f.yres +
+                                                                   static_cast<size_t>(y) * stride);
+            const int c = (x & ~1); // chroma pair index * 2 → (Cb, Cr) interleaved
+            yuv(ly[x] / 256.0f, cc[c] / 256.0f, cc[c + 1] / 256.0f);
+            return true;
+        }
+        case NDIlib_FourCC_video_type_BGRA:
+        case NDIlib_FourCC_video_type_BGRX:
+        case NDIlib_FourCC_video_type_RGBA:
+        case NDIlib_FourCC_video_type_RGBX: {
+            const bool bgr = (f.FourCC == NDIlib_FourCC_video_type_BGRA || f.FourCC == NDIlib_FourCC_video_type_BGRX);
+            const int stride = f.line_stride_in_bytes ? f.line_stride_in_bytes : f.xres * 4;
+            const uint8_t* px = f.p_data + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4;
+            rgb[0] = bgr ? px[2] : px[0];
+            rgb[1] = px[1];
+            rgb[2] = bgr ? px[0] : px[2];
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+// Writes the frame as a binary PPM (RGB8, top-down), decoded by pixelRGB.
 bool writePPM(const std::string& path, const NDIlib_video_frame_v2_t& f)
 {
+    float probe[3];
+    if (f.xres <= 0 || f.yres <= 0 || !pixelRGB(f, 0, 0, probe)) return false;
     FILE* out = std::fopen(path.c_str(), "wb");
     if (!out) return false;
     const int w = f.xres, h = f.yres;
     std::fprintf(out, "P6\n%d %d\n255\n", w, h);
     std::vector<uint8_t> row(static_cast<size_t>(w) * 3);
     auto clamp8 = [](float v) { return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, v + 0.5f))); };
-    auto yuv = [&](float Y, float U, float V, uint8_t* px) {
-        const float y = (Y - 16.0f) / 219.0f, u = (U - 128.0f) / 112.0f, v = (V - 128.0f) / 112.0f;
-        const float r = y + v * (1.0f - 0.2126f);
-        const float b = y + u * (1.0f - 0.0722f);
-        const float g = (y - 0.2126f * r - 0.0722f * b) / (1.0f - 0.2126f - 0.0722f);
-        px[0] = clamp8(r * 255.0f); px[1] = clamp8(g * 255.0f); px[2] = clamp8(b * 255.0f);
-    };
     for (int r = 0; r < h; ++r) {
-        switch (f.FourCC) {
-            case NDIlib_FourCC_video_type_UYVY:
-            case NDIlib_FourCC_video_type_UYVA: {
-                const int stride = f.line_stride_in_bytes ? f.line_stride_in_bytes : w * 2;
-                const uint8_t* src = f.p_data + static_cast<size_t>(r) * stride;
-                for (int x = 0; x < w; ++x) {
-                    const uint8_t* pair = src + (x & ~1) * 2;
-                    yuv(src[x * 2 + 1], pair[0], pair[2], &row[static_cast<size_t>(x) * 3]);
-                }
-                break;
-            }
-            case NDIlib_FourCC_video_type_P216:
-            case NDIlib_FourCC_video_type_PA16: {
-                const int stride = f.line_stride_in_bytes ? f.line_stride_in_bytes : w * 2;
-                const uint16_t* ly = reinterpret_cast<const uint16_t*>(f.p_data + static_cast<size_t>(r) * stride);
-                const uint16_t* cc = reinterpret_cast<const uint16_t*>(f.p_data + static_cast<size_t>(stride) * h + static_cast<size_t>(r) * stride);
-                for (int x = 0; x < w; ++x) {
-                    const int c = (x & ~1); // chroma pair index * 2 → (Cb, Cr) interleaved
-                    yuv(ly[x] / 256.0f, cc[c] / 256.0f, cc[c + 1] / 256.0f, &row[static_cast<size_t>(x) * 3]);
-                }
-                break;
-            }
-            case NDIlib_FourCC_video_type_BGRA:
-            case NDIlib_FourCC_video_type_BGRX:
-            case NDIlib_FourCC_video_type_RGBA:
-            case NDIlib_FourCC_video_type_RGBX: {
-                const bool bgr = (f.FourCC == NDIlib_FourCC_video_type_BGRA || f.FourCC == NDIlib_FourCC_video_type_BGRX);
-                const int stride = f.line_stride_in_bytes ? f.line_stride_in_bytes : w * 4;
-                const uint8_t* src = f.p_data + static_cast<size_t>(r) * stride;
-                for (int x = 0; x < w; ++x) {
-                    const uint8_t* px = src + x * 4;
-                    row[static_cast<size_t>(x) * 3 + 0] = bgr ? px[2] : px[0];
-                    row[static_cast<size_t>(x) * 3 + 1] = px[1];
-                    row[static_cast<size_t>(x) * 3 + 2] = bgr ? px[0] : px[2];
-                }
-                break;
-            }
-            default:
-                std::fclose(out);
-                return false;
+        for (int x = 0; x < w; ++x) {
+            float rgb[3];
+            pixelRGB(f, x, r, rgb);
+            uint8_t* px = &row[static_cast<size_t>(x) * 3];
+            px[0] = clamp8(rgb[0]);
+            px[1] = clamp8(rgb[1]);
+            px[2] = clamp8(rgb[2]);
         }
         std::fwrite(row.data(), 1, row.size(), out);
     }
     std::fclose(out);
     return true;
+}
+
+// The patch chart's layout — keep in sync with PATCHES in
+// scripts/gen_patch_chart.py: a 6x4 grid filling the frame, row-major from
+// the top-left, 8-bit full-range source values.
+struct Patch {
+    const char* label;
+    int rgb[3];
+};
+constexpr int kPatchCols = 6, kPatchRows = 4;
+const Patch kPatches[kPatchCols * kPatchRows] = {
+    {"0", {0, 0, 0}}, {"16", {16, 16, 16}}, {"32", {32, 32, 32}},
+    {"128", {128, 128, 128}}, {"235", {235, 235, 235}}, {"255", {255, 255, 255}},
+    {"R", {255, 0, 0}}, {"G", {0, 255, 0}}, {"B", {0, 0, 255}},
+    {"C", {0, 255, 255}}, {"M", {255, 0, 255}}, {"Y", {255, 255, 0}},
+    {"0", {0, 0, 0}}, {"23", {23, 23, 23}}, {"46", {46, 46, 46}},
+    {"70", {70, 70, 70}}, {"93", {93, 93, 93}}, {"116", {116, 116, 116}},
+    {"139", {139, 139, 139}}, {"162", {162, 162, 162}}, {"185", {185, 185, 185}},
+    {"209", {209, 209, 209}}, {"232", {232, 232, 232}}, {"255", {255, 255, 255}},
+};
+
+// Reads every patch's central 50% (clear of the label in its top-left
+// corner) inside `region` of the frame, prints received vs. source, and
+// returns false when any channel is off by more than `tolerance` codes.
+bool reportPatches(const NDIlib_video_frame_v2_t& f, const std::string& region, int tolerance)
+{
+    int rx = 0, ry = 0, rw = f.xres, rh = f.yres;
+    if (region == "left" || region == "right") {
+        rw = f.xres / 2;
+        if (region == "right") rx = rw;
+    } else if (region == "top" || region == "bottom") {
+        rh = f.yres / 2;
+        if (region == "bottom") ry = rh;
+    }
+    float probe[3];
+    if (rw < kPatchCols * 4 || rh < kPatchRows * 4 || !pixelRGB(f, 0, 0, probe)) {
+        std::printf("patches: cannot read this frame (%dx%d %s, region %s)\n", f.xres, f.yres,
+                    fourccName(f.FourCC).c_str(), region.c_str());
+        return false;
+    }
+    std::printf("patches (region %s, %dx%d at %d,%d; tolerance +/-%d codes):\n", region.c_str(), rw, rh, rx, ry,
+                tolerance);
+    std::printf("  %-5s %-15s %-21s %s\n", "patch", "source R,G,B", "received R,G,B", "max |diff|");
+    int worst = 0;
+    for (int i = 0; i < kPatchCols * kPatchRows; ++i) {
+        const int col = i % kPatchCols, row = i / kPatchCols;
+        const int x0 = rx + col * rw / kPatchCols, x1 = rx + (col + 1) * rw / kPatchCols;
+        const int y0 = ry + row * rh / kPatchRows, y1 = ry + (row + 1) * rh / kPatchRows;
+        const int sx0 = x0 + (x1 - x0) / 4, sx1 = x1 - (x1 - x0) / 4;
+        const int sy0 = y0 + (y1 - y0) / 4, sy1 = y1 - (y1 - y0) / 4;
+        double sum[3] = {0.0, 0.0, 0.0};
+        long n = 0;
+        for (int y = sy0; y < sy1; ++y) {
+            for (int x = sx0; x < sx1; ++x) {
+                float rgb[3];
+                pixelRGB(f, x, y, rgb);
+                sum[0] += rgb[0];
+                sum[1] += rgb[1];
+                sum[2] += rgb[2];
+                ++n;
+            }
+        }
+        int got[3], diff = 0;
+        for (int c = 0; c < 3; ++c) {
+            got[c] = static_cast<int>(std::lround(n ? sum[c] / n : 0.0));
+            diff = std::max(diff, std::abs(got[c] - kPatches[i].rgb[c]));
+        }
+        worst = std::max(worst, diff);
+        char src[32], rcv[32];
+        std::snprintf(src, sizeof(src), "%d,%d,%d", kPatches[i].rgb[0], kPatches[i].rgb[1], kPatches[i].rgb[2]);
+        std::snprintf(rcv, sizeof(rcv), "%d,%d,%d", got[0], got[1], got[2]);
+        std::printf("  %-5s %-15s %-21s %d%s\n", kPatches[i].label, src, rcv, diff, diff > tolerance ? "  <- OFF" : "");
+    }
+    std::printf("patches: worst channel error %d code(s)\n", worst);
+    return worst <= tolerance;
 }
 
 // Mean luma (black-frame check) and the share of horizontally adjacent luma
@@ -412,6 +534,10 @@ int main(int argc, char** argv)
     std::vector<uint8_t> keepData; // copy of the last frame for --dump
     Clock::time_point windowStart;
     Clock::time_point lastFrameAt;
+    std::string lastFrameMetadata;   // the last frame's per-frame XML (lsvr_color lives here)
+    uint64_t framesWithColorTag = 0;
+    int colorTagChanges = 0;
+    std::string lastColorTag;
     const auto connectDeadline = Clock::now() + std::chrono::seconds(15);
     bool started = false;
     std::vector<double> gapsMs;
@@ -442,6 +568,15 @@ int main(int argc, char** argv)
         }
         lastFrameAt = arrived;
         ++frames;
+        lastFrameMetadata = v.p_metadata ? v.p_metadata : "";
+        {
+            int space = -1;
+            const std::string tag = ndi_color::parseColorTag(v.p_metadata, &space)
+                                        ? std::string(ndi_color::displaySpaceName(space)) : std::string();
+            if (!tag.empty()) ++framesWithColorTag;
+            if (frames > 1 && tag != lastColorTag) ++colorTagChanges;
+            lastColorTag = tag;
+        }
         if (!haveGeom || g != geom) {
             if (haveGeom) ++geometryChanges;
             geom = g;
@@ -505,6 +640,14 @@ int main(int argc, char** argv)
         std::printf("sdk counters: video total %lld, dropped %lld (receiver too slow to dequeue); queue depth %d\n",
                     static_cast<long long>(total.video_frames), static_cast<long long>(dropped.video_frames), queue.video_frames);
         if (geometryChanges) std::printf("geometry changed %d time(s) during the window\n", geometryChanges);
+        if (!lastColorTag.empty()) {
+            std::printf("color tag: %s on %llu/%llu frames (lsvr_color)%s\n", lastColorTag.c_str(),
+                        static_cast<unsigned long long>(framesWithColorTag), static_cast<unsigned long long>(frames),
+                        colorTagChanges ? "  <- CHANGED during the window" : "");
+        } else {
+            std::printf("color tag: none on the last frame (stream space unknown, or a sender without lsvr_color)\n");
+        }
+        if (!lastFrameMetadata.empty()) std::printf("frame metadata: %s\n", lastFrameMetadata.c_str());
         if (keep.p_data) {
             std::printf("last frame content: mean luma %.1f/255, busy adjacent-pixel pairs %.2f%%%s\n", meanLuma,
                         busyShare * 100.0,
@@ -535,8 +678,19 @@ int main(int argc, char** argv)
             std::printf("MISMATCH: expected FourCC %s, got %s\n", opt.expectFourCC.c_str(), fourccName(geom.fourcc).c_str());
             exitCode = 1;
         }
+        if (!opt.expectColor.empty()) {
+            const std::string got = lastColorTag.empty() ? "none" : lastColorTag;
+            if (got != opt.expectColor) {
+                std::printf("MISMATCH: expected color tag %s, got %s\n", opt.expectColor.c_str(), got.c_str());
+                exitCode = 1;
+            }
+        }
         if (keep.p_data && !lastLuma.empty() && meanLuma < 1.0) {
             std::printf("MISMATCH: last frame is black\n");
+            exitCode = 1;
+        }
+        if (opt.patches && keep.p_data && !reportPatches(keep, opt.patchRegion, opt.patchTolerance)) {
+            std::printf("MISMATCH: patch values outside +/-%d codes\n", opt.patchTolerance);
             exitCode = 1;
         }
         if (exitCode == 0) std::printf("OK\n");

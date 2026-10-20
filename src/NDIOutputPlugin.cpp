@@ -46,6 +46,7 @@ static void ndiWinLog(const char* fmt, ...);
 
 #include "ofxImageEffect.h"
 #include "ofxImageEffectExt.h"
+#include "ofxColour.h"  // OFX 1.5 colour management (issue #57 Part 3)
 #include "ofxMemory.h"
 #include "ofxMultiThread.h"
 
@@ -61,12 +62,16 @@ static void ndiWinLog(const char* fmt, ...);
 #include <algorithm>
 
 #include "BRAWLensMap.h"
+#include "CubeLUT.h"
 #include "NDIRuntimeLoader.h"
+#include "OutputColor.h"
 #include "PlatformPaths.h"
 #include "RenderProbe.h"
 #include "STMap.h"
 #include "StereoPair.h"
 #include "StreamResolution.h"
+#include "TimelineColor.h"
+#include "UYVYEncode.h"
 #include "TimelineClipWatcher.h"  // self-gates (defines NDI_TIMELINE_WATCH on macOS + Windows)
 
 #include "BRAWImmersiveReader.h"  // self-gates (macOS + Windows, ticket #26)
@@ -193,7 +198,7 @@ static void ndiWinLog(const char* fmt, ...)
 
 #define kParamStereoStatus "stereoStatus"
 #define kParamStereoStatusLabel "Stream Status"
-#define kParamStereoStatusHint "What the stream is currently carrying: Mono, a packed stereo pair, a labeled single-eye fallback when the partner eye stops rendering, or the sender-creation failure (e.g. the NDI name is already in use on this machine)."
+#define kParamStereoStatusHint "What the stream is currently carrying: Mono, a packed stereo pair, a labeled single-eye fallback when the partner eye stops rendering, or the sender-creation failure (e.g. the NDI name is already in use on this machine) — and the frame size actually being sent, per eye for a packed pair. That size is the frame Resolve feeds (or the map, in the Equirect modes) divided by Resolution; if it is what you expect, anything softer in a receiver is on the receiving side."
 
 // Projection Parameters (issue #7)
 #define kParamProjection "projectionMode"
@@ -248,6 +253,26 @@ static void ndiWinLog(const char* fmt, ...)
 #define kParamBRAWMaskLabel "Metadata Edge Mask"
 #define kParamBRAWMaskHint "Off streams the full calibrated 180º field. Camera applies the clip's embedded visionOS-style porthole (a circle ~80º off-axis on this lens), hiding the smeary outer lens edge the way Apple players do — currently a hard cut at the circle, not the 2.5º feather."
 
+// Output Color (issue #57). New script names on purpose: the removed HDR
+// group's (colorSpace, transferFunction, hdrEnabled, maxCLL, maxFALL) must
+// never be reused — old projects still carry saved values under them. Choice
+// options are append-only, because projects save the index.
+#define kParamColorTimeline "ndiColorTimeline"
+#define kParamColorTimelineLabel "Timeline Color"
+#define kParamColorTimelineHint "The colour space the stream's pixels are in. An OpenFX node sees Resolve's TIMELINE colour space, not its output: the Output LUT and Resolve's output colour space conversion (RCM, ACES) run after every node. Auto reads it from Resolve - the OpenFX colour-management property when Resolve reports one, otherwise the timeline's colour settings through external scripting (Preferences > System > General > External scripting using: Local). When neither is available, a display-space NDI Output assumes Rec.709 Gamma 2.4 and Stream Status says so. Pick a space to override Auto."
+#define kParamColorOutput "ndiColorOutput"
+#define kParamColorOutputLabel "NDI Output"
+#define kParamColorOutputHint "What the stream carries. Passthrough (default) sends the timeline's pixels untouched. A display space converts from Timeline Color to that space (transfer curve and primaries, D65 white; out-of-gamut colours clip) - for display-referred timelines. LUT File applies a 3D .cube LUT instead: the faithful route for log timelines (DaVinci Wide Gamut/Intermediate, ACEScct) - build a Color Space Transform node with your project's tone and gamut mapping and use Generate LUT (65-point). Only the stream changes; the node's output back to Resolve is always untouched."
+#define kParamColorLut "ndiColorLutFile"
+#define kParamColorLutLabel "LUT File"
+#define kParamColorLutHint "3D .cube LUT applied to the stream (2 to 65 points; DOMAIN_MIN/MAX and Resolve's LUT_3D_INPUT_RANGE honoured). A file that can't be used - missing, 1D or shaper LUTs, malformed - falls back to Passthrough and Stream Status says why."
+#define kParamColorLutBrowse "ndiColorLutBrowse"
+#define kParamColorLutBrowseLabel "Browse for LUT..."
+#define kParamColorLutBrowseHint "Pick the .cube LUT with a file dialog and fill the path field above."
+#define kParamColorLutSpace "ndiColorLutSpace"
+#define kParamColorLutSpaceLabel "LUT Produces"
+#define kParamColorLutSpaceHint "The display space the LUT outputs. Labels the stream (lsvr_color frame tag) for receivers that read it, such as VR.NDI."
+
 // GPU Acceleration Parameters
 #define kParamGPUAcceleration "gpuAcceleration"
 #define kParamGPUAccelerationLabel "GPU Acceleration"
@@ -296,6 +321,7 @@ OfxMessageSuiteV1       *gMessageSuite = 0;
 typedef MetalGPUContextRef NativeGPUContextRef;
 typedef metal_submit_status NativeSubmitStatus;
 typedef metal_downscale_done_fn native_gpu_done_fn;
+typedef metal_color_desc NativeColorDesc;
 static const NativeSubmitStatus kNativeSubmitOK = METAL_SUBMIT_OK;
 static const NativeSubmitStatus kNativeSubmitBusy = METAL_SUBMIT_BUSY;
 static const NativeSubmitStatus kNativeSubmitInvalid = METAL_SUBMIT_INVALID;
@@ -310,15 +336,15 @@ static inline bool nativeGpuReadBuffer(NativeGPUContextRef c, void* q, void* src
 { return metal_gpu_read_buffer(c, q, src, cpuDst, bytes); }
 static inline NativeSubmitStatus nativeGpuDownscaleSubmit(NativeGPUContextRef c, void* q, void* src,
                                                           int sw, int sh, int srf, int divisor,
-                                                          int ow, int oh,
+                                                          int ow, int oh, const NativeColorDesc* color,
                                                           native_gpu_done_fn done, void* user)
-{ return metal_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, done, user); }
+{ return metal_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, color, done, user); }
 static inline NativeSubmitStatus nativeGpuWarpSubmit(NativeGPUContextRef c, void* q, void* src,
                                                      int sw, int sh, int srf,
                                                      void* map, int mw, int mh, int divisor,
-                                                     int ow, int oh,
+                                                     int ow, int oh, const NativeColorDesc* color,
                                                      native_gpu_done_fn done, void* user)
-{ return metal_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, done, user); }
+{ return metal_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, color, done, user); }
 static inline void nativeGpuDownscaleRelease(NativeGPUContextRef c, void* slot)
 { metal_gpu_downscale_release(c, slot); }
 static inline void* nativeGpuCreateBufferForQueue(NativeGPUContextRef c, void* q,
@@ -332,6 +358,7 @@ static inline void nativeGpuReleaseBuffer(void* buffer) { metal_gpu_release_buff
 typedef CudaGPUContextRef NativeGPUContextRef;
 typedef cuda_submit_status NativeSubmitStatus;
 typedef cuda_downscale_done_fn native_gpu_done_fn;
+typedef cuda_color_desc NativeColorDesc;
 static const NativeSubmitStatus kNativeSubmitOK = CUDA_SUBMIT_OK;
 static const NativeSubmitStatus kNativeSubmitBusy = CUDA_SUBMIT_BUSY;
 static const NativeSubmitStatus kNativeSubmitInvalid = CUDA_SUBMIT_INVALID;
@@ -346,15 +373,15 @@ static inline bool nativeGpuReadBuffer(NativeGPUContextRef c, void* q, void* src
 { return cuda_gpu_read_buffer(c, q, src, cpuDst, bytes); }
 static inline NativeSubmitStatus nativeGpuDownscaleSubmit(NativeGPUContextRef c, void* q, void* src,
                                                           int sw, int sh, int srf, int divisor,
-                                                          int ow, int oh,
+                                                          int ow, int oh, const NativeColorDesc* color,
                                                           native_gpu_done_fn done, void* user)
-{ return cuda_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, done, user); }
+{ return cuda_gpu_downscale_submit(c, q, src, sw, sh, srf, divisor, ow, oh, color, done, user); }
 static inline NativeSubmitStatus nativeGpuWarpSubmit(NativeGPUContextRef c, void* q, void* src,
                                                      int sw, int sh, int srf,
                                                      void* map, int mw, int mh, int divisor,
-                                                     int ow, int oh,
+                                                     int ow, int oh, const NativeColorDesc* color,
                                                      native_gpu_done_fn done, void* user)
-{ return cuda_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, done, user); }
+{ return cuda_gpu_warp_submit(c, q, src, sw, sh, srf, map, mw, mh, divisor, ow, oh, color, done, user); }
 static inline void nativeGpuDownscaleRelease(NativeGPUContextRef c, void* slot)
 { cuda_gpu_downscale_release(c, slot); }
 static inline void* nativeGpuCreateBufferForQueue(NativeGPUContextRef c, void* q,
@@ -388,6 +415,64 @@ struct SenderHub; // process-shared NDI sender + eye pairer (defined below)
 struct AsyncPump; // per-instance off-render-thread NDI worker (defined below)
 #endif
 
+#ifdef NDI_GPU_NATIVE
+// Per-device GPU copy of some immutable CPU data (an STMap's uv pairs, an
+// Output Color transform), created lazily and reused every frame. Releasing
+// while a frame is in flight is safe on both backends: Metal command buffers
+// retain the MTLBuffer, and CUDA's cudaFree orders itself behind
+// already-launched work.
+struct NativeUploadCache {
+    std::mutex mutex;
+    std::map<void*, void*> bufferByDevice;  // key: device ptr; value: device buffer
+    bool failed = false;                    // don't retry (or re-log) an OOM every frame
+    ~NativeUploadCache()
+    {
+        for (auto& kv : bufferByDevice) {
+            nativeGpuReleaseBuffer(kv.second);
+        }
+    }
+};
+
+// The upload for gpuQueue's device, made on first use. Returns NULL on
+// failure — callers fall back to a CPU path. The copy itself runs OUTSIDE
+// cache.mutex so another eye's render thread never queues behind a big
+// upload; normally it doesn't run on a render thread at all (the refresh
+// paths pre-warm it on the host's main thread).
+static void* nativeUploadForQueue(NativeUploadCache& cache, NativeGPUContextRef nativeContext,
+                                  void* gpuQueue, const void* data, size_t bytes, const char* what)
+{
+    void* deviceKey = nativeGpuQueueDevice(nativeContext, gpuQueue);
+    if (!deviceKey || !data || bytes == 0) {
+        return nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        auto it = cache.bufferByDevice.find(deviceKey);
+        if (it != cache.bufferByDevice.end()) {
+            return it->second;
+        }
+        if (cache.failed) {
+            return nullptr;
+        }
+    }
+    void* buffer = nativeGpuCreateBufferForQueue(nativeContext, gpuQueue, data, bytes);
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (!buffer) {
+        cache.failed = true;
+        NDI_LOG_TEXT((std::string(what) + ": GPU upload failed (" + std::to_string(bytes) +
+                      " bytes) — using the CPU fallback").c_str());
+        return nullptr;
+    }
+    auto inserted = cache.bufferByDevice.emplace(deviceKey, buffer);
+    if (!inserted.second) {
+        // Lost a concurrent upload race — keep the first, drop ours.
+        nativeGpuReleaseBuffer(buffer);
+        return inserted.first->second;
+    }
+    return buffer;
+}
+#endif // NDI_GPU_NATIVE
+
 // ---------------------------------------------------------------------------
 // STMap store (issue #7). One loaded map is shared process-wide via a
 // weak-pointer cache: in stereo, both per-eye instances name the same files,
@@ -405,19 +490,7 @@ struct StmapEntry {
     std::string error;
     ndi_stmap::STMapImage map;
 #ifdef NDI_GPU_NATIVE
-    // Per-device GPU upload of map.uv, created lazily on the render path and
-    // reused every frame. Releasing while a frame is in flight is safe on
-    // both backends: Metal command buffers retain the MTLBuffer, and CUDA's
-    // cudaFree orders itself behind already-launched work.
-    std::mutex gpuUploadMutex;
-    std::map<void*, void*> gpuBufferByDevice; // key: device ptr; value: device buffer
-    bool gpuUploadFailed = false;             // don't retry (or re-log) an OOM every frame
-    ~StmapEntry()
-    {
-        for (auto& kv : gpuBufferByDevice) {
-            nativeGpuReleaseBuffer(kv.second);
-        }
-    }
+    NativeUploadCache gpuUpload;  // per-device copy of map.uv
 #endif
 };
 
@@ -622,52 +695,130 @@ static void brawAcquireLensPair(const std::string& path, int mapSize, bool apply
 }
 
 #ifdef NDI_GPU_NATIVE
-// Per-device GPU upload of an STMap's uv data, cached on the shared entry:
-// uploaded once, referenced by every subsequent frame's submission (safe if
-// the entry dies mid-flight — see the cache comment above). Returns NULL on
-// failure — callers fall back to the CPU warp. The upload itself (a
-// multi-hundred-MB copy for a big map) runs OUTSIDE entry->gpuUploadMutex so
-// the other eye's render thread never queues behind it; normally it doesn't
-// run on a render thread at all — refreshSTMaps pre-warms it on the host's
-// main thread whenever the context device matches the host queue's device
-// (always, except multi-GPU machines).
+// Per-device GPU upload of an STMap's uv data, cached on the shared entry
+// (see NativeUploadCache). Returns NULL on failure — callers fall back to
+// the CPU warp. refreshSTMaps pre-warms it on the host's main thread
+// whenever the context device matches the host queue's device (always,
+// except multi-GPU machines).
 static void* stmapNativeBufferForQueue(const std::shared_ptr<StmapEntry>& entry,
                                        NativeGPUContextRef nativeContext, void* gpuQueue)
 {
     if (!entry || !entry->valid) {
         return nullptr;
     }
-    void* deviceKey = nativeGpuQueueDevice(nativeContext, gpuQueue);
-    if (!deviceKey) {
-        return nullptr;
+    return nativeUploadForQueue(entry->gpuUpload, nativeContext, gpuQueue, entry->map.uv.data(),
+                                entry->map.uv.size() * sizeof(float), "STMap");
+}
+#endif // NDI_GPU_NATIVE
+
+// ---------------------------------------------------------------------------
+// Output Color store (issue #57 Part 2). A transform — a preset pair's
+// transfer tables + matrix, or a parsed .cube — is immutable once built and
+// shared process-wide like an STMap: both stereo eye instances name the same
+// settings, and a 65-point LUT is ~3.4 MB of floats. Presets key on their
+// space pair; LUT files on their path, reloaded when mtime/size change.
+// ---------------------------------------------------------------------------
+
+struct ColorEntry {
+    std::string key;
+    long long fileMtime = 0;   // LUT files only
+    long long fileSize = 0;
+    bool valid = false;
+    std::string error;         // why a LUT file was rejected
+    ndi_color::Transform transform;
+#ifdef NDI_GPU_NATIVE
+    NativeUploadCache gpuUpload;  // per-device copy of transform.data
+#endif
+};
+
+static std::mutex gColorCacheMutex;
+static std::map<std::string, std::weak_ptr<ColorEntry>> gColorCache;
+
+static std::shared_ptr<ColorEntry> colorCacheLookup(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(gColorCacheMutex);
+    for (auto it = gColorCache.begin(); it != gColorCache.end();) {
+        it = it->second.expired() ? gColorCache.erase(it) : std::next(it);
     }
-    {
-        std::lock_guard<std::mutex> lock(entry->gpuUploadMutex);
-        auto it = entry->gpuBufferByDevice.find(deviceKey);
-        if (it != entry->gpuBufferByDevice.end()) {
-            return it->second;
-        }
-        if (entry->gpuUploadFailed) {
-            return nullptr;
+    auto it = gColorCache.find(key);
+    return it == gColorCache.end() ? nullptr : it->second.lock();
+}
+
+static void colorCacheStore(const std::shared_ptr<ColorEntry>& entry)
+{
+    std::lock_guard<std::mutex> lock(gColorCacheMutex);
+    gColorCache[entry->key] = entry;
+}
+
+// The preset for inSpace → outSpace (both valid, different). Building the
+// tables is ~3k pow() calls — microseconds — but the GPU upload is shared.
+static std::shared_ptr<ColorEntry> colorAcquirePreset(int inSpace, int outSpace)
+{
+    const std::string key = "preset:" + std::to_string(inSpace) + ":" + std::to_string(outSpace);
+    if (std::shared_ptr<ColorEntry> hit = colorCacheLookup(key)) {
+        return hit;
+    }
+    std::shared_ptr<ColorEntry> entry = std::make_shared<ColorEntry>();
+    entry->key = key;
+    entry->valid = ndi_color::buildPreset(inSpace, outSpace, &entry->transform) &&
+                   entry->transform.mode != ndi_color::kModeNone;
+    colorCacheStore(entry);
+    return entry;
+}
+
+// The .cube at `path`, parsed only when no instance holds a current copy.
+// Runs on the parameter-edit path (a 65-point cube is ~8 MB of text, tens
+// of ms), never on render. Invalid files come back with valid=false and the
+// reason in error.
+static std::shared_ptr<ColorEntry> colorAcquireLut(const std::string& path)
+{
+    long long mtime = 0, size = 0;
+    const bool statOk = ndi_path::statUtf8(path.c_str(), &mtime, &size);
+    if (std::shared_ptr<ColorEntry> hit = colorCacheLookup(path)) {
+        if (statOk && hit->fileMtime == mtime && hit->fileSize == size) {
+            return hit;
         }
     }
-    void* buffer = nativeGpuCreateBufferForQueue(nativeContext, gpuQueue,
-                                                 entry->map.uv.data(),
-                                                 entry->map.uv.size() * sizeof(float));
-    std::lock_guard<std::mutex> lock(entry->gpuUploadMutex);
+    std::shared_ptr<ColorEntry> entry = std::make_shared<ColorEntry>();
+    entry->key = path;
+    entry->fileMtime = mtime;
+    entry->fileSize = size;
+    ndi_cube::CubeLUT lut;
+    if (ndi_cube::loadCubeFile(path.c_str(), &lut, &entry->error) &&
+        ndi_color::buildLut(lut, &entry->transform)) {
+        entry->valid = true;
+        NDI_LOG_TEXT(("Output Color LUT loaded: '" + path + "' (" + std::to_string(lut.size) + "-point" +
+                      (lut.title.empty() ? std::string() : ", \"" + lut.title + "\"") + ")").c_str());
+    } else {
+        if (entry->error.empty()) entry->error = "not a usable 3D LUT";
+        NDI_LOG_TEXT(("Output Color LUT rejected: '" + path + "' — " + entry->error).c_str());
+    }
+    colorCacheStore(entry);
+    return entry;
+}
+
+#ifdef NDI_GPU_NATIVE
+// A colour descriptor for the GPU convert calls: none (NULL) when there is
+// no transform; false when one is wanted but can't be uploaded — the caller
+// then takes the readback + CPU path so the stream keeps its colour.
+static bool colorNativeDesc(const std::shared_ptr<ColorEntry>& entry, NativeGPUContextRef nativeContext,
+                            void* gpuQueue, NativeColorDesc* desc, const NativeColorDesc** out)
+{
+    *out = nullptr;
+    if (!entry || !entry->valid || entry->transform.mode == ndi_color::kModeNone) {
+        return true;
+    }
+    void* buffer = nativeUploadForQueue(entry->gpuUpload, nativeContext, gpuQueue,
+                                        entry->transform.data.data(),
+                                        entry->transform.data.size() * sizeof(float), "Output Color");
     if (!buffer) {
-        entry->gpuUploadFailed = true; // don't retry (or re-log) an OOM every frame
-        NDI_LOG("STMap: GPU upload failed (%zu bytes) — using the CPU warp fallback",
-                entry->map.uv.size() * sizeof(float));
-        return nullptr;
+        return false;
     }
-    auto inserted = entry->gpuBufferByDevice.emplace(deviceKey, buffer);
-    if (!inserted.second) {
-        // Lost a concurrent upload race — keep the first, drop ours.
-        nativeGpuReleaseBuffer(buffer);
-        return inserted.first->second;
-    }
-    return buffer;
+    desc->buffer = buffer;
+    desc->mode = entry->transform.mode;
+    desc->lutSize = entry->transform.lutSize;
+    *out = desc;
+    return true;
 }
 #endif // NDI_GPU_NATIVE
 
@@ -714,6 +865,13 @@ struct NDIInstanceData {
 #endif
     OfxParamHandle brawMapSizeParam;
     OfxParamHandle brawMaskParam;
+    OfxParamHandle colorTimelineParam;   // Output Color (issue #57)
+    OfxParamHandle colorOutputParam;
+    OfxParamHandle colorLutParam;
+    OfxParamHandle colorLutSpaceParam;
+#ifdef NDI_HAS_BROWSE_DIALOGS
+    OfxParamHandle colorLutBrowseParam;
+#endif
 
     // Diagnostic render-call probe
     std::string resolvePage;   // page that instantiated this effect (host provides it only at createInstance)
@@ -776,6 +934,33 @@ struct NDIInstanceData {
     std::shared_ptr<StmapEntry> stmapRight;   // null: left map serves both eyes
     std::atomic<int> projStatus{kProjOff};
     std::shared_ptr<StmapEntry> renderStmap;
+
+    // Output Color (issue #57). The config fields mirror the params
+    // (readInstanceParams, main thread) plus the source clip's OFX
+    // colourspace (render thread), and refreshes run on the main, watcher
+    // and render threads — all under colorConfigMutex, which also
+    // serializes the refreshes; the render path only ever try_locks it. The
+    // active transform, its frame tag and Stream Status text swap under
+    // colorMutex, held only for pointer/string copies.
+    std::mutex colorConfigMutex;
+    int colorTimelineSpace = -1;       // Timeline Color: display space, -1 = Auto
+    ndi_tlcolor::OutputChoice colorOutput;  // NDI Output, decoded (ndi_tlcolor::decodeOutputChoice)
+    std::string colorLutPathWanted;
+    int colorLutSpaceChoice = 0;       // display space the LUT produces
+    std::string ofxColourspace;        // kOfxImageClipPropColourspace on the source clip ("" = none)
+    // The watcher's latest timeline settings, copied in by main-thread
+    // refreshes and the watcher's own callback — so a render-thread refresh
+    // never touches the watcher's mutex (its reader can hold it across a
+    // helper spawn or reap).
+    ndi_tlcolor::Settings watcherColor;
+    bool haveWatcherColor = false;
+    std::mutex colorMutex;
+    std::shared_ptr<ColorEntry> colorEntry;  // null = passthrough
+    const char* colorTag = nullptr;          // lsvr_color XML for the stream's space, or null
+    std::string colorStatus;                 // Stream Status suffix, e.g. "color: Rec.709 G2.4 -> sRGB"
+    std::shared_ptr<ColorEntry> renderColor; // this render's transform, stashed like renderStmap
+    const char* renderColorTag = nullptr;
+    std::string lastOfxColourspace;          // render-thread copy, for change detection
     // Stream status handoff: the pump worker composes status off-thread while
     // render threads flush it to the UI param, so both fields live behind
     // their own small mutex (taken after hub->mutex, never the reverse).
@@ -861,6 +1046,12 @@ struct SenderHub {
     // the SbS/TB param).
     bool hasPackedFrame = false;
     ndi_stereo::FrameMeta lastPackedMeta;
+    const char* lastPackedTag = nullptr;  // its lsvr_color tag (issue #57), resent with it
+    // Dimensions of the last frame handed to NDI (mono frame or packed
+    // canvas), for the Stream Status readout (1.17.0, #55): the one number a
+    // user needs to tell a sender problem from a receiver problem.
+    int lastSentWidth = 0;
+    int lastSentHeight = 0;
     std::string status;               // last stream-status string, for change detection
     unsigned long long lastLoggedDrops = 0;
     // A right-eye render has arrived at some point (any instance). Only the
@@ -1029,9 +1220,13 @@ static inline double msSince(const std::chrono::steady_clock::time_point& t0)
 
 // Caller holds hub->mutex. Builds and sends one NDI frame of the given wire
 // format. `allowAsync` is false for any buffer that can't outlive the call.
+// `colorTag` is the frame's lsvr_color XML (issue #57 Part 4) — a static
+// string, so it outlives any async send — or null when the stream's colour
+// space is unknown. NDI's own ndi_color_info is deliberately never sent: it
+// can't name P3-D65 or gamma 2.2/2.6.
 static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
                                const ndi_stereo::FrameMeta& meta,
-                               const uint8_t* bytes, bool allowAsync)
+                               const uint8_t* bytes, bool allowAsync, const char* colorTag)
 {
     NDIlib_video_frame_v2_t frame;
     frame.xres = meta.width;
@@ -1042,11 +1237,16 @@ static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
     frame.frame_format_type = NDIlib_frame_format_type_progressive;
     frame.timecode = NDIlib_send_timecode_synthesize;
     frame.p_data = const_cast<uint8_t*>(bytes);
-    frame.p_metadata = nullptr;
+    frame.p_metadata = colorTag;
 
     switch (meta.format) {
         case ndi_stereo::WireFormat::RGBA8:
-            frame.FourCC = NDIlib_FourCC_type_RGBA;
+            // Sent as RGBX: NDI ignores the fourth byte. With an alpha
+            // channel NDI carries the stream as UYVA, and its own UYVA->BGRA
+            // decoder is off by up to 16 codes on saturated colours; without
+            // one its RGB path stays within 4 (measured, issue #57). The
+            // stream never needed alpha — receivers show it opaque.
+            frame.FourCC = NDIlib_FourCC_type_RGBX;
             frame.line_stride_in_bytes = meta.width * 4;
             break;
         case ndi_stereo::WireFormat::UYVY8:
@@ -1063,6 +1263,8 @@ static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
         NDIlib_send_send_video_v2(hub->sender, &frame);
         hub->asyncInFlight = false;
     }
+    hub->lastSentWidth = meta.width;
+    hub->lastSentHeight = meta.height;
 }
 
 // Caller holds hub->mutex. Human-readable stream status for the UI param.
@@ -1107,6 +1309,31 @@ static std::string hubComposeStatusLocked(SenderHub* hub, NDIInstanceData* data)
         default:
             break;
     }
+    // The on-wire size (1.17.0, #55). For a packed canvas also say what each eye
+    // gets, since that is what a headset receiver draws per eye. Read in the
+    // field as: Resolution divides the frame Resolve feeds (or the map, in
+    // the Equirect modes); if this number is right, the sender is right.
+    if (hub->lastSentWidth > 0 && hub->lastSentHeight > 0) {
+        char wire[96];
+        const bool packed = (data->stereoPacking != kStereoPackingMono) &&
+                            (hub->pairer.mode() != ndi_stereo::StreamMode::Mono);
+        if (packed) {
+            const int eyeW = (data->stereoPacking == 1) ? hub->lastSentWidth : hub->lastSentWidth / 2;
+            const int eyeH = (data->stereoPacking == 1) ? hub->lastSentHeight / 2 : hub->lastSentHeight;
+            snprintf(wire, sizeof(wire), ", sending %dx%d (%dx%d per eye)",
+                     hub->lastSentWidth, hub->lastSentHeight, eyeW, eyeH);
+        } else {
+            snprintf(wire, sizeof(wire), ", sending %dx%d", hub->lastSentWidth, hub->lastSentHeight);
+        }
+        status += wire;
+    }
+    {
+        // Output Color (issue #57): the conversion and any warning.
+        std::lock_guard<std::mutex> colorLock(data->colorMutex);  // after hub->mutex, never reversed
+        if (!data->colorStatus.empty()) {
+            status += ", " + data->colorStatus;
+        }
+    }
     return status;
 }
 
@@ -1144,6 +1371,7 @@ struct HubSubmit {
     int eye = ndi_stereo::kEyeLeft;
     double time = 0.0;
     bool isThumbnail = false;
+    const char* colorTag = nullptr;  // lsvr_color XML, captured with the frame (issue #57)
 };
 
 // Stage timings for one hub submission. Out-param rather than instance fields
@@ -1162,7 +1390,7 @@ static void hubPackAndSendLocked(SenderHub* hub, NDIInstanceData* data,
                                  const ndi_stereo::FrameMeta& meta,
                                  ndi_stereo::StereoLayout layout,
                                  const uint8_t* left, const uint8_t* right,
-                                 bool allowAsync, SubmitTimers* timers)
+                                 bool allowAsync, const char* colorTag, SubmitTimers* timers)
 {
     // Pack into the buffer NOT submitted last; if it needs resizing it
     // could still be read by a send before last, so flush first.
@@ -1181,9 +1409,10 @@ static void hubPackAndSendLocked(SenderHub* hub, NDIInstanceData* data,
     ndi_stereo::FrameMeta packedMeta = meta;
     ndi_stereo::packedDims(meta, layout, &packedMeta.width, &packedMeta.height);
     hub->lastPackedMeta = packedMeta;
+    hub->lastPackedTag = colorTag;
     hub->hasPackedFrame = true;
     const auto sendT0 = std::chrono::steady_clock::now();
-    hubSendFrameLocked(hub, data, packedMeta, packed.data(), allowAsync);
+    hubSendFrameLocked(hub, data, packedMeta, packed.data(), allowAsync, colorTag);
     if (timers) timers->sendMs = msSince(sendT0);
 }
 
@@ -1217,7 +1446,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
         // pump items enqueued before the setting changed.
         if (ndi_stereo::monoPackingStreams(s.eye, s.isThumbnail)) {
             const auto sendT0 = std::chrono::steady_clock::now();
-            hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync);
+            hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync, s.colorTag);
             if (timers) timers->sendMs = msSince(sendT0);
         } else {
             // No send: close any in-flight async window (see the Hold/Drop
@@ -1243,7 +1472,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
     switch (result.action) {
         case ndi_stereo::SubmitAction::SendMono: {
             const auto sendT0 = std::chrono::steady_clock::now();
-            hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync);
+            hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync, s.colorTag);
             if (timers) timers->sendMs = msSince(sendT0);
             break;
         }
@@ -1254,7 +1483,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
             const uint8_t* right = (s.eye == ndi_stereo::kEyeLeft)
                                        ? result.matePayload.data() : s.bytes;
             hubPackAndSendLocked(hub, data, meta, layout, left, right,
-                                 s.allowAsync, timers);
+                                 s.allowAsync, s.colorTag, timers);
             // Return the consumed mate buffer to the pairer's pool — its warm
             // pages make the next hold a plain memcpy instead of a page-fault
             // storm inside this mutex.
@@ -1267,7 +1496,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
             // canvas keeps its packed dimensions — the flowing eye goes into
             // both halves. Viewers see 2D; the geometry never pops.
             hubPackAndSendLocked(hub, data, meta, layout, s.bytes, s.bytes,
-                                 s.allowAsync, timers);
+                                 s.allowAsync, s.colorTag, timers);
             break;
         }
 
@@ -1286,7 +1515,7 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
                 // the async contract: it stays the one NDI may read from.
                 const auto sendT0 = std::chrono::steady_clock::now();
                 hubSendFrameLocked(hub, data, packedMeta, packed.data(),
-                                   s.allowAsync);
+                                   s.allowAsync, hub->lastPackedTag);
                 if (timers) timers->sendMs = msSince(sendT0);
             } else {
                 const auto flushT0 = std::chrono::steady_clock::now();
@@ -1556,8 +1785,14 @@ static void convertRGBAToUYVY_GPU(NDIInstanceData* data, void* rgbaData, int wid
     }
 
 #ifdef __APPLE__
-    // Use Metal GPU acceleration for RGBA to UYVY conversion
-    if (data->gpuContext->nativeContext) {
+    // Use Metal GPU acceleration for RGBA to UYVY conversion. The Output
+    // Color transform rides along (uploaded for the context's own device —
+    // this frame was handed over in CPU memory); an upload failure takes
+    // the CPU converter, which applies it too.
+    NativeColorDesc colorDesc;
+    const NativeColorDesc* color = nullptr;
+    if (data->gpuContext->nativeContext &&
+        colorNativeDesc(data->renderColor, data->gpuContext->nativeContext, nullptr, &colorDesc, &color)) {
         NDI_LOG("🚀 Attempting Metal GPU acceleration...\n");
 
         bool success = metal_gpu_convert_rgba_to_uyvy(
@@ -1565,7 +1800,8 @@ static void convertRGBAToUYVY_GPU(NDIInstanceData* data, void* rgbaData, int wid
             static_cast<const float*>(rgbaData),
             data->uyvyFrameBuffer.data(),
             width,
-            height
+            height,
+            color
         );
         
         if (success) {
@@ -1575,7 +1811,7 @@ static void convertRGBAToUYVY_GPU(NDIInstanceData* data, void* rgbaData, int wid
             NDI_LOG("❌ Metal GPU conversion failed, falling back to CPU\n");
         }
     } else {
-        NDI_LOG("⚠️ Metal context not available, falling back to CPU\n");
+        NDI_LOG("⚠️ Metal context or Output Color upload not available, falling back to CPU\n");
     }
 
     // Fallback to CPU if Metal fails
@@ -1601,40 +1837,20 @@ static void convertRGBAToUYVY_CPU(NDIInstanceData* data, void* rgbaData, int wid
         data->uyvyFrameBuffer.resize(uyvySize);
     }
 
-    float* srcData = static_cast<float*>(rgbaData);
-    uint8_t* dstData = data->uyvyFrameBuffer.data();
-
-    // Convert RGBA float to UYVY (4:2:2 format) with vertical flip
-    for (int y = 0; y < height; ++y) {
-        int srcRow = height - 1 - y; // Flip vertically: OpenFX uses bottom-left origin, NDI expects top-left
-        for (int x = 0; x < width; x += 2) {
-            int srcIdx1 = (srcRow * width + x) * 4;
-            int srcIdx2 = (srcRow * width + x + 1) * 4;
-            int dstIdx = (y * width + x) * 2;
-
-            // Get RGB values for two pixels
-            float r1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 0]));
-            float g1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 1]));
-            float b1 = std::max(0.0f, std::min(1.0f, srcData[srcIdx1 + 2]));
-
-            float r2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 0])) : r1;
-            float g2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 1])) : g1;
-            float b2 = (x + 1 < width) ? std::max(0.0f, std::min(1.0f, srcData[srcIdx2 + 2])) : b1;
-
-            // Convert to YUV using Rec.709 coefficients
-            float y1 = 0.2126f * r1 + 0.7152f * g1 + 0.0722f * b1;
-            float y2 = 0.2126f * r2 + 0.7152f * g2 + 0.0722f * b2;
-            float u = -0.1146f * ((r1 + r2) * 0.5f) - 0.3854f * ((g1 + g2) * 0.5f) + 0.5f * ((b1 + b2) * 0.5f);
-            float v = 0.5f * ((r1 + r2) * 0.5f) - 0.4542f * ((g1 + g2) * 0.5f) - 0.0458f * ((b1 + b2) * 0.5f);
-
-            // Scale to 8-bit and pack as UYVY
-            dstData[dstIdx + 0] = static_cast<uint8_t>((u + 0.5f) * 255.0f);  // U
-            dstData[dstIdx + 1] = static_cast<uint8_t>(y1 * 255.0f);          // Y1
-            dstData[dstIdx + 2] = static_cast<uint8_t>((v + 0.5f) * 255.0f);  // V
-            dstData[dstIdx + 3] = static_cast<uint8_t>(y2 * 255.0f);          // Y2
-        }
+    // BT.709 limited range with the vertical flip (OFX bottom-up → NDI
+    // top-down), the Output Color transform applied per pixel first — the
+    // shared encoder and transform the GPU kernels mirror (issue #57).
+    const ColorEntry* color = data->renderColor.get();
+    if (color && color->valid) {
+        const ndi_color::Transform& transform = color->transform;
+        ndi_uyvy::convertRGBAToUYVYFlipped(static_cast<const float*>(rgbaData), width, height,
+                                           data->uyvyFrameBuffer.data(),
+                                           [&transform](float* rgb) { ndi_color::applyTransform(transform, rgb); });
+    } else {
+        ndi_uyvy::convertRGBAToUYVYFlipped(static_cast<const float*>(rgbaData), width, height,
+                                           data->uyvyFrameBuffer.data());
     }
-    
+
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
     
@@ -1818,6 +2034,7 @@ static void sendUYVYToNDI(NDIInstanceData* data, int width, int height)
     s.eye = data->renderEye;
     s.time = data->renderTime;
     s.isThumbnail = data->renderIsThumbnail;
+    s.colorTag = data->renderColorTag;
     hubSubmitFromRenderThread(data, s);
 }
 
@@ -1854,16 +2071,26 @@ static void sendSDRFrame(NDIInstanceData* data, void* imageData, int width, int 
     float* srcData = static_cast<float*>(imageData);
     uint8_t* dstData = data->frameBuffer.data();
 
-    // Flip vertically: OpenFX uses bottom-left origin, NDI expects top-left
+    // Flip vertically: OpenFX uses bottom-left origin, NDI expects top-left.
+    // Full-range RGB: NDI does the YUV conversion on this path. The Output
+    // Color transform (issue #57) applies per pixel before quantizing.
+    const ColorEntry* color = data->renderColor.get();
+    const ndi_color::Transform* transform = (color && color->valid) ? &color->transform : nullptr;
     for (int y = 0; y < height; ++y) {
         int srcRow = height - 1 - y; // Flip vertically
         for (int x = 0; x < width; ++x) {
             int srcIdx = (srcRow * width + x) * 4;
             int dstIdx = (y * width + x) * 4;
 
-            dstData[dstIdx + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, srcData[srcIdx + 0])) * 255.0f); // R
-            dstData[dstIdx + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, srcData[srcIdx + 1])) * 255.0f); // G
-            dstData[dstIdx + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, srcData[srcIdx + 2])) * 255.0f); // B
+            float rgb[3] = {std::max(0.0f, std::min(1.0f, srcData[srcIdx + 0])),
+                            std::max(0.0f, std::min(1.0f, srcData[srcIdx + 1])),
+                            std::max(0.0f, std::min(1.0f, srcData[srcIdx + 2]))};
+            if (transform) {
+                ndi_color::applyTransform(*transform, rgb);
+            }
+            dstData[dstIdx + 0] = static_cast<uint8_t>(rgb[0] * 255.0f); // R
+            dstData[dstIdx + 1] = static_cast<uint8_t>(rgb[1] * 255.0f); // G
+            dstData[dstIdx + 2] = static_cast<uint8_t>(rgb[2] * 255.0f); // B
             dstData[dstIdx + 3] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, srcData[srcIdx + 3])) * 255.0f); // A
         }
     }
@@ -1878,6 +2105,7 @@ static void sendSDRFrame(NDIInstanceData* data, void* imageData, int width, int 
     s.eye = data->renderEye;
     s.time = data->renderTime;
     s.isThumbnail = data->renderIsThumbnail;
+    s.colorTag = data->renderColorTag;
     hubSubmitFromRenderThread(data, s);
 }
 
@@ -2073,10 +2301,17 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
         ctx->item.submit.eye = data->renderEye;
         ctx->item.submit.time = data->renderTime;
         ctx->item.submit.isThumbnail = data->renderIsThumbnail;
+        ctx->item.submit.colorTag = data->renderColorTag;
         ++pump->pendingSubmits;
         const auto convT0 = std::chrono::steady_clock::now();
         NativeSubmitStatus st = kNativeSubmitInvalid;
-        if (stmap) {
+        // Output Color (issue #57): a transform that can't be uploaded stays
+        // INVALID and takes the readback + CPU path below, like a failed map
+        // upload — the stream keeps its colour either way.
+        NativeColorDesc colorDesc;
+        const NativeColorDesc* color = nullptr;
+        const bool colorOk = colorNativeDesc(data->renderColor, nativeContext, gpuQueue, &colorDesc, &color);
+        if (colorOk && stmap) {
             // Warp path: a failed map upload never reaches the submit — it
             // stays INVALID and falls through to the readback + CPU warp, so
             // the stream keeps its corrected geometry (slowly) either way.
@@ -2085,20 +2320,20 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
                 st = nativeGpuWarpSubmit(nativeContext, gpuQueue, srcBuffer,
                                          width, height, rowFloats,
                                          mapBuffer, stmap->map.width, stmap->map.height,
-                                         divisor, outWidth, outHeight,
+                                         divisor, outWidth, outHeight, color,
                                          pumpOnConvertDone, ctx);
             }
-        } else {
+        } else if (colorOk) {
             st = nativeGpuDownscaleSubmit(nativeContext, gpuQueue, srcBuffer,
                                           width, height, rowFloats, divisor,
-                                          outWidth, outHeight,
+                                          outWidth, outHeight, color,
                                           pumpOnConvertDone, ctx);
         }
         data->timerConvMs = msSince(convT0);
         if (st == kNativeSubmitOK) {
             handledByFastPath = true;
-            NDI_LOG("GPU-native async: %dx%d device frame -> %dx%d UYVY enqueued (divisor %d, warp %d)",
-                    width, height, outWidth, outHeight, divisor, stmap ? 1 : 0);
+            NDI_LOG("GPU-native async: %dx%d device frame -> %dx%d UYVY enqueued (divisor %d, warp %d, color %d)",
+                    width, height, outWidth, outHeight, divisor, stmap ? 1 : 0, color ? color->mode : 0);
         } else {
             --pump->pendingSubmits;
             delete ctx;
@@ -2263,6 +2498,27 @@ static void timelineClipChanged(const std::string& path)
         applyAutoLensClip(data, path);
     }
 }
+
+static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread);
+
+// Watcher colour callback (watcher thread, issue #57 Part 3): the timeline's
+// colour settings changed — re-resolve every instance whose Timeline Color
+// is Auto. LUT File instances are skipped: the timeline doesn't change their
+// transform, and a .cube re-parse must not run under the registry lock.
+static void timelineColorChanged()
+{
+    ndi_tlcolor::Settings settings;
+    const bool have = ndi_timelinewatch::currentTimelineColor(&settings);
+    std::lock_guard<std::mutex> lock(gInstanceRegistryMutex);
+    for (NDIInstanceData* data : gInstanceRegistry) {
+        std::lock_guard<std::mutex> colorLock(data->colorConfigMutex);
+        data->watcherColor = settings;
+        data->haveWatcherColor = have;
+        if (data->colorTimelineSpace < 0 && data->colorOutput.kind != ndi_tlcolor::OutputChoice::kLutFile) {
+            refreshOutputColorLocked(data, false);
+        }
+    }
+}
 #endif // NDI_TIMELINE_WATCH
 
 // Bring the instance's loaded STMaps in line with the current parameter
@@ -2406,6 +2662,125 @@ static void refreshSTMaps(NDIInstanceData* data)
     data->projStatus.store(status, std::memory_order_relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// Output Color (issue #57 Parts 2-4): bring the instance's transform, frame
+// tag and Stream Status text in line with the params and with what Resolve
+// says the timeline colour space is.
+//
+// Timeline Color = Auto resolves in this order (Part 3): the source clip's
+// OFX 1.5 colourspace when Resolve reports a usable one (read at render),
+// else the timeline colour settings the watcher helper reports through
+// Resolve's scripting API, else unknown. ndi_tlcolor::planOutput then
+// decides the conversion, the tag and the Stream Status text (assumptions
+// and warnings included) — this function only gathers its inputs, acquires
+// the transform and swaps it in.
+//
+// Caller holds data->colorConfigMutex. Safe off the main thread: the render
+// thread only gets here through try_lock and never in LUT File mode, the
+// watcher thread never in LUT File mode either (no .cube parsing off the
+// main thread), and neither touches the watcher's own lock — they use the
+// instance's watcherColor snapshot. `onMainThread` gates what only the
+// host's main thread does: refreshing that snapshot, starting the watcher
+// and pre-warming the GPU upload.
+// ---------------------------------------------------------------------------
+static void refreshOutputColorLocked(NDIInstanceData* data, bool onMainThread)
+{
+    const ndi_tlcolor::OutputChoice& out = data->colorOutput;
+
+    ndi_tlcolor::Resolved timeline;
+    std::string source;
+    if (data->colorTimelineSpace >= 0) {
+        timeline.kind = ndi_tlcolor::kDisplay;
+        timeline.space = data->colorTimelineSpace;
+        timeline.label = ndi_color::displaySpaceName(timeline.space);
+        source = "set";
+    } else {
+        if (!data->ofxColourspace.empty()) {
+            timeline = ndi_tlcolor::fromOfxColourspace(data->ofxColourspace);
+            source = "OFX colourspace '" + data->ofxColourspace + "'";
+        }
+#ifdef NDI_TIMELINE_WATCH
+        // An OFX answer that names no usable space (e.g. the generic
+        // ofx_display_sdr) still lets the scripting answer in. Passthrough
+        // and display-space outputs start the watcher — Passthrough needs
+        // the answer to label the stream, a conversion needs its input
+        // space. LUT File doesn't: the LUT defines the whole conversion and
+        // LUT Produces the label.
+        if (timeline.kind == ndi_tlcolor::kUnknown) {
+            if (onMainThread) {
+                ndi_timelinewatch::setColorListener(&timelineColorChanged);
+                if (out.kind != ndi_tlcolor::OutputChoice::kLutFile) {
+                    ndi_timelinewatch::ensureStarted(&timelineClipChanged);
+                }
+                data->haveWatcherColor = ndi_timelinewatch::currentTimelineColor(&data->watcherColor);
+            }
+            if (data->haveWatcherColor) {
+                const ndi_tlcolor::Resolved fromSettings = ndi_tlcolor::timelineFromSettings(data->watcherColor);
+                if (fromSettings.kind != ndi_tlcolor::kUnknown || timeline.label.empty()) {
+                    timeline = fromSettings;
+                    source = "Resolve timeline settings (" + data->watcherColor.scienceMode + ")";
+                }
+            }
+        }
+#endif
+    }
+
+    std::shared_ptr<ColorEntry> lutEntry;
+    ndi_tlcolor::LutInfo lut;
+    if (out.kind == ndi_tlcolor::OutputChoice::kLutFile && !data->colorLutPathWanted.empty()) {
+        lutEntry = colorAcquireLut(data->colorLutPathWanted);
+        const std::string& path = data->colorLutPathWanted;
+        const size_t slash = path.find_last_of("/\\");
+        lut.valid = lutEntry->valid;
+        lut.error = lutEntry->error;
+        lut.fileName = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        lut.producesSpace = std::max(0, std::min(data->colorLutSpaceChoice, ndi_color::kDisplaySpaceCount - 1));
+    }
+    const ndi_tlcolor::OutputPlan plan = ndi_tlcolor::planOutput(out, timeline, lutEntry ? &lut : nullptr);
+
+    std::shared_ptr<ColorEntry> entry;
+    if (plan.useLut) {
+        entry = lutEntry;
+    } else if (plan.inSpace >= 0 && plan.inSpace != plan.outSpace) {
+        entry = colorAcquirePreset(plan.inSpace, plan.outSpace);
+    }
+
+#ifdef NDI_GPU_NATIVE
+    // Pre-warm the GPU upload where the host's main thread is the caller
+    // (same reasoning as refreshSTMaps). Elsewhere the first render uploads.
+    if (onMainThread && entry && entry->valid && data->gpuContext && data->gpuContext->initialized &&
+        data->gpuContext->nativeContext) {
+        nativeUploadForQueue(entry->gpuUpload, data->gpuContext->nativeContext, nullptr,
+                             entry->transform.data.data(), entry->transform.data.size() * sizeof(float),
+                             "Output Color");
+    }
+#endif
+
+    std::shared_ptr<ColorEntry> old;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(data->colorMutex);
+        old = std::move(data->colorEntry);
+        data->colorEntry = entry;
+        data->colorTag = ndi_color::colorTagXml(plan.tagSpace);
+        changed = (data->colorStatus != plan.status);
+        data->colorStatus = plan.status;
+    }
+    if (changed) {
+        NDI_LOG_TEXT(("Output Color: " + (plan.status.empty() ? std::string("passthrough") : plan.status) +
+                      (source.empty() ? std::string(" [timeline colour: not reported]")
+                                      : " [timeline colour from " + source + "]"))
+                         .c_str());
+    }
+    // `old` dies here, outside every lock.
+}
+
+static void refreshOutputColor(NDIInstanceData* data)
+{
+    std::lock_guard<std::mutex> lock(data->colorConfigMutex);
+    refreshOutputColorLocked(data, true);
+}
+
 static void setParamSecret(OfxParamHandle param, bool secret)
 {
     if (!param) return;
@@ -2432,6 +2807,15 @@ static void updateParamVisibility(NDIInstanceData* data)
     setParamSecret(data->stmapLeftBrowseParam, packed);
     setParamSecret(data->stmapRightBrowseParam, packed);
     setParamSecret(data->brawClipBrowseParam, autoClip);
+#endif
+    // Output Color: the LUT fields only in LUT File mode, where Timeline
+    // Color doesn't apply (the LUT defines the whole conversion).
+    const bool lutMode = (data->colorOutput.kind == ndi_tlcolor::OutputChoice::kLutFile);
+    setParamSecret(data->colorTimelineParam, lutMode);
+    setParamSecret(data->colorLutParam, !lutMode);
+    setParamSecret(data->colorLutSpaceParam, !lutMode);
+#ifdef NDI_HAS_BROWSE_DIALOGS
+    setParamSecret(data->colorLutBrowseParam, !lutMode);
 #endif
 }
 
@@ -2492,6 +2876,20 @@ static void readInstanceParams(NDIInstanceData* myData)
     myData->autoLensMapSize.store(brawMapSizeFromChoice(myData->brawMapSizeChoice),
                                   std::memory_order_relaxed);
     myData->autoLensMask.store(myData->brawMaskChoice == 1, std::memory_order_relaxed);
+
+    // Output Color (issue #57) — guarded: the watcher and render threads
+    // re-resolve from these.
+    int colorTimeline = 0, colorOutput = 0, colorLutSpace = 0;
+    char* colorLutPath = nullptr;
+    gParamHost->paramGetValue(myData->colorTimelineParam, &colorTimeline);
+    gParamHost->paramGetValue(myData->colorOutputParam, &colorOutput);
+    gParamHost->paramGetValue(myData->colorLutParam, &colorLutPath);
+    gParamHost->paramGetValue(myData->colorLutSpaceParam, &colorLutSpace);
+    std::lock_guard<std::mutex> colorLock(myData->colorConfigMutex);
+    myData->colorTimelineSpace = ndi_tlcolor::decodeTimelineChoice(colorTimeline);
+    myData->colorOutput = ndi_tlcolor::decodeOutputChoice(colorOutput);
+    myData->colorLutPathWanted = colorLutPath ? colorLutPath : "";
+    myData->colorLutSpaceChoice = colorLutSpace;
 }
 
 static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandle inArgs)
@@ -2578,6 +2976,13 @@ static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandl
 #endif
     gParamHost->paramGetHandle(paramSet, kParamBRAWMapSize, &myData->brawMapSizeParam, 0);
     gParamHost->paramGetHandle(paramSet, kParamBRAWMask, &myData->brawMaskParam, 0);
+    gParamHost->paramGetHandle(paramSet, kParamColorTimeline, &myData->colorTimelineParam, 0);
+    gParamHost->paramGetHandle(paramSet, kParamColorOutput, &myData->colorOutputParam, 0);
+    gParamHost->paramGetHandle(paramSet, kParamColorLut, &myData->colorLutParam, 0);
+    gParamHost->paramGetHandle(paramSet, kParamColorLutSpace, &myData->colorLutSpaceParam, 0);
+#ifdef NDI_HAS_BROWSE_DIALOGS
+    gParamHost->paramGetHandle(paramSet, kParamColorLutBrowse, &myData->colorLutBrowseParam, 0);
+#endif
 
     // Set instance data
     gPropHost->propSetPointer(effectProps, kOfxPropInstanceData, 0, (void *) myData);
@@ -2599,6 +3004,22 @@ static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandl
     // After NDI init so the GPU context exists for the STMap pre-warm — a
     // saved project's Equirect mode loads (and uploads) its maps now.
     refreshSTMaps(myData);
+    refreshOutputColor(myData);
+
+    // OFX 1.5 colour-management probe (issue #57 Part 3): what the host
+    // negotiated for this instance. Logged once; the per-clip colourspace
+    // is logged from render, where the host sets it.
+    {
+        char* style = nullptr;
+        char* config = nullptr;
+        const bool haveStyle = gPropHost->propGetString(effectProps, kOfxImageEffectPropColourManagementStyle, 0,
+                                                        &style) == kOfxStatOK && style;
+        const bool haveConfig = gPropHost->propGetString(effectProps, kOfxImageEffectPropColourManagementConfig, 0,
+                                                         &config) == kOfxStatOK && config;
+        NDI_LOG_TEXT((std::string("OFX colour management: style ") + (haveStyle ? style : "(not set)") +
+                      ", config " + (haveConfig ? config : "(not set)"))
+                         .c_str());
+    }
 
     NDI_LOG_TEXT(("Instance created successfully on page '" +
                   (myData->resolvePage.empty() ? std::string("?") : myData->resolvePage) + "'").c_str());
@@ -2656,6 +3077,16 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
                 NDI_LOG_TEXT((std::string("STMap browse picked: '") + picked + "'").c_str());
             }
         }
+        if (strcmp(paramName, kParamColorLutBrowse) == 0) {
+            char* currentPath = nullptr;
+            gParamHost->paramGetValue(myData->colorLutParam, &currentPath);
+            char picked[4096];
+            if (native_open_file_dialog("Choose the 3D .cube LUT for the NDI stream", "cube", currentPath,
+                                        picked, sizeof(picked))) {
+                gParamHost->paramSetValue(myData->colorLutParam, picked);
+                NDI_LOG_TEXT((std::string("Output Color LUT browse picked: '") + picked + "'").c_str());
+            }
+        }
         if (strcmp(paramName, kParamBRAWClipBrowse) == 0) {
             char* currentPath = nullptr;
             gParamHost->paramGetValue(myData->brawClipParam, &currentPath);
@@ -2671,6 +3102,7 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
         readInstanceParams(myData);
         updateParamVisibility(myData);
         refreshSTMaps(myData);
+        refreshOutputColor(myData);
 
         NDI_LOG("Updated params - sourceName='%s', enabled=%d, frameRate=%.2f",
                myData->sourceName.c_str(), myData->enabled, myData->frameRate);
@@ -2753,6 +3185,42 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     }
     myData->renderIsThumbnail = (hasThumbnail && thumbnailValue != 0);
 
+    // OFX 1.5 colour management (issue #57 Part 3): the source clip's
+    // colourspace, when Resolve reports one, is the best Timeline Color =
+    // Auto answer there is. Renders of one instance are serialized, so
+    // lastOfxColourspace is render-thread state; a change is logged (probe
+    // evidence) and re-resolves the transform — never blocking: if a
+    // parameter refresh holds the config lock, the next render retries.
+    {
+        char* colourspace = nullptr;
+        std::string seen;
+        if (srcClipProps && gPropHost->propGetString(srcClipProps, kOfxImageClipPropColourspace, 0,
+                                                     &colourspace) == kOfxStatOK && colourspace) {
+            seen = colourspace;
+        }
+        if (seen != myData->lastOfxColourspace) {
+            std::unique_lock<std::mutex> colorLock(myData->colorConfigMutex, std::try_to_lock);
+            if (colorLock.owns_lock()) {
+                myData->lastOfxColourspace = seen;
+                myData->ofxColourspace = seen;
+                char* outColourspace = nullptr;
+                OfxPropertySetHandle outClipProps = NULL;
+                std::string outSeen = "(not set)";
+                if (gEffectHost->clipGetPropertySet(myData->outputClip, &outClipProps) == kOfxStatOK && outClipProps &&
+                    gPropHost->propGetString(outClipProps, kOfxImageClipPropColourspace, 0, &outColourspace) ==
+                        kOfxStatOK && outColourspace) {
+                    outSeen = outColourspace;
+                }
+                NDI_LOG_TEXT(("OFX colourspace: source clip '" + (seen.empty() ? std::string("(not set)") : seen) +
+                              "', output clip '" + outSeen + "'").c_str());
+                if (myData->colorTimelineSpace < 0 &&
+                    myData->colorOutput.kind != ndi_tlcolor::OutputChoice::kLutFile) {
+                    refreshOutputColorLocked(myData, false);
+                }
+            }
+        }
+    }
+
     // Mono packing: right-eye and thumbnail renders skip the whole NDI path
     // (no conversion, no readback); the host-output passthrough still runs.
     if (myData->renderEye == ndi_stereo::kEyeRight && myData->hub) {
@@ -2780,6 +3248,14 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
         if (sel && sel->valid) {
             myData->renderStmap = sel;
         }
+    }
+
+    // This render's Output Color transform and frame tag (issue #57), copied
+    // like the warp map so a mid-flight parameter change can't free them.
+    {
+        std::lock_guard<std::mutex> lock(myData->colorMutex);
+        myData->renderColor = myData->colorEntry;
+        myData->renderColorTag = myData->colorTag;
     }
 
     // Diagnostic render-call probe: when enabled, log exactly what the host feeds
@@ -2947,6 +3423,17 @@ static OfxStatus describe(OfxImageEffectHandle effect)
     gPropHost->propSetInt(props, kOfxImageEffectPropSupportsMultipleClipPARs, 0, 0);
     gPropHost->propSetString(props, kOfxImageEffectPluginRenderThreadSafety, 0, kOfxImageEffectRenderFullySafe);
 
+    // OFX 1.5 colour management (issue #57 Part 3): declare that the plugin
+    // can use host-provided colourspace information, so a host that offers
+    // it (Resolve 21's release notes list "OpenFX 1.5 color management APIs")
+    // reports the source clip's colourspace for Timeline Color = Auto. The
+    // plugin sets no preferred colourspaces and leaves the output colourspace
+    // to the host default (the source clip's), so the host has no reason to
+    // convert the node's input or output; what Resolve actually does is the
+    // Part 3 probe (docs/2026-10-19-ofx-colour-management-probe.md).
+    gPropHost->propSetString(props, kOfxImageEffectPropColourManagementStyle, 0, kOfxImageEffectColourManagementFull);
+    gPropHost->propSetString(props, kOfxImageEffectPropColourManagementAvailableConfigs, 0, kOfxConfigIdentifier);
+
 #ifdef __APPLE__
     // GPU fast path (issue #5): accept frames as Metal buffers so the
     // downscale+convert runs before any readback. CPU rendering stays
@@ -3006,6 +3493,11 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     gParamHost->paramDefine(paramSet, kOfxParamTypeGroup, "projectionGroup", &projectionGroupProps);
     gPropHost->propSetString(projectionGroupProps, kOfxPropLabel, 0, "Projection");
     gPropHost->propSetInt(projectionGroupProps, kOfxParamPropGroupOpen, 0, 1); // Open by default
+
+    OfxPropertySetHandle outputColorGroupProps = NULL;
+    gParamHost->paramDefine(paramSet, kOfxParamTypeGroup, "outputColorGroup", &outputColorGroupProps);
+    gPropHost->propSetString(outputColorGroupProps, kOfxPropLabel, 0, "Output Color");
+    gPropHost->propSetInt(outputColorGroupProps, kOfxParamPropGroupOpen, 0, 1); // Open by default
 
     OfxPropertySetHandle performanceGroupProps = NULL;
     gParamHost->paramDefine(paramSet, kOfxParamTypeGroup, "performanceGroup", &performanceGroupProps);
@@ -3263,6 +3755,74 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     gPropHost->propSetInt(brawMaskProps, kOfxParamPropDefault, 0, 0); // Off
     gPropHost->propSetInt(brawMaskProps, kOfxParamPropAnimates, 0, 0);
     gPropHost->propSetString(brawMaskProps, kOfxParamPropParent, 0, "projectionGroup");
+
+    // Output Color group (issue #57). Choice options are append-only —
+    // projects save the index — and the display-space order is
+    // ndi_color::DisplaySpace's; see ndi_tlcolor::decodeOutputChoice for
+    // the NDI Output indices (LUT File stays 8).
+    OfxPropertySetHandle colorTimelineProps = NULL;
+    gParamHost->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorTimeline, &colorTimelineProps);
+    gPropHost->propSetString(colorTimelineProps, kOfxPropLabel, 0, kParamColorTimelineLabel);
+    gPropHost->propSetString(colorTimelineProps, kOfxParamPropScriptName, 0, kParamColorTimeline);
+    gPropHost->propSetString(colorTimelineProps, kOfxParamPropHint, 0, kParamColorTimelineHint);
+    gPropHost->propSetString(colorTimelineProps, kOfxParamPropChoiceOption, 0, "Auto");
+    for (int i = 0; i < ndi_color::kDisplaySpaceCount; ++i) {
+        gPropHost->propSetString(colorTimelineProps, kOfxParamPropChoiceOption, i + 1, ndi_color::displaySpaceName(i));
+    }
+    gPropHost->propSetInt(colorTimelineProps, kOfxParamPropDefault, 0, 0); // Auto
+    gPropHost->propSetInt(colorTimelineProps, kOfxParamPropAnimates, 0, 0);
+    gPropHost->propSetString(colorTimelineProps, kOfxParamPropParent, 0, "outputColorGroup");
+
+    OfxPropertySetHandle colorOutputProps = NULL;
+    gParamHost->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorOutput, &colorOutputProps);
+    gPropHost->propSetString(colorOutputProps, kOfxPropLabel, 0, kParamColorOutputLabel);
+    gPropHost->propSetString(colorOutputProps, kOfxParamPropScriptName, 0, kParamColorOutput);
+    gPropHost->propSetString(colorOutputProps, kOfxParamPropHint, 0, kParamColorOutputHint);
+    gPropHost->propSetString(colorOutputProps, kOfxParamPropChoiceOption, 0, "Passthrough");
+    for (int i = 0; i < ndi_color::kDisplaySpaceCount; ++i) {
+        gPropHost->propSetString(colorOutputProps, kOfxParamPropChoiceOption, i + 1, ndi_color::displaySpaceName(i));
+    }
+    gPropHost->propSetString(colorOutputProps, kOfxParamPropChoiceOption, ndi_tlcolor::kOutputChoiceLutFile,
+                             "LUT File");
+    gPropHost->propSetInt(colorOutputProps, kOfxParamPropDefault, 0, ndi_tlcolor::kOutputChoicePassthrough);
+    gPropHost->propSetInt(colorOutputProps, kOfxParamPropAnimates, 0, 0);
+    gPropHost->propSetString(colorOutputProps, kOfxParamPropParent, 0, "outputColorGroup");
+
+    // The LUT fields appear only in LUT File mode (updateParamVisibility);
+    // describe-time secret states match the Passthrough default.
+    OfxPropertySetHandle colorLutProps = NULL;
+    gParamHost->paramDefine(paramSet, kOfxParamTypeString, kParamColorLut, &colorLutProps);
+    gPropHost->propSetString(colorLutProps, kOfxPropLabel, 0, kParamColorLutLabel);
+    gPropHost->propSetString(colorLutProps, kOfxParamPropScriptName, 0, kParamColorLut);
+    gPropHost->propSetString(colorLutProps, kOfxParamPropHint, 0, kParamColorLutHint);
+    gPropHost->propSetString(colorLutProps, kOfxParamPropDefault, 0, "");
+    gPropHost->propSetString(colorLutProps, kOfxParamPropStringMode, 0, kOfxParamStringIsFilePath);
+    gPropHost->propSetInt(colorLutProps, kOfxParamPropAnimates, 0, 0);
+    gPropHost->propSetInt(colorLutProps, kOfxParamPropSecret, 0, 1);
+    gPropHost->propSetString(colorLutProps, kOfxParamPropParent, 0, "outputColorGroup");
+
+#ifdef NDI_HAS_BROWSE_DIALOGS
+    OfxPropertySetHandle colorLutBrowseProps = NULL;
+    gParamHost->paramDefine(paramSet, kOfxParamTypePushButton, kParamColorLutBrowse, &colorLutBrowseProps);
+    gPropHost->propSetString(colorLutBrowseProps, kOfxPropLabel, 0, kParamColorLutBrowseLabel);
+    gPropHost->propSetString(colorLutBrowseProps, kOfxParamPropScriptName, 0, kParamColorLutBrowse);
+    gPropHost->propSetString(colorLutBrowseProps, kOfxParamPropHint, 0, kParamColorLutBrowseHint);
+    gPropHost->propSetInt(colorLutBrowseProps, kOfxParamPropSecret, 0, 1);
+    gPropHost->propSetString(colorLutBrowseProps, kOfxParamPropParent, 0, "outputColorGroup");
+#endif
+
+    OfxPropertySetHandle colorLutSpaceProps = NULL;
+    gParamHost->paramDefine(paramSet, kOfxParamTypeChoice, kParamColorLutSpace, &colorLutSpaceProps);
+    gPropHost->propSetString(colorLutSpaceProps, kOfxPropLabel, 0, kParamColorLutSpaceLabel);
+    gPropHost->propSetString(colorLutSpaceProps, kOfxParamPropScriptName, 0, kParamColorLutSpace);
+    gPropHost->propSetString(colorLutSpaceProps, kOfxParamPropHint, 0, kParamColorLutSpaceHint);
+    for (int i = 0; i < ndi_color::kDisplaySpaceCount; ++i) {
+        gPropHost->propSetString(colorLutSpaceProps, kOfxParamPropChoiceOption, i, ndi_color::displaySpaceName(i));
+    }
+    gPropHost->propSetInt(colorLutSpaceProps, kOfxParamPropDefault, 0, ndi_color::kRec709Gamma24);
+    gPropHost->propSetInt(colorLutSpaceProps, kOfxParamPropAnimates, 0, 0);
+    gPropHost->propSetInt(colorLutSpaceProps, kOfxParamPropSecret, 0, 1);
+    gPropHost->propSetString(colorLutSpaceProps, kOfxParamPropParent, 0, "outputColorGroup");
 
     // Define GPU acceleration parameter - in Performance group
     OfxPropertySetHandle gpuAccelerationProps = NULL;

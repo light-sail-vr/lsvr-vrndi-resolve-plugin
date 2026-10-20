@@ -10,6 +10,9 @@ every poll (not just changes) doubles as a liveness heartbeat.
 Protocol (read by src/TimelineClipWatcher.cpp on macOS and
 src/WinTimelineWatch.cpp on Windows):
   - a line starting with '!' is a status/error message for the plugin log;
+  - a line starting with '@color' carries the timeline's colour settings
+    (issue #57 Part 3, tab-separated — see src/TimelineColor.h), printed
+    when they change;
   - any other line is the current clip's file path ('' = none).
 
 argv[1] (Windows, optional): full path of Resolve's fusionscript.dll,
@@ -44,6 +47,24 @@ if len(sys.argv) > 1 and sys.argv[1]:
     os.environ.setdefault("RESOLVE_SCRIPT_LIB", sys.argv[1])
 
 POLL_SECONDS = 0.5
+COLOR_EVERY = 4  # colour settings every 4th poll (~2 s)
+COLOR_KEYS = ("colorScienceMode", "separateColorSpaceAndGamma",
+              "colorSpaceTimeline", "colorSpaceTimelineGamma",
+              "colorSpaceOutput", "colorSpaceOutputGamma")
+
+
+def color_line(project, timeline):
+    # Timeline.GetSetting follows a timeline's own custom colour settings and
+    # falls back to the project's (same as the Lua helper).
+    fields = ["@color"]
+    for key in COLOR_KEYS:
+        value = timeline.GetSetting(key) if timeline else None
+        if not value and project:
+            value = project.GetSetting(key)
+        if not isinstance(value, str):
+            value = ""
+        fields.append(value.replace("\t", " ").replace("\r", " ").replace("\n", " "))
+    return "\t".join(fields)
 
 
 def say(line):
@@ -62,10 +83,13 @@ except Exception as exc:  # module missing / fusionscript ABI mismatch
 
 resolve = None
 warned_no_app = False
+last_color = None
+poll = 0
 while True:
     if not IS_WINDOWS and os.getppid() == 1:  # Resolve (our parent) is gone
         sys.exit(0)
     path = ""
+    color = None
     try:
         if resolve is None:
             resolve = dvr.scriptapp("Resolve")
@@ -77,6 +101,8 @@ while True:
             pm = resolve.GetProjectManager()
             project = pm.GetCurrentProject() if pm else None
             timeline = project.GetCurrentTimeline() if project else None
+            if project and poll % COLOR_EVERY == 0:
+                color = color_line(project, timeline)
             item = timeline.GetCurrentVideoItem() if timeline else None
             pool_item = item.GetMediaPoolItem() if item else None
             if pool_item:
@@ -86,5 +112,9 @@ while True:
         resolve = None
         say("!query failed (will reconnect): %s" % exc)
         path = ""
+    if color is not None and color != last_color:
+        say(color)
+        last_color = color
     say(path)
+    poll += 1
     time.sleep(POLL_SECONDS)

@@ -25,9 +25,20 @@ ARCHFLAGS ?=
 # third_party/braw holds the vendored (Boost-licensed) Blackmagic RAW API
 # header + dispatch shim; the framework itself is resolved at runtime from the
 # host app (Resolve ships it), so nothing Blackmagic is linked or bundled.
+# -O2: the plugin shipped unoptimised until 1.17 (no -O flag at all), which
+# left the CPU paths (CPU-buffer renders, Optimal Color Format off, the CPU
+# fallback) ~17x slower than they need be (LEARNINGS 2026-10-19). The GPU
+# kernels compile at runtime and are unaffected. After changing these flags,
+# force a rebuild: make tracks sources and headers, not the Makefile.
+# -MMD -MP: each object also writes a .d file listing the headers it includes
+# (included below), so a header-only change — the colour seams are all
+# headers — rebuilds the objects that use it. Without it `make dev` silently
+# kept the old binary (LEARNINGS 2026-10-20).
 CXX = c++
-CXXFLAGS = -c -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -Ithird_party/braw
-OBJCXXFLAGS = -c -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -x objective-c++
+OPTFLAGS ?= -O2
+DEPFLAGS = -MMD -MP
+CXXFLAGS = -c $(OPTFLAGS) $(DEPFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -Ithird_party/braw
+OBJCXXFLAGS = -c $(OPTFLAGS) $(DEPFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -x objective-c++
 # -headerpad_max_install_names: `make install`/`make bench` rewrite the NDI
 # dylib reference to its absolute SDK path with install_name_tool, which fails
 # ("larger updated load commands do not fit") when that path is long.
@@ -54,7 +65,7 @@ dev: $(BUNDLE_EXECUTABLE)
 # --expect assertions. Needs the NDI SDK; no Resolve. Builds only.
 ndi-verify:
 	mkdir -p build
-	$(CXX) -std=c++17 -O2 -I$(NDI_INCLUDE) tools/ndi_verify.cpp \
+	$(CXX) -std=c++17 -O2 -Isrc -I$(NDI_INCLUDE) tools/ndi_verify.cpp \
 		-o build/ndi_verify -headerpad_max_install_names $(NDI_LIB)
 	install_name_tool -change "@rpath/libndi.dylib" $(NDI_LIB) build/ndi_verify
 	@echo "built build/ndi_verify — run ./build/ndi_verify --help"
@@ -66,6 +77,14 @@ test:
 	./build/test_render_probe
 	$(CXX) -Isrc tests/test_stream_resolution.cpp -o build/test_stream_resolution
 	./build/test_stream_resolution
+	$(CXX) -Isrc tests/test_uyvy_encode.cpp -o build/test_uyvy_encode
+	./build/test_uyvy_encode
+	$(CXX) -Isrc tests/test_cube_lut.cpp -o build/test_cube_lut
+	./build/test_cube_lut
+	$(CXX) -Isrc tests/test_output_color.cpp -o build/test_output_color
+	./build/test_output_color
+	$(CXX) -Isrc tests/test_timeline_color.cpp -o build/test_timeline_color
+	./build/test_timeline_color
 	$(CXX) -Isrc tests/test_stereo_pair.cpp -o build/test_stereo_pair
 	./build/test_stereo_pair
 	$(CXX) -Isrc tests/test_platform_paths.cpp -o build/test_platform_paths
@@ -107,6 +126,8 @@ $(BUNDLE_EXECUTABLE): $(OBJECTS) | bundle_structure
 %.o: %.mm
 	$(CXX) $(OBJCXXFLAGS) $< -o $@
 
+-include $(OBJECTS:.o=.d)
+
 # Bundle structure
 bundle_structure:
 	mkdir -p $(BUNDLE_NAME)/Contents/MacOS
@@ -125,7 +146,7 @@ install: $(BUNDLE_EXECUTABLE)
 # Clean
 clean:
 	rm -rf $(BUNDLE_NAME)
-	rm -f *.o src/*.o
+	rm -f *.o src/*.o src/*.d
 	rm -rf build
 
 # Version increment (for development)
