@@ -128,12 +128,22 @@ struct SubmitResult {
 // (SideBySide) / top (TopBottom), the VR-player convention.
 enum class StereoLayout { SideBySide = 0, TopBottom = 1 };
 
-// Monoscopic packing (Stereo Packing = Mono): the left eye streams as a plain
-// single frame and never enters the pairer. Right-eye renders are dropped, and
-// so are filmstrip thumbnails — a tiny thumbnail frame would resize the stream.
-inline bool monoPackingStreams(int eye, bool isThumbnail)
+// Does this render stream over NDI? Answered once per render call, before any
+// NDI work; a render that doesn't stream still copies through to the host.
+// - Thumbnail renders (kOfxImageClipPropThumbnail: filmstrip/gallery, and the
+//   ~92x46 render Resolve makes after every parameter change and after
+//   pausing) never stream, in any packing — a tiny frame would resize the
+//   stream, and after a pause it would be the last frame sent (issue #58).
+// - Monoscopic packing (Stereo Packing = Mono): the left eye streams as a
+//   plain single frame and never enters the pairer; right-eye renders are
+//   dropped. In Side-by-Side/Top-Bottom both eyes stream, to the pairer.
+// Mono-timeline renders arrive as the left eye.
+inline bool renderStreams(bool monoPacking, int eye, bool isThumbnail)
 {
-    return eye != kEyeRight && !isThumbnail;
+    if (isThumbnail) {
+        return false;
+    }
+    return !monoPacking || eye != kEyeRight;
 }
 
 inline void packedDims(const FrameMeta& eyeMeta, StereoLayout layout, int* outWidth, int* outHeight)
@@ -189,10 +199,10 @@ public:
     {
         SubmitResult result;
 
-        // Thumbnail renders (filmstrip/gallery) never touch pairing state: in
-        // mono they stream exactly as they always have; on a locked canvas
-        // (degraded included) a tiny single-eye frame must never hijack the
-        // packed stream.
+        // Thumbnail renders (filmstrip/gallery) never touch pairing state. The
+        // plugin skips them before any NDI work (renderStreams, issue #58), so
+        // this is a backstop: on a locked canvas (degraded included) a tiny
+        // single-eye frame must never hijack the packed stream.
         if (isThumbnail) {
             result.action = canvasLocked_ ? SubmitAction::Drop : SubmitAction::SendMono;
             return result;

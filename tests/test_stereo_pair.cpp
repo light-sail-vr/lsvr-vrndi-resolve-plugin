@@ -587,13 +587,30 @@ int main()
         expectTrue(pairer.mode() == StreamMode::Stereo, "skew: stream stays Stereo (never degrades)");
     }
 
-    // --- Mono packing: only the left eye streams; right-eye renders and
-    // thumbnails never reach the wire (a thumbnail would resize the stream). ---
+    // --- Which renders stream (issue #58). Thumbnail renders never stream in
+    // any Stereo Packing: Resolve makes a 92x46 one after every parameter
+    // change and after pausing, and in Side-by-Side on a mono timeline it was
+    // the last frame sent — receivers saw a 46x22 picture. ---
     {
-        expectTrue(monoPackingStreams(kEyeLeft, false), "mono packing: left eye streams");
-        expectTrue(!monoPackingStreams(kEyeRight, false), "mono packing: right eye dropped");
-        expectTrue(!monoPackingStreams(kEyeLeft, true), "mono packing: left-eye thumbnail dropped");
-        expectTrue(!monoPackingStreams(kEyeRight, true), "mono packing: right-eye thumbnail dropped");
+        // In SBS/TB the right eye streams (to the pairer); Mono packing sends
+        // the left eye alone.
+        struct Packing { bool mono; const char* name; bool rightEyeStreams; };
+        const Packing packings[] = {{false, "SBS", true}, {false, "TB", true}, {true, "mono", false}};
+        struct Eye { int eye; const char* name; };
+        // Mono-timeline renders carry no eye and arrive as the left eye.
+        const Eye eyes[] = {{kEyeLeft, "left-eye"}, {kEyeRight, "right-eye"}, {kEyeLeft, "mono-timeline"}};
+        char name[128];
+        for (const Packing& p : packings) {
+            for (const Eye& e : eyes) {
+                std::snprintf(name, sizeof name, "%s packing: %s thumbnail never streams", p.name, e.name);
+                expectTrue(!renderStreams(p.mono, e.eye, true), name);
+
+                const bool streams = (e.eye == kEyeRight) ? p.rightEyeStreams : true;
+                std::snprintf(name, sizeof name, "%s packing: %s render %s", p.name, e.name,
+                              streams ? "streams" : "skipped");
+                expectInt(renderStreams(p.mono, e.eye, false), streams, name);
+            }
+        }
     }
 
     if (failures) {
