@@ -138,7 +138,7 @@ enum class StereoLayout { SideBySide = 0, TopBottom = 1 };
 //   plain single frame and never enters the pairer; right-eye renders are
 //   dropped. In Side-by-Side/Top-Bottom both eyes stream, to the pairer.
 // Mono-timeline renders arrive as the left eye.
-inline bool renderStreams(bool monoPacking, int eye, bool isThumbnail)
+inline bool shouldStreamRender(bool monoPacking, int eye, bool isThumbnail)
 {
     if (isThumbnail) {
         return false;
@@ -199,12 +199,12 @@ public:
     {
         SubmitResult result;
 
-        // Thumbnail renders (filmstrip/gallery) never touch pairing state. The
-        // plugin skips them before any NDI work (renderStreams, issue #58), so
-        // this is a backstop: on a locked canvas (degraded included) a tiny
-        // single-eye frame must never hijack the packed stream.
+        // Thumbnail renders (filmstrip/gallery) never touch pairing state and
+        // never stream. The plugin skips them before any NDI work
+        // (shouldStreamRender, issue #58); this Drop is the backstop, in mono
+        // as on a locked canvas.
         if (isThumbnail) {
-            result.action = canvasLocked_ ? SubmitAction::Drop : SubmitAction::SendMono;
+            result.action = SubmitAction::Drop;
             return result;
         }
 

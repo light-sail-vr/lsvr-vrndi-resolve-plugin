@@ -434,16 +434,16 @@ int main()
     }
 
     // --- Thumbnail renders (filmstrip, tiny dims, probe-confirmed to hit the
-    // render action): in mono they stream exactly as they always have; while
-    // stereo is active they are dropped — a 184×92 frame must not hijack a
-    // packed stream — and they never latch stereo or disturb pending state. ---
+    // render action) reaching the pairer: render() skips them first (#58), so
+    // the pairer's Drop is a backstop — in mono as while stereo is active —
+    // and they never latch stereo or disturb pending state. ---
     {
         EyePairer pairer;
         const FrameMeta thumbMeta = meta(184, 92);
 
-        // Mono: thumbnails keep today's shipping behavior (they stream).
+        // Mono: dropped too (#58: on a mono timeline it used to stream).
         SubmitResult r = submit(pairer, kEyeLeft, 50.0, thumbMeta, payload(1), 0, true);
-        expectTrue(r.action == SubmitAction::SendMono, "thumb: mono thumbnail streams as before");
+        expectTrue(r.action == SubmitAction::Drop, "thumb: mono thumbnail dropped (backstop, #58)");
 
         // A right-eye thumbnail must not latch stereo.
         r = submit(pairer, kEyeRight, 50.0, thumbMeta, payload(2), 10, true);
@@ -592,24 +592,22 @@ int main()
     // change and after pausing, and in Side-by-Side on a mono timeline it was
     // the last frame sent — receivers saw a 46x22 picture. ---
     {
-        // In SBS/TB the right eye streams (to the pairer); Mono packing sends
-        // the left eye alone.
-        struct Packing { bool mono; const char* name; bool rightEyeStreams; };
-        const Packing packings[] = {{false, "SBS", true}, {false, "TB", true}, {true, "mono", false}};
-        struct Eye { int eye; const char* name; };
-        // Mono-timeline renders carry no eye and arrive as the left eye.
-        const Eye eyes[] = {{kEyeLeft, "left-eye"}, {kEyeRight, "right-eye"}, {kEyeLeft, "mono-timeline"}};
-        char name[128];
-        for (const Packing& p : packings) {
-            for (const Eye& e : eyes) {
-                std::snprintf(name, sizeof name, "%s packing: %s thumbnail never streams", p.name, e.name);
-                expectTrue(!renderStreams(p.mono, e.eye, true), name);
-
-                const bool streams = (e.eye == kEyeRight) ? p.rightEyeStreams : true;
-                std::snprintf(name, sizeof name, "%s packing: %s render %s", p.name, e.name,
-                              streams ? "streams" : "skipped");
-                expectInt(renderStreams(p.mono, e.eye, false), streams, name);
-            }
+        // shouldStreamRender sees only Mono packing vs not: Side-by-Side and
+        // Top-Bottom are the same input. Mono-timeline renders arrive as the
+        // left eye. Expected values are the spec's, written out per row.
+        struct Case { bool monoPacking; int eye; bool thumbnail; bool streams; const char* name; };
+        const Case cases[] = {
+            {false, kEyeLeft, false, true, "SBS/TB: left-eye or mono-timeline render streams"},
+            {false, kEyeRight, false, true, "SBS/TB: right-eye render streams (to the pairer)"},
+            {false, kEyeLeft, true, false, "SBS/TB: left-eye or mono-timeline thumbnail never streams (#58)"},
+            {false, kEyeRight, true, false, "SBS/TB: right-eye thumbnail never streams"},
+            {true, kEyeLeft, false, true, "Mono: left-eye or mono-timeline render streams"},
+            {true, kEyeRight, false, false, "Mono: right-eye render skipped"},
+            {true, kEyeLeft, true, false, "Mono: left-eye thumbnail never streams"},
+            {true, kEyeRight, true, false, "Mono: right-eye thumbnail never streams"},
+        };
+        for (const Case& c : cases) {
+            expectTrue(ndi_stereo::shouldStreamRender(c.monoPacking, c.eye, c.thumbnail) == c.streams, c.name);
         }
     }
 
