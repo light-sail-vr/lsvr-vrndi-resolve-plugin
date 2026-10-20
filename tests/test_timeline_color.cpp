@@ -137,8 +137,9 @@ int main()
         expect(fromOfxColourspace("ofx_scene_log").kind == kSceneReferred, "the basic scene-log space");
         expect(fromOfxColourspace("rec2100_pq_display").kind == kHdr, "PQ display is HDR");
         expect(fromOfxColourspace("ofx_display_sdr").kind == kUnknown, "generic SDR display names no exact space");
-        expect(fromOfxColourspace("").kind == kUnknown && fromOfxColourspace("ofx_raw").kind == kUnknown,
-               "empty and raw are unknown");
+        // kOfxColourspaceRaw — what Resolve 21.1 reports on both clips (unmanaged YRGB, 2026-10-20).
+        expect(fromOfxColourspace("").kind == kUnknown && fromOfxColourspace("Raw").kind == kUnknown,
+               "empty and Raw are unknown");
     }
 
     // --- the NDI Output choice, as projects save it --------------------------------

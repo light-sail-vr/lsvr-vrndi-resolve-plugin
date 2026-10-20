@@ -1,6 +1,6 @@
 # Timeline colour detection: OFX 1.5 colour management and Resolve's settings (issue #57 Part 3)
 
-Status: **partly verified.** The scripting route and the plugin's handling are verified (L); what Resolve 21.1 reports through the OFX 1.5 colour-management API is **(T)** until the in-Resolve probe below is run. Fact labels as in LEARNINGS.md: (L) verified locally, (P) primary source, (T) needs testing.
+Status: **partly verified.** The scripting route and the plugin's handling are verified (L). What Resolve 21.1 reports through the OFX 1.5 colour-management API is verified for an unmanaged DaVinci YRGB project (L, 2026-10-20: `Raw` on both clips, no conversion of the node's I/O); colour-managed and ACES projects (cases 2–4 below) are still **(T)**. Fact labels as in LEARNINGS.md: (L) verified locally, (P) primary source, (T) needs testing.
 
 ## Why the plugin needs to know
 
@@ -27,7 +27,7 @@ An OpenFX node on the Color page runs in "Timeline Processing". The Output LUT a
 
 ### The in-Resolve probe (T, owed)
 
-Run once on Resolve 21.1 with this build installed (`sudo make install`, full Resolve restart). Use a short clip with the patch chart (`scripts/gen_patch_chart.py --width 1920 --height 1080`) and the NDI Output node on the Color page. Turn **Log Render Calls** on, and run `./scripts/monitor_ndi_logs.sh` filtered to `OFX colour`.
+Run once on Resolve 21.1 with this build installed (`sudo make install`, full Resolve restart). Use a short clip with the patch chart (`scripts/gen_patch_chart.py --width 1920 --height 1080`) and the NDI Output node on the Color page. The two `OFX colour` lines don't need Log Render Calls, and each is logged once: `style …` when the instance is created (project load, node added), `OFX colourspace …` on the first render and again only when the value changes. A live `./scripts/monitor_ndi_logs.sh` started afterwards shows nothing, so read them back with `/usr/bin/log show --last 1h --info --style compact --predicate 'eventMessage CONTAINS "NDI Plugin: OFX colour"'` (the full path: in zsh, `log` is a shell builtin).
 
 | # | Project colour science | Timeline / output | Record |
 |---|---|---|---|
@@ -41,7 +41,19 @@ For each case, also confirm **declaring support doesn't make Resolve convert the
 - Stream the chart with NDI Output = Passthrough and read it with `./build/ndi_verify --source "<name>" --patches --color bgra`. In case 1 every patch must be within ±2 codes of the source values, and on every case the readout must be the same with the node enabled and disabled.
 - Compare the viewer with the node enabled vs. bypassed (they must match).
 
-Write the results into this section, and an entry into LEARNINGS.md. If Resolve reports nothing (style and colourspace both "(not set)"), Auto runs entirely on step 2 below, which is already verified. If Resolve does convert, remove the two `propSetString` lines in `describe`; nothing else depends on them.
+**Result, case 1** (L, 2026-10-20, Resolve Studio 21.1, macOS, unmanaged DaVinci YRGB, Rec.709 timeline):
+
+```
+NDI Plugin: OFX colour management: style OfxImageEffectColourManagementFull, config ofx-native-v1.5_aces-v1.3_ocio-v2.3
+NDI Plugin: OFX colourspace: source clip 'Raw', output clip 'Raw'
+```
+
+- Resolve accepts the declaration: style Full, the native config.
+- It reports `Raw` (`kOfxColourspaceRaw`) on both clips, meaning "not colour-managed, don't interpret". `fromOfxColourspace` maps that to unknown, so Auto falls through to the scripting answer, as designed: Stream Status read `color: passthrough (Rec.709 G2.4)`, and every frame carried the Rec.709 G2.4 tag.
+- Resolve does not convert the node's I/O. The Passthrough patch readout (`--color bgra`) was within 1 code of the source on all 24 patches, including 16 and 235. Every display preset matched the standards within 1 code (Rec.2020 within 2; `tools/ndi_color_check.py`).
+- When switching a project to RCM or ACES for cases 2–4, a new `OFX colourspace` line appears only if the value changes. No new line after a render means it's still `Raw`.
+
+Write the results for cases 2–4 into this section, and an entry into LEARNINGS.md. If Resolve reports nothing (style and colourspace both "(not set)"), Auto runs entirely on step 2 below, which is already verified. If Resolve does convert, remove the two `propSetString` lines in `describe`; nothing else depends on them.
 
 ## 2. Resolve's timeline settings via scripting (verified)
 
