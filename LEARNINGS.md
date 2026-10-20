@@ -548,6 +548,13 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** after one rebuild, `touch src/TimelineColor.h && make dev` recompiles `NDIOutputPlugin.o` and `TimelineClipWatcher.o` and relinks, and a second `make dev` compiles nothing; `make test` passes.
 **Rule:** when a fix doesn't show up after install, check the installed binary's date against the commit before debugging the code.
 
+### 2026-10-20 — Thumbnail renders streamed in Side-by-Side/Top-Bottom on a mono timeline (#58)
+**Symptom:** with Stereo Packing Side-by-Side (the default) or Top-Bottom on a mono timeline, the 92×46 node thumbnail Resolve renders after every parameter change and after a pause (`thumb=1`) went out over NDI. After pausing on the Color page it was the last frame sent: `ndi_verify` reported `last frame: 46x22` (Resolution: Half), and connected receivers saw the size flip and back.
+**Root cause:** `render()` only applied the thumbnail check under Mono packing: `renderStreams = (packing != Mono) || monoPackingStreams(eye, thumb)`. In SBS/TB the thumbnail went to the pairer, which drops thumbnails only while a stereo pair is latched. A mono timeline never latches, so the pairer sent it on as a mono frame.
+**Fix:** one pure decision, `ndi_stereo::renderStreams(monoPacking, eye, isThumbnail)` in `src/StereoPair.h`, replaces `monoPackingStreams`. A thumbnail never streams, in any packing. The right eye is skipped only under Mono packing. `render()` calls it once, before any NDI work. The host-output passthrough still runs, so the thumbnail still renders in Resolve. The pairer's thumbnail `Drop` stays as a backstop.
+**Validated by:** `make test`: a new `test_stereo_pair` block covers every packing (SBS, TB, Mono) with left-eye, right-eye and mono-timeline renders, thumbnail and not. It was written red first: the six SBS/TB thumbnail cases failed against the old decision. Tier 0 `make dev` builds clean. Tier 2 is the lead session's check: pause on the Color page, then `ndi_verify` should report the program size, not 46×22.
+**Rule:** a filter that holds in every mode goes in front of the mode switch; a check inside one mode's branch silently doesn't run in the others.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
