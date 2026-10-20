@@ -50,7 +50,7 @@ Open a PR into `dev`. **Done when** both CI `build` checks are green and the PR 
 git checkout master && git pull && cat VERSION     # must print X.Y.Z
 ./scripts/package_release.sh                       # build, sign, notarize, staple → dist/vX.Y.Z/
 ```
-**Done when** the script ends with a Gatekeeper `accepted / source=Notarized Developer ID` and `shasum -a 256 -c dist/vX.Y.Z/SHA256SUMS.txt` passes. Then the **Mac Tier 1–2** gate: Matt installs `dist/vX.Y.Z/NDIOutput-X.Y.Z-macOS.pkg` and confirms the stream. Then the **publish** gate, then:
+**Done when** the script ends with a Gatekeeper `accepted / source=Notarized Developer ID` and `(cd dist/vX.Y.Z && shasum -a 256 -c SHA256SUMS.txt)` passes. Run it from inside the directory: the file lists bare file names, so a check from the repo root reports every file missing. Then the **Mac Tier 1–2** gate: Matt installs `dist/vX.Y.Z/NDIOutput-X.Y.Z-macOS.pkg` and confirms the stream. Then the **publish** gate, then:
 ```bash
 ./scripts/publish_github_release.sh --publish
 ```
