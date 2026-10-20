@@ -29,11 +29,16 @@ ARCHFLAGS ?=
 # left the CPU paths (CPU-buffer renders, Optimal Color Format off, the CPU
 # fallback) ~17x slower than they need be (LEARNINGS 2026-10-19). The GPU
 # kernels compile at runtime and are unaffected. After changing these flags,
-# force a rebuild: make tracks sources, not the Makefile.
+# force a rebuild: make tracks sources and headers, not the Makefile.
+# -MMD -MP: each object also writes a .d file listing the headers it includes
+# (included below), so a header-only change — the colour seams are all
+# headers — rebuilds the objects that use it. Without it `make dev` silently
+# kept the old binary (LEARNINGS 2026-10-20).
 CXX = c++
 OPTFLAGS ?= -O2
-CXXFLAGS = -c $(OPTFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -Ithird_party/braw
-OBJCXXFLAGS = -c $(OPTFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -x objective-c++
+DEPFLAGS = -MMD -MP
+CXXFLAGS = -c $(OPTFLAGS) $(DEPFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -Ithird_party/braw
+OBJCXXFLAGS = -c $(OPTFLAGS) $(DEPFLAGS) -fvisibility=hidden -mmacosx-version-min=$(DEPLOYMENT_TARGET) $(ARCHFLAGS) -Iopenfx/include -I$(NDI_INCLUDE) -x objective-c++
 # -headerpad_max_install_names: `make install`/`make bench` rewrite the NDI
 # dylib reference to its absolute SDK path with install_name_tool, which fails
 # ("larger updated load commands do not fit") when that path is long.
@@ -121,6 +126,8 @@ $(BUNDLE_EXECUTABLE): $(OBJECTS) | bundle_structure
 %.o: %.mm
 	$(CXX) $(OBJCXXFLAGS) $< -o $@
 
+-include $(OBJECTS:.o=.d)
+
 # Bundle structure
 bundle_structure:
 	mkdir -p $(BUNDLE_NAME)/Contents/MacOS
@@ -139,7 +146,7 @@ install: $(BUNDLE_EXECUTABLE)
 # Clean
 clean:
 	rm -rf $(BUNDLE_NAME)
-	rm -f *.o src/*.o
+	rm -f *.o src/*.o src/*.d
 	rm -rf build
 
 # Version increment (for development)

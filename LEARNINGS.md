@@ -541,6 +541,13 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** `make test` (new `test_timeline_color` block built from the observed line `davinciYRGBColorManagedv2, 'Rec.709 (Scene)' / '', 'Rec.709 (Scene)' / 'ACEScc'`, written red first), Tier 0. The same session confirmed ACEScct is still flagged (case 4).
 **Rule:** decide whether a Resolve colour name is display-referred by whether Resolve converts *after* the node, not by the colour-science mode's name.
 
+### 2026-10-20 — A header-only change didn't rebuild the macOS plugin
+**Symptom:** after the RCM `(Scene)` fix (a change to `src/TimelineColor.h` only), `make dev` exited 0 and Matt's `sudo make install` + Resolve restart still ran the old behaviour. The bundle's binary was still dated the previous day.
+**Root cause:** the Makefile's pattern rules make each object depend on its `.cpp`/`.mm` alone. Headers weren't prerequisites, so a header-only change never rebuilt anything, and `make install` copies whatever bundle exists. On this branch every colour seam (`UYVYEncode.h`, `OutputColor.h`, `CubeLUT.h`, `TimelineColor.h`) is header-only. Earlier Tier 2 results were valid only because the previous day's build had been a full `make clean` rebuild after the last header change.
+**Fix:** `DEPFLAGS = -MMD -MP` in `CXXFLAGS`/`OBJCXXFLAGS` and `-include $(OBJECTS:.o=.d)`. Each object records the headers it includes, `make clean` removes the `.d` files, and `.gitignore` ignores `src/*.d`. It works with universal builds (`-arch arm64 -arch x86_64`).
+**Validated by:** after one rebuild, `touch src/TimelineColor.h && make dev` recompiles `NDIOutputPlugin.o` and `TimelineClipWatcher.o` and relinks, and a second `make dev` compiles nothing; `make test` passes.
+**Rule:** when a fix doesn't show up after install, check the installed binary's date against the commit before debugging the code.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
