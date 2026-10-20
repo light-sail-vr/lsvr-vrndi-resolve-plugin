@@ -905,7 +905,7 @@ struct NDIInstanceData {
     double renderTime;         // kOfxPropTime — the pairing key
     bool renderIsThumbnail;
     int stereoPacking;         // 0 = Side-by-Side, 1 = Top-Bottom, 2 = Mono (kStereoPackingMono)
-    bool renderStreams;        // false = this render skips NDI (Mono packing: right eye / thumbnail)
+    bool renderStreams;        // false = this render skips NDI (any thumbnail; right eye under Mono packing)
 
     // Projection normalization (issue #7). The loaded entries swap under
     // stmapMutex on parameter changes (main thread) while render threads copy
@@ -1442,9 +1442,10 @@ static void hubSubmitFrame(NDIInstanceData* data, const HubSubmit& s, SubmitTime
 
     if (data->stereoPacking == kStereoPackingMono) {
         // Mono packing bypasses the pairer: the left eye goes out as-is.
-        // render() already skips right-eye/thumbnail renders; this catches
-        // pump items enqueued before the setting changed.
-        if (ndi_stereo::monoPackingStreams(s.eye, s.isThumbnail)) {
+        // render() already skips thumbnails and, under Mono, right-eye renders;
+        // this catches right-eye pump items enqueued before Stereo Packing
+        // changed to Mono.
+        if (ndi_stereo::shouldStreamRender(/*monoPacking=*/true, s.eye, s.isThumbnail)) {
             const auto sendT0 = std::chrono::steady_clock::now();
             hubSendFrameLocked(hub, data, meta, s.bytes, s.allowAsync, s.colorTag);
             if (timers) timers->sendMs = msSince(sendT0);
@@ -3221,13 +3222,14 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
         }
     }
 
-    // Mono packing: right-eye and thumbnail renders skip the whole NDI path
-    // (no conversion, no readback); the host-output passthrough still runs.
+    // Thumbnail renders (every packing, issue #58) and right-eye renders under
+    // Mono packing skip the whole NDI path (no conversion, no readback); the
+    // host-output passthrough still runs, so the thumbnail still renders.
     if (myData->renderEye == ndi_stereo::kEyeRight && myData->hub) {
         myData->hub->rightEyeSeen.store(true, std::memory_order_relaxed);
     }
-    myData->renderStreams = (myData->stereoPacking != kStereoPackingMono) ||
-                            ndi_stereo::monoPackingStreams(myData->renderEye, myData->renderIsThumbnail);
+    myData->renderStreams = ndi_stereo::shouldStreamRender(myData->stereoPacking == kStereoPackingMono,
+                                                           myData->renderEye, myData->renderIsThumbnail);
 
     // Select this render's warp map (issue #7): only when Equirect is chosen
     // (read fresh, like every param) and the last refresh validated the maps.
