@@ -239,13 +239,13 @@ static void ndiWinLog(const char* fmt, ...)
 // Apple Immersive lens calibration embedded in URSA Cine Immersive BRAW.
 #define kParamBRAWSource "brawClipSource"
 #define kParamBRAWSourceLabel "Camera Clip Source"
-#define kParamBRAWSourceHint "Where Equirect (Camera Metadata) gets its calibration. Timeline (Auto) follows the clip under the playhead — multi-camera timelines pick up each camera's own calibration as the playhead crosses it (maps are cached per camera, and gaps/non-BRAW clips keep the last camera's maps rather than popping to passthrough). Auto needs Resolve's external scripting enabled (Preferences > System > General > External scripting using: Local) — the helper runs under Resolve's own bundled script interpreter, so nothing else needs installing; if scripting is off the log says so — use Manual Path, which reads the clip picked below instead."
+#define kParamBRAWSourceHint "Where Equirect (Camera Metadata) gets its calibration. Timeline (Auto) follows the clip under the playhead — multi-camera timelines pick up each camera's own calibration as the playhead crosses it (maps are cached per camera, and gaps/non-BRAW clips keep the last camera's maps rather than popping to passthrough). Auto needs Resolve's external scripting enabled (Preferences > System > General > External scripting using: Local) — the helper runs under Resolve's own bundled script interpreter, so nothing else needs installing; if scripting is off the log says so — use Manual Path, which reads the clip picked below instead. Auto reads only calibration embedded in BRAW clips; for a standalone .ilpd lens file use Manual Path."
 #define kParamBRAWClip "brawClip"
-#define kParamBRAWClipLabel "Camera Clip (.braw)"
-#define kParamBRAWClipHint "Manual Path mode only: any URSA Cine Immersive BRAW clip shot on the camera — the embedded factory calibration is per-camera, not per-shot, so one pick covers every clip from the same body. The clip is opened for its metadata (instant), never decoded."
+#define kParamBRAWClipLabel "Camera Clip (.braw / .ilpd)"
+#define kParamBRAWClipHint "Manual Path mode only: any URSA Cine Immersive BRAW clip shot on the camera — the embedded factory calibration is per-camera, not per-shot, so one pick covers every clip from the same body; the clip is opened for its metadata (instant), never decoded. Or an Apple Immersive lens calibration file (.ilpd) for rigs that don't embed one, such as custom or underwater housings — it must use the Mei-Rives lens model (radial2ProjectionOffsetTangential2) that Apple Immersive calibrations use."
 #define kParamBRAWClipBrowse "brawClipBrowse"
-#define kParamBRAWClipBrowseLabel "Browse for Camera Clip..."
-#define kParamBRAWClipBrowseHint "Pick the camera's BRAW clip with a file dialog and fill the path field above."
+#define kParamBRAWClipBrowseLabel "Browse for Camera Clip or ILPD..."
+#define kParamBRAWClipBrowseHint "Pick the camera's BRAW clip or an .ilpd lens calibration file with a file dialog and fill the path field above."
 #define kParamBRAWMapSize "metadataMapSize"
 #define kParamBRAWMapSizeLabel "Metadata Map Size"
 #define kParamBRAWMapSizeHint "Resolution of the generated per-eye 180ºx180º equirect (Camera Metadata mode only) — like an STMap's resolution, this is the warped output size per eye before the Resolution control divides it. 2048 is right for monitoring; 4096 costs 4x the map memory."
@@ -610,11 +610,13 @@ static void stmapAcquirePackedPair(const std::string& path,
 
 // Fetch BOTH per-eye maps generated from an URSA Cine Immersive BRAW clip's
 // embedded lens calibration (issue #11 — see src/BRAWLensMap.h for the
-// geometry). Same derived-pseudo-key caching as the packed-SbS split above,
-// staleness-checked against the .braw itself; a re-pick of the same clip (or
-// both per-eye instances naming it) reuses the generated maps. The BRAW open
-// is metadata-only and the generation ~30 ms at 2048² — both fine for the
-// parameter-edit path this runs on.
+// geometry), or from a standalone .ilpd file carrying the same calibration
+// JSON (custom rigs such as underwater housings). Same derived-pseudo-key
+// caching as the packed-SbS split above, staleness-checked against the
+// source file itself; a re-pick of the same file (or both per-eye instances
+// naming it) reuses the generated maps. The BRAW open is metadata-only and
+// the generation ~30 ms at 2048² — both fine for the parameter-edit path
+// this runs on.
 static void brawAcquireLensPair(const std::string& path, int mapSize, bool applyMask,
                                 std::shared_ptr<StmapEntry>* leftOut,
                                 std::shared_ptr<StmapEntry>* rightOut)
@@ -648,31 +650,44 @@ static void brawAcquireLensPair(const std::string& path, int mapSize, bool apply
     left->fileMtime = right->fileMtime = mtime;
     left->fileSize = right->fileSize = size;
 
-#if defined(__APPLE__) || defined(_WIN32)
+    const bool ilpd = ndi_brawmap::isILPDPath(path);
+    const std::string tag = ilpd ? "ILPD lens maps: '" : "BRAW lens maps: '";
     std::string json, kind, calType, error;
+    bool haveJson = false;
+    if (ilpd) {
+        // The parser accepts only the Mei-Rives model, so that is what a
+        // file that parses carries — mirrors the BRAW "fish/meiRives" attrs.
+        haveJson = ndi_brawmap::readILPDFile(path, &json, &error);
+        kind = "ilpd";
+        calType = "meiRives";
+    } else {
+#if defined(__APPLE__) || defined(_WIN32)
+        haveJson = ndi_brawreader::readImmersiveCalibration(path, &json, &kind, &calType, &error);
+#else
+        error = "BRAW camera metadata is not available on this platform";
+#endif
+    }
     ndi_brawmap::LensCalibration cal;
-    if (!ndi_brawreader::readImmersiveCalibration(path, &json, &kind, &calType, &error) ||
-        !ndi_brawmap::parseCalibrationJSON(json, &cal, &error)) {
+    if (!haveJson || !ndi_brawmap::parseCalibrationJSON(json, &cal, &error)) {
         left->error = right->error = error;
-        NDI_LOG_TEXT(("BRAW lens maps: '" + path + "' — " + error).c_str());
+        NDI_LOG_TEXT((tag + path + "' — " + error).c_str());
     } else {
         const bool maskUsable = cal.left.maskRadiusDeg > 0.0 && cal.right.maskRadiusDeg > 0.0;
         if (applyMask && !maskUsable) {
-            NDI_LOG_TEXT(("BRAW lens maps: '" + path +
-                          "' carries no usable maskData — edge mask skipped").c_str());
+            NDI_LOG_TEXT((tag + path + "' carries no usable maskData — edge mask skipped").c_str());
         }
         if (applyMask && cal.left.maskSpreadDeg > 1.0) {
-            NDI_LOG("BRAW lens maps: mask ring is non-circular (%.1f deg spread) — "
+            NDI_LOG("Lens maps: mask ring is non-circular (%.1f deg spread) — "
                     "approximated by its mean circle",
                     cal.left.maskSpreadDeg);
         }
         if (!ndi_brawmap::generateLensMaps(cal, mapSize, applyMask, &left->map, &right->map,
                                            &error)) {
             left->error = right->error = error;
-            NDI_LOG_TEXT(("BRAW lens maps: generation failed for '" + path + "' — " + error).c_str());
+            NDI_LOG_TEXT((tag + path + "' generation failed — " + error).c_str());
         } else {
             left->valid = right->valid = true;
-            NDI_LOG_TEXT(("BRAW lens maps: '" + path + "' (" + kind + "/" + calType + ", " +
+            NDI_LOG_TEXT((tag + path + "' (" + kind + "/" + calType + ", " +
                           cal.generator + ") -> 2x " + std::to_string(mapSize) + "x" +
                           std::to_string(mapSize) + " equirect 180, mask " +
                           (applyMask && maskUsable
@@ -681,11 +696,6 @@ static void brawAcquireLensPair(const std::string& path, int mapSize, bool apply
                              .c_str());
         }
     }
-#else
-    (void)mapSize;
-    (void)applyMask;
-    left->error = right->error = "Camera-metadata projection is not available on this platform";
-#endif
 
     std::lock_guard<std::mutex> lock(gStmapCacheMutex);
     gStmapCache[keyLeft] = left;
@@ -3092,8 +3102,9 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
             char* currentPath = nullptr;
             gParamHost->paramGetValue(myData->brawClipParam, &currentPath);
             char picked[4096];
-            if (native_open_file_dialog("Choose any BRAW clip shot on the URSA Cine Immersive",
-                                     "braw", currentPath, picked, sizeof(picked))) {
+            if (native_open_file_dialog("Choose any BRAW clip shot on the URSA Cine Immersive, "
+                                        "or an .ilpd lens calibration file",
+                                        "braw;ilpd", currentPath, picked, sizeof(picked))) {
                 gParamHost->paramSetValue(myData->brawClipParam, picked);
                 NDI_LOG_TEXT((std::string("Camera clip browse picked: '") + picked + "'").c_str());
             }
@@ -3708,7 +3719,7 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
 
     // Define the camera clip path parameter - in Projection group (issue #11:
     // Manual Path mode reads the embedded lens calibration from any BRAW
-    // clip shot on the camera)
+    // clip shot on the camera, or a standalone .ilpd calibration file)
     OfxPropertySetHandle brawClipProps = NULL;
     gParamHost->paramDefine(paramSet, kOfxParamTypeString, kParamBRAWClip, &brawClipProps);
     gPropHost->propSetString(brawClipProps, kOfxPropLabel, 0, kParamBRAWClipLabel);

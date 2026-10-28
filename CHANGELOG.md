@@ -5,6 +5,11 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Camera Metadata from an ILPD file.** In **Equirect (Camera Metadata)** with **Camera Clip Source: Manual Path**, the **Camera Clip** field now also takes an Apple Immersive lens calibration file (`.ilpd`, Immersive Lens Profile Data) as well as a BRAW clip. Use it for rigs that don't embed calibration in the clip, such as custom or underwater housings. An ILPD holds the same calibration an URSA Cine Immersive BRAW embeds, so the warp, Metadata Map Size and Metadata Edge Mask behave exactly as they do for BRAW. The Browse button lists both `.braw` and `.ilpd` files. The ILPD must use the Mei-Rives lens model (`radial2ProjectionOffsetTangential2`) that Apple Immersive calibrations use; with any other model, Stream Status reports the camera metadata as invalid, the log says why, and the stream passes through unwarped. Timeline (Auto) still reads only BRAW-embedded calibration.
+
 ## [1.17.0] - 2026-10-20
 
 ### Fixed

@@ -15,6 +15,12 @@
   fixture tests/fixtures/ursa_immersive_calibration.json). The SDK-facing
   extraction of the JSON from a .braw lives in src/BRAWImmersiveReader.cpp.
 
+  The same JSON also travels as a standalone ILPD file (Immersive Lens
+  Profile Data, *.ilpd) — Apple's format for lens calibration of rigs that
+  don't embed it in the clip (custom and underwater housings; Resolve ships
+  generic eqd/gap ILPDs under .../DaVinci Resolve/Apple Immersive/Factory/).
+  readILPDFile below loads one straight off disk; no SDK involved.
+
   Geometry (verified numerically and visually against real media —
   docs/2026-08-30-braw-immersive-metadata-projection.md):
 
@@ -530,6 +536,59 @@ inline bool parseCalibrationJSON(const std::string& json, LensCalibration* out, 
         }
         return false;
     }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Standalone ILPD files
+// ---------------------------------------------------------------------------
+
+// True when path names an ILPD file (case-insensitive ".ilpd" extension).
+// The plugin routes these to readILPDFile instead of the BRAW SDK.
+inline bool isILPDPath(const std::string& path)
+{
+    static const char kExt[] = ".ilpd";
+    const size_t n = sizeof(kExt) - 1;
+    if (path.size() <= n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        char c = path[path.size() - n + i];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != kExt[i]) return false;
+    }
+    return true;
+}
+
+// Read an ILPD file (UTF-8 path on every platform) into *jsonOut, ready for
+// parseCalibrationJSON. A leading UTF-8 BOM — hand-edited files picked up on
+// Windows — is dropped. Fails soft with a human-readable *error.
+inline bool readILPDFile(const std::string& path, std::string* jsonOut, std::string* error)
+{
+    const auto fail = [&](const std::string& msg) {
+        if (error) *error = msg;
+        return false;
+    };
+    long long mtime = 0, size = 0;
+    if (path.empty() || !ndi_path::statUtf8(path.c_str(), &mtime, &size)) {
+        return fail("cannot open ILPD '" + path + "'");
+    }
+    if (size <= 0 || static_cast<unsigned long long>(size) > kMaxJsonBytes) {
+        return fail("ILPD file is empty or larger than 8 MB");
+    }
+    std::FILE* f = ndi_path::fopenUtf8(path.c_str(), "rb");
+    if (!f) {
+        return fail("cannot open ILPD '" + path + "'");
+    }
+    std::string text(static_cast<size_t>(size), '\0');
+    const size_t got = std::fread(&text[0], 1, text.size(), f);
+    std::fclose(f);
+    if (got != text.size()) {
+        return fail("short read on ILPD '" + path + "'");
+    }
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF) {
+        text.erase(0, 3);
+    }
+    *jsonOut = std::move(text);
     return true;
 }
 

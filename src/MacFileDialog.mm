@@ -24,9 +24,19 @@ bool mac_open_file_dialog(const char* message, const char* extension,
         }
         if (extension && *extension) {
             if (@available(macOS 11.0, *)) {
-                UTType* type = [UTType typeWithFilenameExtension:[NSString stringWithUTF8String:extension]];
-                if (type) {
-                    panel.allowedContentTypes = @[ type ];
+                // ';'-separated list; an extension no app declares (.ilpd)
+                // still gets a dynamic UTType, which filters correctly.
+                NSMutableArray<UTType*>* types = [NSMutableArray array];
+                NSArray<NSString*>* exts =
+                    [[NSString stringWithUTF8String:extension] componentsSeparatedByString:@";"];
+                for (NSString* ext in exts) {
+                    UTType* type = ext.length ? [UTType typeWithFilenameExtension:ext] : nil;
+                    if (type) {
+                        [types addObject:type];
+                    }
+                }
+                if (types.count > 0) {
+                    panel.allowedContentTypes = types;
                 }
             }
         }

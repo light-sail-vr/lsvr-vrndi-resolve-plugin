@@ -199,6 +199,66 @@ int main()
               "undersized map request fails soft");
     }
 
+    // ---- standalone ILPD files -------------------------------------------
+    // tests/fixtures/custom_rig.ilpd is synthetic, laid out like the generic
+    // ILPDs Resolve ships (square 7200² sensor, no calibrationLimitRadialAngle)
+    // with an identity left rectification so its center is analytic.
+    check(ndi_brawmap::isILPDPath("/rigs/custom_rig.ilpd"), "isILPDPath: .ilpd");
+    check(ndi_brawmap::isILPDPath("C:\\rigs\\cam.4f1e.ILPD"), "isILPDPath: case-insensitive");
+    check(!ndi_brawmap::isILPDPath("/clips/A001.braw"), "isILPDPath: .braw is not ILPD");
+    check(!ndi_brawmap::isILPDPath("/rigs/custom_rig.ilpd.braw"), "isILPDPath: extension must be last");
+    check(!ndi_brawmap::isILPDPath(".ilpd") && !ndi_brawmap::isILPDPath("ilpd") &&
+              !ndi_brawmap::isILPDPath(""),
+          "isILPDPath: bare extension / empty is not a file");
+    {
+        std::string ilpdJson;
+        error.clear();
+        const bool read = ndi_brawmap::readILPDFile("tests/fixtures/custom_rig.ilpd", &ilpdJson, &error);
+        check(read, "ILPD fixture reads");
+        ndi_brawmap::LensCalibration rig;
+        const bool parsed = read && ndi_brawmap::parseCalibrationJSON(ilpdJson, &rig, &error);
+        check(parsed, "ILPD fixture parses");
+        if (!parsed) std::fprintf(stderr, "  ILPD error: %s\n", error.c_str());
+        if (parsed) {
+            check(rig.generator == "Synthetic custom-rig fixture (NDIOutput tests)", "ILPD generator");
+            check(rig.left.imageWidth == 7200 && rig.left.imageHeight == 7200, "ILPD imageSize");
+            expectNear(rig.left.calibLimitDeg, 180.0, 1e-12,
+                       "absent calibrationLimitRadialAngle leaves the full sphere");
+            expectNear(rig.right.cx, 3610.0, 1e-12, "ILPD right eye keeps its own intrinsics");
+            expectNear(rig.left.maskRadiusDeg, 75.0, 1e-3, "ILPD mask circle radius");
+
+            // Odd size puts a texel exactly on lon = lat = 0: with identity
+            // rectification it must sample the principal point.
+            ndi_stmap::STMapImage rigLeft, rigRight;
+            check(ndi_brawmap::generateLensMaps(rig, 65, false, &rigLeft, &rigRight, &error),
+                  "ILPD maps generate");
+            expectNear(texel(rigLeft, 32, 32)[0], (3600.0 + 0.5) / 7200.0, 1e-6,
+                       "ILPD center texel u = principal point");
+            expectNear(texel(rigLeft, 32, 32)[1], 1.0 - (3600.0 + 0.5) / 7200.0, 1e-6,
+                       "ILPD center texel v = principal point");
+            check(std::fabs(texel(rigLeft, 32, 32)[0] - texel(rigRight, 32, 32)[0]) > 1e-4,
+                  "ILPD eyes differ (right is rotated and offset)");
+        }
+    }
+    {
+        std::string bomJson;
+        ndi_brawmap::LensCalibration rig;
+        error.clear();
+        check(ndi_brawmap::readILPDFile("tests/fixtures/custom_rig_bom.ilpd", &bomJson, &error) &&
+                  ndi_brawmap::parseCalibrationJSON(bomJson, &rig, &error),
+              "ILPD with a UTF-8 BOM parses");
+    }
+    {
+        std::string missing;
+        error.clear();
+        check(!ndi_brawmap::readILPDFile("tests/fixtures/does_not_exist.ilpd", &missing, &error) &&
+                  error.find("cannot open") != std::string::npos,
+              "missing ILPD fails soft");
+        error.clear();
+        check(!ndi_brawmap::readILPDFile("", &missing, &error) && !error.empty(),
+              "empty ILPD path fails soft");
+    }
+
     // ---- locale independence --------------------------------------------
     // strtod-based parsing breaks in comma-decimal locales; ours must not.
     if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") != nullptr ||
