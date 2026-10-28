@@ -34,18 +34,17 @@
     valid while z+xi > 0 and the ray is within calibrationLimitRadialAngle
     of the axis. (Cross-check: a ray at half the stated horizontal FOV lands
     on the sensor edge to 0.1%.)
-  - Extrinsics "dualRectification": matched to Apple's own reference,
-    ImmersiveCameraLensDefinition.generateSTMap (ImmersiveMediaSupport,
-    macOS 26+), which applies the quaternion twice — once in this CV frame
-    and once in visionOS's y-up/z-back frame (F = diag(1,-1,-1)):
-        d_cam = (F·R(quat)·F) · R(quat) · d_rig
-    The x (pitch) part therefore doubles while the y/z (yaw/roll) parts
-    cancel. URSA factory quats are ~pure pitch, so the old single R(quat)
-    only under-tilted those; underwater-housing ILPDs carry opposite ±3° y
-    components per eye, which a single R turned into ~6° of false
-    horizontal disparity (LEARNINGS.md 2026-10-28). Against Apple's maps
-    this model is sub-texel on a factory BRAW (rms ~5 px of 8160) and leaves
-    a ~13 px common-mode vertical residual on housing ILPDs.
+  - Extrinsics "dualRectification" quaternions are expressed in visionOS's
+    y-up/z-back frame, so in this CV frame (F = diag(1,-1,-1)):
+        d_cam = F·R(quat)·F · d_rig
+    i.e. the pitch (x) term acts as written and the yaw/roll (y/z) terms
+    flip sign. Pinned by stereo measurement on real underwater-housing
+    footage (LEARNINGS.md 2026-10-28): this reading puts the far field at
+    -0.5° horizontal disparity with zero vertical disparity, while the plain
+    CV reading R(quat) diverged the eyes by ~+11° and Apple's preview
+    generator (ImmersiveCameraLensDefinition.generateSTMap, which applies
+    (F·R·F)·R) by ~+5.4°. Factory URSA quats are near-pure pitch, where
+    F·R·F equals R, so BRAW-embedded calibrations barely moved.
   - Each output map is a per-eye 180°x180° equirect (the clip-level
     presentation FOV): texel (r top-down, c) → lon = ((c+.5)/size - .5)·180°
     (+right), lat = (.5 - (r+.5)/size)·180° (+up), direction in the rig frame
@@ -650,24 +649,18 @@ inline void quatToMatrix(const double q[4], double R[3][3])
     R[2][2] = 1 - 2 * (x * x + y * y);
 }
 
-// The rig-to-camera rotation Apple's generator applies for a
-// dualRectification quaternion (header comment): (F·R·F)·R with
-// F = diag(1,-1,-1). Conjugating by F negates R's y and z terms.
+// The rig-to-camera rotation for a dualRectification quaternion (header
+// comment): F·R·F with F = diag(1,-1,-1) — conjugating by F negates R's
+// off-diagonal terms that mix x with y/z, flipping the yaw and roll senses.
 inline void rectificationMatrix(const double q[4], double M[3][3])
 {
     double R[3][3];
     quatToMatrix(q, R);
-    double Rf[3][3];
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
             const double si = (i == 0) ? 1.0 : -1.0;
             const double sj = (j == 0) ? 1.0 : -1.0;
-            Rf[i][j] = si * sj * R[i][j];
-        }
-    }
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            M[i][j] = Rf[i][0] * R[0][j] + Rf[i][1] * R[1][j] + Rf[i][2] * R[2][j];
+            M[i][j] = si * sj * R[i][j];
         }
     }
 }

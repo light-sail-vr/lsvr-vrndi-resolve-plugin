@@ -96,16 +96,16 @@ right camera's left). Empirically the two candidate conventions differ by the
 resolution; measured inter-eye vertical disparity is sub-pixel either way. If
 ever proven wrong against a Vision Pro reference, the fix is one transpose.
 
-> **Superseded 2026-10-28 (ILPD work, LEARNINGS.md):** cross-checked against
-> Apple's own generator (`ImmersiveCameraLensDefinition.generateSTMap`,
-> ImmersiveMediaSupport, macOS 26+), the convention is neither `R` nor `Rᵀ` but
-> `d_cam = (F·R·F)·R·d_rig` with `F = diag(1,−1,−1)`: the quaternion applied
-> once in this CV frame and once in visionOS's y-up/z-back frame. Pitch (x)
-> doubles; yaw/roll (y/z) cancel. The URSA quats measured here are ~pure
-> pitch, which is why the single-`R` reading looked right on this clip.
-> Underwater-housing ILPDs carry opposite ±3° y terms per eye; single `R` made
-> those ~6° of false horizontal disparity. The new model is sub-texel against
-> Apple's maps on factory BRAW and housing ILPDs alike.
+> **Superseded 2026-10-28 (ILPD work, LEARNINGS.md):** the quaternion is
+> expressed in visionOS's y-up/z-back frame, so in this CV frame
+> `d_cam = F·R·F·d_rig` with `F = diag(1,−1,−1)`: pitch acts as written,
+> yaw and roll flip sign. The URSA quats measured here are ~pure pitch, where
+> `F·R·F = R`, which is why the plain reading looked right on this clip.
+> Underwater-housing ILPDs carry opposite ±3° y terms per eye: the plain `R`
+> diverged real housing footage by ~+11°, and Apple's preview generator
+> (`ImmersiveCameraLensDefinition.generateSTMap`, which applies `(F·R·F)·R`)
+> by ~+5.4°. `F·R·F` measures −0.5° in the far field with zero vertical
+> disparity — the physically expected answer for a 50 mm baseline.
 
 **Equirect mapping (per eye):** map texel row r (top-down), column c, map size
 W×H → `lon = ((c+0.5)/W − 0.5)·180°` (+right), `lat = (0.5 − (r+0.5)/H)·180°`
