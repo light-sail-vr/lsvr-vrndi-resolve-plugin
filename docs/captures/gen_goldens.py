@@ -6,7 +6,9 @@ Replicates the exact generateEyeMap() spec in double precision:
     lon = ((c+0.5)/size - 0.5)*pi     (+ right)
     lat = (0.5 - (r+0.5)/size)*pi     (+ up)
     d_rig = (cos(lat)sin(lon), -sin(lat), cos(lat)cos(lon))   x-right y-down z-fwd
-    d_cam = R(quat) . d_rig
+    d_cam = (F.R(quat).F) . R(quat) . d_rig,  F = diag(1,-1,-1)
+      (Apple's dualRectification convention, matched against
+       ImmersiveMediaSupport's generateSTMap — LEARNINGS.md 2026-10-28)
     invalid if d_cam.z < cos(calibLimit) or (d_cam.z + xi) <= 1e-9
     m = (x,y)/(z+xi); r2; L = 1+k1 r2+k2 r2^2
     xd = L mx + 2 p1 mx my + p2 (r2+2mx^2)
@@ -15,9 +17,9 @@ Replicates the exact generateEyeMap() spec in double precision:
     u_st = (u_px+0.5)/W;  v_st = 1-(v_px+0.5)/H
   mask ON additionally invalid if d_rig.z < cos(maskRadius)
 """
-import json, math
+import json, math, sys
 
-cal = json.load(open("/Users/matthewcelia/Documents/repos/LSVR_ResolveOFX_NDIOutput/tests/fixtures/ursa_immersive_calibration.json"))
+cal = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "tests/fixtures/ursa_immersive_calibration.json"))
 views = {v["viewDescription"]: v for v in cal["captureDevice"]["views"]}
 
 def R_of(q):
@@ -52,7 +54,10 @@ def texel(view, size, r, c):
     lon = ((c + 0.5)/size - 0.5)*math.pi
     lat = (0.5 - (r + 0.5)/size)*math.pi
     d_rig = (math.cos(lat)*math.sin(lon), -math.sin(lat), math.cos(lat)*math.cos(lon))
-    R = R_of(view["extrinsics"][0]["quat"])
+    R1 = R_of(view["extrinsics"][0]["quat"])
+    F = [1, -1, -1]
+    Rf = [[F[i]*F[j]*R1[i][j] for j in range(3)] for i in range(3)]
+    R = [[sum(Rf[i][k]*R1[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
     d_cam = tuple(sum(R[i][j]*d_rig[j] for j in range(3)) for i in range(3))
     return project(view, d_cam), d_rig
 

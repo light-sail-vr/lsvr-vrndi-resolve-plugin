@@ -34,12 +34,18 @@
     valid while z+xi > 0 and the ray is within calibrationLimitRadialAngle
     of the axis. (Cross-check: a ray at half the stated horizontal FOV lands
     on the sensor edge to 0.1%.)
-  - Extrinsics "dualRectification" quaternions are rig-to-camera (the CV
-    world-to-camera convention — the only reading consistent with the right
-    eye's translation (-64,0,0) mm given x-right): d_cam = R(quat) · d_rig.
-    The two candidate conventions differ by ~0.04° between eyes (sub-pixel at
-    any stream size); if a device cross-check ever proves this wrong the fix
-    is transposing quatToMatrix.
+  - Extrinsics "dualRectification": matched to Apple's own reference,
+    ImmersiveCameraLensDefinition.generateSTMap (ImmersiveMediaSupport,
+    macOS 26+), which applies the quaternion twice — once in this CV frame
+    and once in visionOS's y-up/z-back frame (F = diag(1,-1,-1)):
+        d_cam = (F·R(quat)·F) · R(quat) · d_rig
+    The x (pitch) part therefore doubles while the y/z (yaw/roll) parts
+    cancel. URSA factory quats are ~pure pitch, so the old single R(quat)
+    only under-tilted those; underwater-housing ILPDs carry opposite ±3° y
+    components per eye, which a single R turned into ~6° of false
+    horizontal disparity (LEARNINGS.md 2026-10-28). Against Apple's maps
+    this model is sub-texel on a factory BRAW (rms ~5 px of 8160) and leaves
+    a ~13 px common-mode vertical residual on housing ILPDs.
   - Each output map is a per-eye 180°x180° equirect (the clip-level
     presentation FOV): texel (r top-down, c) → lon = ((c+.5)/size - .5)·180°
     (+right), lat = (.5 - (r+.5)/size)·180° (+up), direction in the rig frame
@@ -349,7 +355,7 @@ struct LensView {
     double fx = 0, fy = 0, cx = 0, cy = 0, skew = 0;
     double k1 = 0, k2 = 0, xi = 0, p1 = 0, p2 = 0;
     double calibLimitDeg = 180.0;   // rays past this angle off-axis are invalid
-    double quat[4] = {0, 0, 0, 1};  // x,y,z,w — rig-to-camera rotation
+    double quat[4] = {0, 0, 0, 1};  // x,y,z,w — dualRectification quat (see rectificationMatrix)
     int imageWidth = 0, imageHeight = 0;
     double maskRadiusDeg = -1.0;    // <=0: clip carries no usable mask
     double maskEdgeDeg = 0.0;       // feather width (informational for now)
@@ -644,6 +650,28 @@ inline void quatToMatrix(const double q[4], double R[3][3])
     R[2][2] = 1 - 2 * (x * x + y * y);
 }
 
+// The rig-to-camera rotation Apple's generator applies for a
+// dualRectification quaternion (header comment): (F·R·F)·R with
+// F = diag(1,-1,-1). Conjugating by F negates R's y and z terms.
+inline void rectificationMatrix(const double q[4], double M[3][3])
+{
+    double R[3][3];
+    quatToMatrix(q, R);
+    double Rf[3][3];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            const double si = (i == 0) ? 1.0 : -1.0;
+            const double sj = (j == 0) ? 1.0 : -1.0;
+            Rf[i][j] = si * sj * R[i][j];
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            M[i][j] = Rf[i][0] * R[0][j] + Rf[i][1] * R[1][j] + Rf[i][2] * R[2][j];
+        }
+    }
+}
+
 } // namespace detail
 
 // Generate one eye's 180°x180° equirect STMap (size x size texels) from its
@@ -672,7 +700,7 @@ inline bool generateEyeMap(const LensView& view, int size, bool applyMask,
     }
 
     double R[3][3];
-    detail::quatToMatrix(view.quat, R);
+    detail::rectificationMatrix(view.quat, R);
     const MeiProjector projector(view);
     const bool maskOn = applyMask && view.maskRadiusDeg > 0.0;
     const double cosMask = maskOn ? std::cos(view.maskRadiusDeg * (M_PI / 180.0)) : -2.0;

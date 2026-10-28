@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Camera Metadata from an ILPD file.** In **Equirect (Camera Metadata)** with **Camera Clip Source: Manual Path**, the **Camera Clip** field now also takes an Apple Immersive lens calibration file (`.ilpd`, Immersive Lens Profile Data) as well as a BRAW clip. Use it for rigs that don't embed calibration in the clip, such as custom or underwater housings. An ILPD holds the same calibration an URSA Cine Immersive BRAW embeds, so the warp, Metadata Map Size and Metadata Edge Mask behave exactly as they do for BRAW. The Browse button lists both `.braw` and `.ilpd` files. The ILPD must use the Mei-Rives lens model (`radial2ProjectionOffsetTangential2`) that Apple Immersive calibrations use; with any other model, Stream Status reports the camera metadata as invalid, the log says why, and the stream passes through unwarped. Timeline (Auto) still reads only BRAW-embedded calibration.
 
+### Fixed
+- **Camera Metadata stereo geometry now matches Apple's.** The plugin read the calibration's per-eye rectification rotation differently from Apple's own tools. Calibrations whose eyes are rotated in opposite directions, such as underwater-housing ILPDs, streamed with several degrees of extra horizontal disparity. The warp now matches Apple's reference to within a fraction of a map pixel. **BRAW-embedded calibrations change too:** the picture's up/down tilt now follows Apple's, by about 0.4° on most URSA Cine Immersive bodies and by up to several degrees on bodies whose calibration carries a larger tilt.
+
 ## [1.17.0] - 2026-10-20
 
 ### Fixed
