@@ -5,6 +5,11 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **macOS: Resolve's scripting no longer breaks after you quit and reopen Resolve.** With **Camera Clip Source: Timeline (Auto)** or **Timeline Color: Auto**, the plugin's background helper inherited Resolve's network listeners: the scripting port and NDI's. When Resolve quit, the helper kept running and held those ports. On the next launch Timeline (Auto) and Timeline Color stopped following the timeline, and scripts and scripting tools couldn't reach Resolve until the leftover `fuscript` process was killed. The helper now starts without any of Resolve's open files or sockets and exits with Resolve. Windows was not affected.
+
 ## [1.17.0] - 2026-10-20
 
 ### Fixed
