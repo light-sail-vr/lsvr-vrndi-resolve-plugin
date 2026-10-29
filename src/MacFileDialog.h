@@ -10,7 +10,8 @@
 extern "C" {
 #endif
 
-// Native modal NSOpenPanel for picking one file with the given extension.
+// Native modal NSOpenPanel for picking one file with the given extension
+// (or several, ';'-separated: "braw;ilpd").
 // Exists because Resolve renders kOfxParamStringIsFilePath string params as
 // plain text fields with no browse control (verified 2026-08-30) — the plugin
 // pops its own panel from a push-button param instead.

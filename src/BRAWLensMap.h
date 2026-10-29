@@ -15,6 +15,12 @@
   fixture tests/fixtures/ursa_immersive_calibration.json). The SDK-facing
   extraction of the JSON from a .braw lives in src/BRAWImmersiveReader.cpp.
 
+  The same JSON also travels as a standalone ILPD file (Immersive Lens
+  Profile Data, *.ilpd) — Apple's format for lens calibration of rigs that
+  don't embed it in the clip (custom and underwater housings; Resolve ships
+  generic eqd/gap ILPDs under .../DaVinci Resolve/Apple Immersive/Factory/).
+  readILPDFile below loads one straight off disk; no SDK involved.
+
   Geometry (verified numerically and visually against real media —
   docs/2026-08-30-braw-immersive-metadata-projection.md):
 
@@ -28,12 +34,17 @@
     valid while z+xi > 0 and the ray is within calibrationLimitRadialAngle
     of the axis. (Cross-check: a ray at half the stated horizontal FOV lands
     on the sensor edge to 0.1%.)
-  - Extrinsics "dualRectification" quaternions are rig-to-camera (the CV
-    world-to-camera convention — the only reading consistent with the right
-    eye's translation (-64,0,0) mm given x-right): d_cam = R(quat) · d_rig.
-    The two candidate conventions differ by ~0.04° between eyes (sub-pixel at
-    any stream size); if a device cross-check ever proves this wrong the fix
-    is transposing quatToMatrix.
+  - Extrinsics "dualRectification" quaternions are expressed in visionOS's
+    y-up/z-back frame, so in this CV frame (F = diag(1,-1,-1)):
+        d_cam = F·R(quat)·F · d_rig
+    i.e. the pitch (x) term acts as written and the yaw/roll (y/z) terms
+    flip sign. Pinned by stereo measurement on real underwater-housing
+    footage (LEARNINGS.md 2026-10-28): this reading puts the far field at
+    -0.5° horizontal disparity with zero vertical disparity, while the plain
+    CV reading R(quat) diverged the eyes by ~+11° and Apple's preview
+    generator (ImmersiveCameraLensDefinition.generateSTMap, which applies
+    (F·R·F)·R) by ~+5.4°. Factory URSA quats are near-pure pitch, where
+    F·R·F equals R, so BRAW-embedded calibrations barely moved.
   - Each output map is a per-eye 180°x180° equirect (the clip-level
     presentation FOV): texel (r top-down, c) → lon = ((c+.5)/size - .5)·180°
     (+right), lat = (.5 - (r+.5)/size)·180° (+up), direction in the rig frame
@@ -343,7 +354,7 @@ struct LensView {
     double fx = 0, fy = 0, cx = 0, cy = 0, skew = 0;
     double k1 = 0, k2 = 0, xi = 0, p1 = 0, p2 = 0;
     double calibLimitDeg = 180.0;   // rays past this angle off-axis are invalid
-    double quat[4] = {0, 0, 0, 1};  // x,y,z,w — rig-to-camera rotation
+    double quat[4] = {0, 0, 0, 1};  // x,y,z,w — dualRectification quat (see rectificationMatrix)
     int imageWidth = 0, imageHeight = 0;
     double maskRadiusDeg = -1.0;    // <=0: clip carries no usable mask
     double maskEdgeDeg = 0.0;       // feather width (informational for now)
@@ -534,6 +545,59 @@ inline bool parseCalibrationJSON(const std::string& json, LensCalibration* out, 
 }
 
 // ---------------------------------------------------------------------------
+// Standalone ILPD files
+// ---------------------------------------------------------------------------
+
+// True when path names an ILPD file (case-insensitive ".ilpd" extension).
+// The plugin routes these to readILPDFile instead of the BRAW SDK.
+inline bool isILPDPath(const std::string& path)
+{
+    static const char kExt[] = ".ilpd";
+    const size_t n = sizeof(kExt) - 1;
+    if (path.size() <= n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        char c = path[path.size() - n + i];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != kExt[i]) return false;
+    }
+    return true;
+}
+
+// Read an ILPD file (UTF-8 path on every platform) into *jsonOut, ready for
+// parseCalibrationJSON. A leading UTF-8 BOM — hand-edited files picked up on
+// Windows — is dropped. Fails soft with a human-readable *error.
+inline bool readILPDFile(const std::string& path, std::string* jsonOut, std::string* error)
+{
+    const auto fail = [&](const std::string& msg) {
+        if (error) *error = msg;
+        return false;
+    };
+    long long mtime = 0, size = 0;
+    if (path.empty() || !ndi_path::statUtf8(path.c_str(), &mtime, &size)) {
+        return fail("cannot open ILPD '" + path + "'");
+    }
+    if (size <= 0 || static_cast<unsigned long long>(size) > kMaxJsonBytes) {
+        return fail("ILPD file is empty or larger than 8 MB");
+    }
+    std::FILE* f = ndi_path::fopenUtf8(path.c_str(), "rb");
+    if (!f) {
+        return fail("cannot open ILPD '" + path + "'");
+    }
+    std::string text(static_cast<size_t>(size), '\0');
+    const size_t got = std::fread(&text[0], 1, text.size(), f);
+    std::fclose(f);
+    if (got != text.size()) {
+        return fail("short read on ILPD '" + path + "'");
+    }
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF) {
+        text.erase(0, 3);
+    }
+    *jsonOut = std::move(text);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Mei-Rives projection + map generation
 // ---------------------------------------------------------------------------
 
@@ -585,6 +649,22 @@ inline void quatToMatrix(const double q[4], double R[3][3])
     R[2][2] = 1 - 2 * (x * x + y * y);
 }
 
+// The rig-to-camera rotation for a dualRectification quaternion (header
+// comment): F·R·F with F = diag(1,-1,-1) — conjugating by F negates R's
+// off-diagonal terms that mix x with y/z, flipping the yaw and roll senses.
+inline void rectificationMatrix(const double q[4], double M[3][3])
+{
+    double R[3][3];
+    quatToMatrix(q, R);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            const double si = (i == 0) ? 1.0 : -1.0;
+            const double sj = (j == 0) ? 1.0 : -1.0;
+            M[i][j] = si * sj * R[i][j];
+        }
+    }
+}
+
 } // namespace detail
 
 // Generate one eye's 180°x180° equirect STMap (size x size texels) from its
@@ -613,7 +693,7 @@ inline bool generateEyeMap(const LensView& view, int size, bool applyMask,
     }
 
     double R[3][3];
-    detail::quatToMatrix(view.quat, R);
+    detail::rectificationMatrix(view.quat, R);
     const MeiProjector projector(view);
     const bool maskOn = applyMask && view.maskRadiusDeg > 0.0;
     const double cosMask = maskOn ? std::cos(view.maskRadiusDeg * (M_PI / 180.0)) : -2.0;

@@ -6,7 +6,10 @@
 
 #include "MacTimelineWatch.h"
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -189,6 +192,56 @@ static void testSpawnPipedProcess()
                "failure reports an error and leaves no pid/fd behind");
 }
 
+static void testSpawnInheritsNoHostDescriptors()
+{
+    using ndi_timelinewatch_mac::spawnPipedProcess;
+
+    // Resolve opens its listening sockets (scripting 49152, NDI 5960/5961, ...)
+    // without close-on-exec. A helper that inherits them keeps them alive after
+    // Resolve quits; its own scripting reconnect then lands on the listener it
+    // holds, nobody accepts, and it blocks forever — never writing, so never
+    // seeing the EPIPE that should end it (LEARNINGS 2026-10-29). Model that
+    // with an inheritable listening socket on fd 9 (single digit so /bin/sh
+    // can name it) and ask the child whether fd 9 is open.
+    const int sock = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    const bool listening = sock >= 0 &&
+        bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 &&
+        listen(sock, 1) == 0 && dup2(sock, 9) == 9;
+    expectTrue(listening, "inheritable listening socket on fd 9");
+    if (sock >= 0 && sock != 9) {
+        close(sock);
+    }
+    if (!listening) {
+        return;
+    }
+    expectTrue((fcntl(9, F_GETFD) & FD_CLOEXEC) == 0, "fd 9 is inheritable, as Resolve's sockets are");
+
+    pid_t pid = -1;
+    int fd = -1;
+    std::string error;
+    const std::vector<std::string> argv = {
+        "/bin/sh", "-c", "if (: <&9) 2>/dev/null; then echo leaked; else echo clean; fi"};
+    std::string out;
+    if (spawnPipedProcess(argv, &pid, &fd, &error)) {
+        char buf[64];
+        ssize_t n;
+        while ((n = read(fd, buf, sizeof(buf))) > 0) {
+            out.append(buf, static_cast<size_t>(n));
+        }
+        close(fd);
+        int status = 0;
+        waitpid(pid, &status, 0);
+    }
+    close(9);
+    expectTrue(out == "clean\n", ("helper inherits no host descriptors (child saw: " +
+                                  (out.empty() ? std::string("nothing") : out.substr(0, out.find('\n'))) +
+                                  ")").c_str());
+}
+
 static void testExitsCleanly()
 {
     using ndi_timelinewatch_mac::exitsCleanly;
@@ -212,6 +265,7 @@ int main()
     testPython3CandidatePaths();
     testDescribeWaitStatus();
     testSpawnPipedProcess();
+    testSpawnInheritsNoHostDescriptors();
     testExitsCleanly();
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);

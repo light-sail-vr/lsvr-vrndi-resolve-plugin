@@ -28,7 +28,7 @@
   #define OutputBaseName "NDIOutput-" + AppVersion + "-Windows-x64"
 #endif
 
-#define AppName "NDI Output for DaVinci Resolve"
+#define AppName "VR.NDI Sender for DaVinci Resolve"
 #define BundleName "NDIOutput.ofx.bundle"
 #define RepoUrl "https://github.com/lightsailvr/ResolveOFX_NDIOutput"
 
