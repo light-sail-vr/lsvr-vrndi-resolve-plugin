@@ -172,9 +172,9 @@ static void ndiWinLog(const char* fmt, ...)
 // "DaVinci Resolve NDI Output").
 #define kDefaultSourceName "VR.NDI Sender"
 #define kPluginVersionMajor 1
-#define kPluginVersionMinor 17
+#define kPluginVersionMinor 18
 #define kPluginVersionPatch 0
-#define kPluginVersionString "1.17.0"
+#define kPluginVersionString "1.18.0"
 
 // Parameter names
 #define kParamSourceName "sourceName"
