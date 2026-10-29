@@ -58,7 +58,7 @@ static void testParentDirectory()
               "non-ASCII directory survives");
 }
 
-// One extension in, the two strings COMDLG_FILTERSPEC wants out.
+// One extension (or a list) in, the two strings COMDLG_FILTERSPEC wants out.
 static void testFilterStrings()
 {
     using ndi_windlg::filterLabel;
@@ -68,6 +68,13 @@ static void testFilterStrings()
     expectStr(filterPattern("braw"), "*.braw", "pattern for braw");
     expectStr(filterLabel("exr"), "EXR files (*.exr)", "label uppercases the extension");
     expectStr(filterLabel("braw"), "BRAW files (*.braw)", "label for braw");
+
+    // A ';'-separated list becomes one filter row matching any of them.
+    expectStr(filterPattern("braw;ilpd"), "*.braw;*.ilpd", "pattern for an extension list");
+    expectStr(filterLabel("braw;ilpd"), "BRAW/ILPD files (*.braw;*.ilpd)", "label for an extension list");
+    expectStr(filterPattern("braw;;ilpd;"), "*.braw;*.ilpd", "empty list entries are skipped");
+    expectStr(ndi_windlg::defaultExtension("braw;ilpd"), "braw", "default extension is the first");
+    expectStr(ndi_windlg::defaultExtension("exr"), "exr", "default extension of a single entry");
 }
 
 // The dialog's contract: outPath is written only on success; a path that

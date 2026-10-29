@@ -58,7 +58,7 @@ bool win_open_file_dialog(const char* message, const char* extension,
             dialog->SetTitle(wide.c_str());
         }
 
-        // One row for the extension, one escape hatch — mirroring the
+        // One row for the extension(s), one escape hatch — mirroring the
         // NSOpenPanel's allowedContentTypes plus the shell's usual "all
         // files" convention. The wstrings must outlive SetFileTypes' use
         // during Show(), hence the block-scope locals.
@@ -66,7 +66,7 @@ bool win_open_file_dialog(const char* message, const char* extension,
         if (extension && *extension &&
             utf8ToWide(ndi_windlg::filterLabel(extension).c_str(), &wLabel) &&
             utf8ToWide(ndi_windlg::filterPattern(extension).c_str(), &wPattern) &&
-            utf8ToWide(extension, &wExt)) {
+            utf8ToWide(ndi_windlg::defaultExtension(extension).c_str(), &wExt)) {
             const COMDLG_FILTERSPEC filters[] = {
                 {wLabel.c_str(), wPattern.c_str()},
                 {L"All files (*.*)", L"*.*"},

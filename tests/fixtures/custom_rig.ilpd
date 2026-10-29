@@ -1,0 +1,215 @@
+{
+    "generator": "Synthetic custom-rig fixture (NDIOutput tests)",
+    "generatorVersion": [
+        1,
+        0,
+        0
+    ],
+    "formatVersion": [
+        0,
+        1,
+        0
+    ],
+    "ambientCalTemp": 0.0,
+    "cameraID": "custom_rig",
+    "uuid": "00000000-0000-4000-8000-000000000001",
+    "captureDevice": {
+        "calStationName": "none",
+        "views": [
+            {
+                "viewDescription": "left",
+                "imageSize": [
+                    7200,
+                    7200
+                ],
+                "intrinsics": {
+                    "model": "radial2ProjectionOffsetTangential2",
+                    "fx": 5000.0,
+                    "fy": 5000.0,
+                    "skew": 0.0,
+                    "centerX": 3600.0,
+                    "centerY": 3600.0,
+                    "distortions": [
+                        -0.1,
+                        0.2,
+                        1.9,
+                        0.0,
+                        0.0
+                    ]
+                },
+                "extrinsics": [
+                    {
+                        "model": "dualRectification",
+                        "quat": [
+                            0.0,
+                            0.0,
+                            0.0,
+                            1.0
+                        ],
+                        "translation": [
+                            0.0,
+                            0.0,
+                            0.0
+                        ]
+                    }
+                ],
+                "opticalData": {
+                    "aperture": 0.0,
+                    "Fov": {
+                        "horizontal": 180.0,
+                        "vertical": 180.0
+                    }
+                },
+                "maskData": {
+                    "name": "custom_rig_circular",
+                    "edgeWidth": 5,
+                    "edgeTreatment": "linear",
+                    "isForVisionOS": true,
+                    "maskViewParameters": {
+                        "controlPoints": [
+                            [
+                                0.965926,
+                                0.0,
+                                -0.258819
+                            ],
+                            [
+                                0.683013,
+                                0.683013,
+                                -0.258819
+                            ],
+                            [
+                                0.0,
+                                0.965926,
+                                -0.258819
+                            ],
+                            [
+                                -0.683013,
+                                0.683013,
+                                -0.258819
+                            ],
+                            [
+                                -0.965926,
+                                0.0,
+                                -0.258819
+                            ],
+                            [
+                                -0.683013,
+                                -0.683013,
+                                -0.258819
+                            ],
+                            [
+                                -0.0,
+                                -0.965926,
+                                -0.258819
+                            ],
+                            [
+                                0.683013,
+                                -0.683013,
+                                -0.258819
+                            ]
+                        ]
+                    }
+                },
+                "processingParameters": {},
+                "lensOcclusionData": {}
+            },
+            {
+                "viewDescription": "right",
+                "imageSize": [
+                    7200,
+                    7200
+                ],
+                "intrinsics": {
+                    "model": "radial2ProjectionOffsetTangential2",
+                    "fx": 5000.0,
+                    "fy": 5000.0,
+                    "skew": 0.0,
+                    "centerX": 3610.0,
+                    "centerY": 3600.0,
+                    "distortions": [
+                        -0.1,
+                        0.2,
+                        1.9,
+                        0.0,
+                        0.0
+                    ]
+                },
+                "extrinsics": [
+                    {
+                        "model": "dualRectification",
+                        "quat": [
+                            0.0,
+                            0.0087265,
+                            0.0,
+                            0.9999619
+                        ],
+                        "translation": [
+                            -64.0,
+                            0.0,
+                            0.0
+                        ]
+                    }
+                ],
+                "opticalData": {
+                    "aperture": 0.0,
+                    "Fov": {
+                        "horizontal": 180.0,
+                        "vertical": 180.0
+                    }
+                },
+                "maskData": {
+                    "name": "custom_rig_circular",
+                    "edgeWidth": 5,
+                    "edgeTreatment": "linear",
+                    "isForVisionOS": true,
+                    "maskViewParameters": {
+                        "controlPoints": [
+                            [
+                                0.965926,
+                                0.0,
+                                -0.258819
+                            ],
+                            [
+                                0.683013,
+                                0.683013,
+                                -0.258819
+                            ],
+                            [
+                                0.0,
+                                0.965926,
+                                -0.258819
+                            ],
+                            [
+                                -0.683013,
+                                0.683013,
+                                -0.258819
+                            ],
+                            [
+                                -0.965926,
+                                0.0,
+                                -0.258819
+                            ],
+                            [
+                                -0.683013,
+                                -0.683013,
+                                -0.258819
+                            ],
+                            [
+                                -0.0,
+                                -0.965926,
+                                -0.258819
+                            ],
+                            [
+                                0.683013,
+                                -0.683013,
+                                -0.258819
+                            ]
+                        ]
+                    }
+                },
+                "processingParameters": {},
+                "lensOcclusionData": {}
+            }
+        ]
+    }
+}
