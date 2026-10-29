@@ -78,7 +78,7 @@ function Get-ArpEntry {
         foreach ($key in Get-ChildItem $root) {
             # Unreadable third-party keys must not abort the run ($ErrorActionPreference = Stop).
             $props = Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue
-            if ($props -and $props.DisplayName -like "NDI Output for DaVinci Resolve*") { return $props }
+            if ($props -and ($props.DisplayName -like "VR.NDI Sender for DaVinci Resolve*" -or $props.DisplayName -like "NDI Output for DaVinci Resolve*")) { return $props }
         }
     }
     return $null

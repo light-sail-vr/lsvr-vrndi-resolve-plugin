@@ -1,5 +1,5 @@
-﻿NDI Output for DaVinci Resolve
-==============================
+﻿VR.NDI Sender for DaVinci Resolve
+=================================
 
 An OpenFX plugin that streams the frame DaVinci Resolve renders as an NDI®
 source on your local network — GPU-accelerated on NVIDIA hardware.
@@ -11,7 +11,7 @@ Installs to:
 After installing
 ----------------
 1. Fully restart DaVinci Resolve — OpenFX plugins are only scanned at startup.
-2. Color page -> OpenFX -> LSVR -> NDIOutput; drag it onto a clip.
+2. Color page -> OpenFX -> LSVR -> VR.NDI Sender; drag it onto a clip.
 3. Start playback and open the stream in any NDI receiver — for example Studio
    Monitor from the free NDI Tools (https://ndi.video/tools/).
 

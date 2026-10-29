@@ -108,7 +108,7 @@ cat >> "$NOTES" <<'EOF'
 
 ### Install — macOS
 
-Download `NDIOutput-*-macOS.pkg`, double-click, done. Restart DaVinci Resolve, then find the plugin on the Color page under **OpenFX → LSVR → NDIOutput**. Requires macOS 13+ (Apple Silicon or Intel); the NDI runtime is included.
+Download `NDIOutput-*-macOS.pkg`, double-click, done. Restart DaVinci Resolve, then find the plugin on the Color page under **OpenFX → LSVR → VR.NDI Sender**. Requires macOS 13+ (Apple Silicon or Intel); the NDI runtime is included.
 
 The `.zip` contains the bare signed plugin bundle for manual installs into `/Library/OFX/Plugins`.
 EOF
@@ -118,7 +118,7 @@ if [ "$win_present" -eq 3 ]; then
 
 ### Install — Windows
 
-Download `NDIOutput-*-Windows-x64.exe` and run it (quit DaVinci Resolve first — the installer refuses to replace a loaded plugin). Restart Resolve, then find the plugin on the Color page under **OpenFX → LSVR → NDIOutput**. Requires 64-bit **x64** Windows 10/11 — **Windows on ARM is not supported**. The NDI runtime is included.
+Download `NDIOutput-*-Windows-x64.exe` and run it (quit DaVinci Resolve first — the installer refuses to replace a loaded plugin). Restart Resolve, then find the plugin on the Color page under **OpenFX → LSVR → VR.NDI Sender**. Requires 64-bit **x64** Windows 10/11 — **Windows on ARM is not supported**. The NDI runtime is included.
 
 The GPU-native path needs an NVIDIA GPU; on other hardware the plugin falls back to the CPU path automatically, which carries a lower practical resolution ceiling (use the Resolution control to stream Half or Quarter).
 

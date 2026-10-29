@@ -15,7 +15,7 @@ Setup (Tier 2): the patch chart on a timeline at its size, the NDI Output
 node alone on the Color page, Timeline Color resolving to --timeline
 (default Rec.709 Gamma 2.4 — an unmanaged DaVinci YRGB project). Then
 
-  tools/ndi_color_check.py --source "DaVinci Resolve NDI Output" --loop 300
+  tools/ndi_color_check.py --source "VR.NDI Sender" --loop 300
 
 and cycle NDI Output through the presets, holding each ~5 s; Ctrl-C (or the
 --loop time running out) prints one PASS/FAIL line per preset seen.

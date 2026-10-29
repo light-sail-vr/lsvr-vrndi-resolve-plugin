@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The plugin is now called VR.NDI Sender.** Resolve lists it under **OpenFX → LSVR → VR.NDI Sender** (it was NDIOutput), and the macOS and Windows installers use the new name. Projects that already use the plugin open as before, because its internal identifier hasn't changed. A newly added instance names its NDI source **VR.NDI Sender** (it was "DaVinci Resolve NDI Output"), so receivers list it as `<HOST> (VR.NDI Sender)`. The download file names (`NDIOutput-<version>-…`) are unchanged.
+
+### Added
+- **Plugin icon.** Resolve now shows the VR.NDI wordmark as the plugin's icon. The bundle used to ship its icon under a file name Resolve never looked for.
 ### Fixed
 - **macOS: Resolve's scripting no longer breaks after you quit and reopen Resolve.** With **Camera Clip Source: Timeline (Auto)** or **Timeline Color: Auto**, the plugin's background helper inherited Resolve's network listeners: the scripting port and NDI's. When Resolve quit, the helper kept running and held those ports. On the next launch Timeline (Auto) and Timeline Color stopped following the timeline, and scripts and scripting tools couldn't reach Resolve until the leftover `fuscript` process was killed. The helper now starts without any of Resolve's open files or sockets and exits with Resolve. Windows was not affected.
 ### Added
