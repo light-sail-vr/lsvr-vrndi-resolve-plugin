@@ -83,7 +83,7 @@ struct Options {
 void usage()
 {
     std::fprintf(stderr,
-        "usage: ndi_verify [--source <substring>] [--duration <s>] [--find-timeout <s>]\n"
+        "usage: ndi_verify [--source <name|substring>] [--duration <s>] [--find-timeout <s>]\n"
         "                  [--bandwidth highest|lowest] [--color fastest|best|uyvy|bgra]\n"
         "                  [--expect WxH] [--expect-fps N] [--expect-fourcc UYVY]\n"
         "                  [--expect-color \"Rec.709 Gamma 2.4\"|none]\n"
@@ -476,9 +476,12 @@ int main(int argc, char** argv)
         NDIlib_find_wait_for_sources(finder, 500);
         sources = NDIlib_find_get_current_sources(finder, &count);
         chosen = -1;
+        // An exact name wins over substring hits: "MAC (DaVinci Resolve NDI
+        // Output)" is also a substring of "LSVR-LPK-MAC (DaVinci ...)".
         for (uint32_t i = 0; i < count; ++i) {
             const std::string name = sources[i].p_ndi_name ? sources[i].p_ndi_name : "";
-            if (opt.source.empty() || name.find(opt.source) != std::string::npos) { chosen = static_cast<int>(i); break; }
+            if (name == opt.source) { chosen = static_cast<int>(i); break; }
+            if (chosen < 0 && (opt.source.empty() || name.find(opt.source) != std::string::npos)) chosen = static_cast<int>(i);
         }
         if (chosen >= 0 && !opt.listOnly) break;
     }
