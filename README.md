@@ -1,4 +1,4 @@
-# NDI Output Plugin for DaVinci Resolve
+# VR.NDI Sender for DaVinci Resolve
 
 A modern OpenFX plugin that sends video frames from DaVinci Resolve to NDI (Network Device Interface) for streaming over the network.
 
@@ -22,7 +22,7 @@ A modern OpenFX plugin that sends video frames from DaVinci Resolve to NDI (Netw
 
 ## Installation
 
-Grab the installer for your platform from the [latest release](https://github.com/lightsailvr/ResolveOFX_NDIOutput/releases/latest), then **restart DaVinci Resolve** — OFX plugins are only scanned at startup — and find the plugin on the Color page under **OpenFX → LSVR → NDIOutput**.
+Grab the installer for your platform from the [latest release](https://github.com/lightsailvr/ResolveOFX_NDIOutput/releases/latest), then **restart DaVinci Resolve** — OFX plugins are only scanned at startup — and find the plugin on the Color page under **OpenFX → LSVR → VR.NDI Sender**.
 
 **macOS**: download `NDIOutput-<version>-macOS.pkg` and double-click it (signed and notarized; installs to `/Library/OFX/Plugins`).
 
@@ -41,10 +41,10 @@ sudo make install   # install to /Library/OFX/Plugins
 
 ## Usage
 
-1. **Add the Effect**: In DaVinci Resolve, go to the Color page and add "NDI Output" from the LSVR category in the OpenFX panel.
+1. **Add the Effect**: In DaVinci Resolve, go to the Color page and add "VR.NDI Sender" from the LSVR category in the OpenFX panel.
 
 2. **Configure Parameters**:
-   - **NDI Source Name**: Set the name that will appear on the network (default: "DaVinci Resolve NDI Output")
+   - **NDI Source Name**: Set the name that will appear on the network (default: "VR.NDI Sender"; "DaVinci Resolve NDI Output" before v1.18)
    - **Enable NDI Output**: Toggle to start/stop streaming (default: enabled)
    - **Frame Rate**: Set the output frame rate (default: 30 fps)
    - **Resolution**: Stream at Full, Half, or Quarter of the incoming frame size (default: Half)
@@ -95,7 +95,7 @@ The project uses a modern, streamlined build system:
 │   ├── OutputColor.h / CubeLUT.h    # Output Color presets, .cube reader, lsvr_color tag
 │   ├── TimelineColor.h              # Timeline Color = Auto: OFX colourspace + Resolve settings
 │   ├── NDIOutputPlugin.h            # Header file
-│   └── LSVR.NDIOutput.png           # Plugin icon
+│   └── LSVR.NDIOutput.png           # Plugin icon (file name must match the plugin identifier)
 ├── scripts/
 │   ├── increment_version.sh         # Auto-increment patch version
 │   └── set_version.sh               # Manual version management

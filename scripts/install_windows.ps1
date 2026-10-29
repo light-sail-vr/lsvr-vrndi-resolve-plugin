@@ -68,7 +68,7 @@ if ($ResetCache) {
 }
 
 Write-Host ""
-Write-Host "Next (Tier 1-2, human): start Resolve, add the NDI Output effect,"
+Write-Host "Next (Tier 1-2, human): start Resolve, add the VR.NDI Sender effect,"
 Write-Host "press play, and verify the stream in NDI Studio Monitor on a second"
 Write-Host "machine. Expect a Windows Firewall prompt on the FIRST send - allow"
 Write-Host "on private networks, or the stream stays invisible off-machine."

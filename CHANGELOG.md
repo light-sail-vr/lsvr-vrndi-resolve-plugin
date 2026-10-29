@@ -5,6 +5,14 @@ All notable changes to the NDI Output Plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The plugin is now called VR.NDI Sender.** Resolve lists it under **OpenFX → LSVR → VR.NDI Sender** (it was NDIOutput), and the macOS and Windows installers use the new name. Projects that already use the plugin open as before, because its internal identifier hasn't changed. A newly added instance names its NDI source **VR.NDI Sender** (it was "DaVinci Resolve NDI Output"), so receivers list it as `<HOST> (VR.NDI Sender)`. The download file names (`NDIOutput-<version>-…`) are unchanged.
+
+### Added
+- **Plugin icon.** Resolve now shows the VR.NDI wordmark as the plugin's icon. The bundle used to ship its icon under a file name Resolve never looked for.
+
 ## [1.17.0] - 2026-10-20
 
 ### Fixed

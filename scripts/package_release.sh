@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Build a signed, notarized macOS installer (.pkg) for the NDI Output plugin,
+# Build a signed, notarized macOS installer (.pkg) for the VR.NDI Sender plugin,
 # plus a signed .zip of the bare bundle for manual installs.
 #
 # Usage: ./scripts/package_release.sh [--skip-notarize] [--skip-tests] [--host-arch-only]
@@ -186,10 +186,10 @@ mkdir -p "$RES"
 cp LICENSE "$RES/License.txt"
 cat > "$RES/Readme.html" <<EOF
 <!DOCTYPE html><html><body style="font-family:-apple-system, Helvetica, sans-serif; font-size:13px">
-<h2>NDI Output for DaVinci Resolve v$VERSION</h2>
-<p>This installs the <b>NDIOutput</b> OpenFX plugin into <code>/Library/OFX/Plugins</code>.
+<h2>VR.NDI Sender for DaVinci Resolve v$VERSION</h2>
+<p>This installs the <b>VR.NDI Sender</b> OpenFX plugin into <code>/Library/OFX/Plugins</code>.
 After installing, <b>restart DaVinci Resolve</b>, then find the plugin on the Color page
-under OpenFX &rarr; LSVR &rarr; NDIOutput.</p>
+under OpenFX &rarr; LSVR &rarr; VR.NDI Sender.</p>
 <p>The plugin streams the rendered frame as an NDI&reg; source on your local
 network. Receive it with any NDI application &mdash; e.g. the free
 <a href="https://ndi.video/tools/">NDI Tools</a>.</p>
@@ -207,7 +207,7 @@ DIST_XML="$DIST/distribution.xml"
 cat > "$DIST_XML" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-    <title>NDI Output for DaVinci Resolve $VERSION</title>
+    <title>VR.NDI Sender for DaVinci Resolve $VERSION</title>
     <license file="License.txt"/>
     <readme file="Readme.html"/>
     <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>

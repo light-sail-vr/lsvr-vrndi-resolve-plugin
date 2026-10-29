@@ -132,7 +132,7 @@ $(BUNDLE_EXECUTABLE): $(OBJECTS) | bundle_structure
 bundle_structure:
 	mkdir -p $(BUNDLE_NAME)/Contents/MacOS
 	mkdir -p $(BUNDLE_NAME)/Contents/Resources
-	cp BaldavengerOFX.NDIOutput.png $(BUNDLE_NAME)/Contents/Resources/
+	cp src/LSVR.NDIOutput.png $(BUNDLE_NAME)/Contents/Resources/
 	cp Info.plist $(BUNDLE_NAME)/Contents/
 	cp src/ndi_timeline_watch.py $(BUNDLE_NAME)/Contents/Resources/
 	cp src/ndi_timeline_watch.lua $(BUNDLE_NAME)/Contents/Resources/

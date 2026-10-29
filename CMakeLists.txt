@@ -301,6 +301,9 @@ install(TARGETS NDIOutput RUNTIME DESTINATION "${NDI_BUNDLE_BIN_DIR}")
 # fuscript beside them.
 install(FILES src/ndi_timeline_watch.lua src/ndi_timeline_watch.py
         DESTINATION "NDIOutput.ofx.bundle/Contents/Resources")
+# Plugin icon: OFX hosts look for Contents/Resources/<plugin identifier>.png.
+install(FILES src/LSVR.NDIOutput.png
+        DESTINATION "NDIOutput.ofx.bundle/Contents/Resources")
 if(NOT NDI_USING_STUB)
     install(FILES
         "${NDI_SDK_PATH}/Bin/x64/${NDI_DLL_NAME}.dll"

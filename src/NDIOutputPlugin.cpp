@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 /*
-  NDI Output Plugin for OpenFX with GPU Acceleration
+  VR.NDI Sender: NDI output plugin for OpenFX with GPU acceleration
   Sends video frames to NDI (Network Device Interface) for streaming over network.
   Built on the Standard (royalty-free) NDI SDK - never the Advanced SDK.
   
@@ -161,13 +161,16 @@ static void ndiWinLog(const char* fmt, ...)
 #endif // _WIN32
 
 // Plugin constants
-#define kPluginName "NDIOutput"
+#define kPluginName "VR.NDI Sender"
 #define kPluginGrouping "LSVR"
 #define kPluginDescription \
-"NDI Output v" kPluginVersionString " (GPU-Accelerated): GPU-accelerated NDI streaming. \n" \
+"VR.NDI Sender v" kPluginVersionString " (GPU-Accelerated): GPU-accelerated NDI streaming. \n" \
 "Configure the NDI source name, GPU acceleration, and enable/disable the output stream. \n" \
 "Version: " kPluginVersionString " - GPU-Accelerated NDI"
 #define kPluginIdentifier "LSVR.NDIOutput"
+// The NDI source name a new instance starts with (v1.17 and earlier:
+// "DaVinci Resolve NDI Output").
+#define kDefaultSourceName "VR.NDI Sender"
 #define kPluginVersionMajor 1
 #define kPluginVersionMinor 17
 #define kPluginVersionPatch 0
@@ -289,7 +292,7 @@ static void ndiWinLog(const char* fmt, ...)
 // Version Display Parameter
 #define kParamVersionLabel "versionLabel"
 #define kParamVersionLabelLabel "Plugin Version"
-#define kParamVersionLabelHint "Current version of the NDI Output plugin"
+#define kParamVersionLabelHint "Current version of the VR.NDI Sender plugin"
 
 // Diagnostics Parameters
 #define kParamDebugLogging "debugLogging"
@@ -2909,7 +2912,7 @@ static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandl
     NDIInstanceData *myData = new NDIInstanceData;
     myData->hub = nullptr;
     myData->ndiInitialized = false;
-    myData->sourceName = "DaVinci Resolve NDI Output";
+    myData->sourceName = kDefaultSourceName;
     myData->enabled = true;
     myData->frameRate = 30.0;
     myData->resolutionDivisor = 2;  // Half, mirroring the param default; render reads the param fresh
@@ -3527,7 +3530,7 @@ static OfxStatus describeInContext(OfxImageEffectHandle effect, OfxPropertySetHa
     gPropHost->propSetString(sourceNameProps, kOfxPropLabel, 0, kParamSourceNameLabel);
     gPropHost->propSetString(sourceNameProps, kOfxParamPropScriptName, 0, kParamSourceName);
     gPropHost->propSetString(sourceNameProps, kOfxParamPropHint, 0, kParamSourceNameHint);
-    gPropHost->propSetString(sourceNameProps, kOfxParamPropDefault, 0, "DaVinci Resolve NDI Output");
+    gPropHost->propSetString(sourceNameProps, kOfxParamPropDefault, 0, kDefaultSourceName);
     gPropHost->propSetInt(sourceNameProps, kOfxParamPropAnimates, 0, 0);
     gPropHost->propSetString(sourceNameProps, kOfxParamPropParent, 0, "basicGroup");
 
