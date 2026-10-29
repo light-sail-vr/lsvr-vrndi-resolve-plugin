@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Plugin icon.** Resolve now shows the VR.NDI wordmark as the plugin's icon. The bundle used to ship its icon under a file name Resolve never looked for.
+### Fixed
+- **macOS: Resolve's scripting no longer breaks after you quit and reopen Resolve.** With **Camera Clip Source: Timeline (Auto)** or **Timeline Color: Auto**, the plugin's background helper inherited Resolve's network listeners: the scripting port and NDI's. When Resolve quit, the helper kept running and held those ports. On the next launch Timeline (Auto) and Timeline Color stopped following the timeline, and scripts and scripting tools couldn't reach Resolve until the leftover `fuscript` process was killed. The helper now starts without any of Resolve's open files or sockets and exits with Resolve. Windows was not affected.
+### Added
+- **Camera Metadata from an ILPD file.** In **Equirect (Camera Metadata)** with **Camera Clip Source: Manual Path**, the **Camera Clip** field now also takes an Apple Immersive lens calibration file (`.ilpd`, Immersive Lens Profile Data) as well as a BRAW clip. Use it for rigs that don't embed calibration in the clip, such as custom or underwater housings. An ILPD holds the same calibration an URSA Cine Immersive BRAW embeds, so the warp, Metadata Map Size and Metadata Edge Mask behave exactly as they do for BRAW. The Browse button lists both `.braw` and `.ilpd` files. The ILPD must use the Mei-Rives lens model (`radial2ProjectionOffsetTangential2`) that Apple Immersive calibrations use; with any other model, Stream Status reports the camera metadata as invalid, the log says why, and the stream passes through unwarped. Timeline (Auto) still reads only BRAW-embedded calibration.
+
+### Fixed
+- **Camera Metadata stereo: eyes no longer diverge with underwater-housing calibrations.** The plugin read the sense of each eye's rectification rotation backwards for yaw and roll. Factory URSA Cine Immersive calibrations rotate almost only in pitch, so BRAW clips looked right. Housing calibrations turn the two eyes in opposite directions, and the stream came out with several degrees of divergence. Measured on underwater reef footage, distant water now sits at −0.6° and the reef converges smoothly as it nears the camera, with no vertical disparity. BRAW-embedded calibrations shift by under half a degree, identically in both eyes.
 
 ## [1.17.0] - 2026-10-20
 

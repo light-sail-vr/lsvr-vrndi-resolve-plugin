@@ -101,8 +101,8 @@ inline std::string describeWaitStatus(int waitStatus)
 }
 
 // ---- Process spawn -----------------------------------------------------------------
-// posix_spawn with the child's stdout on a fresh pipe and stdin/stderr on
-// /dev/null (stderr must never join the pipe — the line protocol would read
+// posix_spawn with the child's stdout on a fresh pipe, stdin/stderr on
+// /dev/null and no other descriptor of ours (stderr must never join the pipe — the line protocol would read
 // it as clip paths; the child's exit code is how a dying helper identifies
 // itself instead). Our copy of the write end is closed before returning, so
 // the child's death is guaranteed to EOF the read end — the watcher's only
@@ -142,6 +142,16 @@ inline bool spawnPipedProcess(const std::vector<std::string>& argv, pid_t* pid, 
     posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
+    // The child gets stdin/stdout/stderr and nothing else. Resolve opens its
+    // listening sockets (scripting 49152, NDI 5960/5961, ...) inheritable; a
+    // helper holding them outlives Resolve, blocked reconnecting to the
+    // scripting listener it now owns, and the next Resolve's scripting wedges
+    // (LEARNINGS 2026-10-29). POSIX_SPAWN_CLOEXEC_DEFAULT is Apple's
+    // close-everything-not-named-in-the-file-actions.
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+
     std::vector<char*> args;
     args.reserve(argv.size() + 1);
     for (const std::string& a : argv) {
@@ -150,7 +160,8 @@ inline bool spawnPipedProcess(const std::vector<std::string>& argv, pid_t* pid, 
     args.push_back(nullptr);
 
     pid_t child = -1;
-    const int rc = posix_spawn(&child, argv[0].c_str(), &actions, nullptr, args.data(), environ);
+    const int rc = posix_spawn(&child, argv[0].c_str(), &actions, &attr, args.data(), environ);
+    posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     close(fds[1]);  // the child holds its own copy now (or never will)
     if (rc != 0) {
