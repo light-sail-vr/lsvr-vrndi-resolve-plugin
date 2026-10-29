@@ -29,21 +29,42 @@ inline std::string parentDirectory(const std::string& path)
     return (pos == std::string::npos) ? std::string() : path.substr(0, pos + 1);
 }
 
-// The two strings a COMDLG_FILTERSPEC row wants, from one extension.
-inline std::string filterPattern(const std::string& extension)
+// The two strings a COMDLG_FILTERSPEC row wants, from one extension or a
+// ';'-separated list ("braw;ilpd" -> "*.braw;*.ilpd", "BRAW/ILPD files (...)").
+inline std::string filterPattern(const std::string& extensions)
 {
-    return "*." + extension;
+    std::string pattern;
+    size_t start = 0;
+    while (start <= extensions.size()) {
+        size_t end = extensions.find(';', start);
+        if (end == std::string::npos) end = extensions.size();
+        if (end > start) {
+            if (!pattern.empty()) pattern += ";";
+            pattern += "*." + extensions.substr(start, end - start);
+        }
+        start = end + 1;
+    }
+    return pattern;
 }
 
-inline std::string filterLabel(const std::string& extension)
+inline std::string filterLabel(const std::string& extensions)
 {
-    std::string upper = extension;
-    for (char& c : upper) {
+    std::string upper;
+    for (char c : extensions) {
         if (c >= 'a' && c <= 'z') {
             c = static_cast<char>(c - 'a' + 'A');
+        } else if (c == ';') {
+            c = '/';
         }
+        upper.push_back(c);
     }
-    return upper + " files (" + filterPattern(extension) + ")";
+    return upper + " files (" + filterPattern(extensions) + ")";
+}
+
+// The extension SetDefaultExtension wants: the first of the list.
+inline std::string defaultExtension(const std::string& extensions)
+{
+    return extensions.substr(0, extensions.find(';'));
 }
 
 // Copy the picked path into the caller's buffer, or touch nothing: a path
@@ -62,8 +83,9 @@ inline bool copyPathOut(const std::string& utf8, char* outPath, size_t outPathSi
 
 #ifdef _WIN32
 
-// Same contract as mac_open_file_dialog: initialPath may be NULL/empty; when
-// set, the dialog opens in its directory. Returns true and fills outPath
+// Same contract as mac_open_file_dialog (extension may be a ';'-separated
+// list): initialPath may be NULL/empty; when set, the dialog opens in its
+// directory. Returns true and fills outPath
 // (UTF-8) only when the user picks a file; cancel and every failure return
 // false with outPath untouched. GUI threads only (the analog of the mac
 // dialog's main-thread guard): returns false immediately from a thread with
