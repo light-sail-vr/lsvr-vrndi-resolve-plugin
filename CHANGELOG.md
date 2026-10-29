@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **The plugin is now called VR.NDI Sender.** Resolve lists it under **OpenFX → LSVR → VR.NDI Sender** (it was NDIOutput), and the macOS and Windows installers use the new name. Projects that already use the plugin open as before, because its internal identifier hasn't changed. A newly added instance names its NDI source **VR.NDI Sender** (it was "DaVinci Resolve NDI Output"), so receivers list it as `<HOST> (VR.NDI Sender)`. The download file names (`NDIOutput-<version>-…`) are unchanged.
+- **The plugin is now called VR.NDI Sender.** Resolve lists it under **OpenFX → LSVR → VR.NDI Sender** (it was NDIOutput), and the macOS and Windows installers use the new name. Projects that already use the plugin open as before, because its internal identifier hasn't changed. **The default NDI source name is now VR.NDI Sender** (it was "DaVinci Resolve NDI Output"), so receivers list the stream as `<HOST> (VR.NDI Sender)`. **This renames existing streams too:** Resolve doesn't save a value left at its default, so a project that never changed **NDI Source Name** streams under the new name after you update. Re-pick the source in NDI Studio Monitor, VR.NDI and any receiver preset that looks for the old name. A name you typed yourself is kept. The download file names (`NDIOutput-<version>-…`) are unchanged.
 
 ### Added
 - **Plugin icon.** Resolve now shows the VR.NDI wordmark as the plugin's icon. The bundle used to ship its icon under a file name Resolve never looked for.
