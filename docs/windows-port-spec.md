@@ -92,7 +92,7 @@ Ship a first-class Windows version of the plugin as part of the same product: on
 - **Code-signing purchase for v1** (unsigned with documented SmartScreen flow; Azure Artifact Signing is the upgrade path, not a launch requirement).
 - **Separate Windows version numbers or a Windows-specific changelog** (decision 1).
 - **Migrating the macOS build to CMake** (worth considering after the port lands; not part of it).
-- **Linux** (the old scaffold's Linux stub stays a stub).
+- **Linux** (the old scaffold's Linux stub stays a stub). *Superseded 2026-10-30: see [linux-port-spec.md](linux-port-spec.md), issue #70.*
 - **NDI vendor ID** (free plugin; not required for non-commercial distribution — unchanged from macOS).
 - **Transport control from the plugin** (Resolve's API has none; playback stays human-started on every platform).
 

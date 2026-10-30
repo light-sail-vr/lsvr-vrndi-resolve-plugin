@@ -95,6 +95,26 @@ From the feasibility research in [docs/2026-08-28-resolve-stereo-program-tap-fea
 | Resolve scripting API | `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/` |
 | Resolve OFX headers (incl. stereo ext) | `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/OpenFX/` |
 
+### Linux environment map (COMFYBOX, verified 2026-10-30, ticket #71)
+
+Reached from the Mac over SSH as `matt@100.80.25.1` (Tailscale). The LAN addresses are `192.168.1.127` (`enp6s0`, shared with the Mac's `en4`) and `172.27.48.19` (`enp64s0`, shared with the Mac's `en8`). Resolve runs in `matt`'s X11 desktop session. A second account, `connect`, installed Resolve and owns `/opt/resolve`; it's the fallback if Resolve misbehaves as `matt`.
+
+| What | Where / value |
+|---|---|
+| OS / GPU / driver | Ubuntu 24.04.4 (kernel 6.8), X11 session · RTX 3090 Ti · NVIDIA 610.43.02 |
+| Resolve | Studio 21.1.0 build 17, `/opt/resolve/bin/resolve`; logs "Selected compute API: CUDA" |
+| Plugin install dir | `/usr/OFX/Plugins/` (owned by `matt`, so dev installs need no sudo). Resolve also scans `OFX_PLUGIN_PATH` |
+| OFX plugin cache | `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml`. Delete it with Resolve closed to force a rescan |
+| Resolve app log | `~/.local/share/DaVinciResolve/logs/ResolveDebug.txt` |
+| fuscript (Timeline Auto) | `/opt/resolve/libs/Fusion/fuscript`; `fusionscript.so` is beside it. Scripting API: `/opt/resolve/Developer/Scripting/` |
+| BRAW runtime | `/opt/resolve/libs/libBlackmagicRawAPI.so` |
+| Libraries Resolve ships | `libcudart` 12.8 (plus older ones) and Qt5. **No** `libstdc++` or `libz`: the plugin's `-static-libstdc++` guards against Rocky systems, not Resolve |
+| Toolchain | CUDA 12.9 at `/usr/local/cuda-12.9` (toolkit only), CMake 3.28.3, GCC 13.3, Docker 29.1.3 (`matt` is in the `docker` group) |
+| NDI SDK | Standard "NDI SDK for Linux" v6.3.2.0 (2026-04-13) at `~/sdks/NDI SDK for Linux`. The library is `lib/x86_64-linux-gnu/libndi.so.6` → `libndi.so.6.3.2`; licences are in `licenses/libndi_licenses.txt`. A release needs an SDK no more than 30 days old, so update it first |
+| Network | `avahi-daemon` active. `ufw` active with NDI rules (mDNS 5353/udp; 5959–5999, 6960–6999 and 7960–7999 tcp+udp) for `192.168.1.0/24`, `172.27.48.0/24` **and `fe80::/10`**. The scripts that set these up are `~/linux-port-setup.sh` and `~/linux-port-ufw-ipv6.sh` on the box |
+| Browse-dialog helpers | `zenity` installed; `kdialog` not |
+| Network smoke test | `~/ndi-test/send_video` (the SDK's `NDIlib_Send_Video`, built on the box). Check from the Mac with `./build/ndi_verify --source "COMFYBOX (send_video)"` |
+
 ---
 
 ## 3. Solved bugs & rules learned (running log)
@@ -603,6 +623,39 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Fix:** (branch `feature/release-1.18.0-closeout`) RELEASING.md step 2 says the agent opens the prep PR and Matt merges it; a Gotchas bullet says the `pkgbuild` line is harmless.
 **Validated by:** the v1.18.0 pkg built with that line was accepted by notarization, stapled, and passed Gatekeeper (`accepted, source=Notarized Developer ID`), `codesign --verify --strict` and the SHA256SUMS check. Its payload is 1.18.0, universal, with the icon. v1.18.0 published 2026-10-29 (macOS) and 2026-10-30 (Windows), six assets: https://github.com/light-sail-vr/lsvr-vrndi-resolve-plugin/releases/tag/v1.18.0
 **Rule:** judge a macOS release build by the Gatekeeper and checksum checks, not by a clean stderr. Matt merges every PR, the release prep PR included.
+### 2026-10-30 — The first Linux `.ofx` linked cleanly but would not load: `undefined symbol: pthread_create` (#72)
+**Symptom:** the first Rocky 8 build of the plugin, before any hygiene flags, linked without a warning. `test_plugin_elf` then failed its `dlopen(RTLD_NOW)` with `undefined symbol: pthread_create`. The same binary exported 148 symbols, among them all of zlib (`inflate`, `crc32`, …) and the plugin's OFX host globals (`gHost`, `gPropHost`, …), and it had `libstdc++.so.6` and `libgcc_s.so.1` in `NEEDED`.
+**Root cause:** a shared object may leave symbols undefined by default, so a missing `-pthread` only shows up at load time; glibc 2.28 still keeps pthreads in a separate `libpthread.so.0`. `ZLIB_USE_STATIC_LIBS` linked zlib statically but, without hidden visibility, still exported every zlib symbol, where they could interpose on Resolve's own libz.
+**Fix:** (branch `feature/linux-cmake-ci`) `Threads::Threads`, plus `-Wl,--no-undefined -Wl,-z,defs`, so the next missing library fails the link, not the `dlopen` inside Resolve. Also hidden visibility with the `src/LinuxExports.map` version script, `-static-libstdc++ -static-libgcc`, `RUNPATH $ORIGIN` and `--as-needed`.
+**Validated by:** `test_plugin_elf` red on that first build (NEEDED, RUNPATH, 146 unexpected exports, dlopen) and green after the fix: 2 exports, `NEEDED` = libndi + glibc pieces, highest `GLIBC_2.25`. It also passes in `ubuntu:22.04`. Pointed at an Ubuntu 24.04 `libstdc++.so.6`, it fails the glibc ceiling (`GLIBC_2.38`).
+**Rule:** on Linux, linking statically doesn't hide anything: every plugin link needs `-z defs` and an export allowlist, and `test_plugin_elf` is the check for both.
+
+### 2026-10-30 — `test_cube_lut` fails in a fresh checkout unless the build tree is `<repo>/build` (#72)
+**Symptom:** the first Linux `ctest` (build tree outside the repo) failed `test_cube_lut` ("loadCubeFile reads a file from disk"). Re-running it passed.
+**Root cause:** `test_cube_lut` and `test_stmap` write scratch files to the relative path `build/`, run from the repo root. `test_stmap` creates that directory and `test_cube_lut` doesn't, and `test_cube_lut` runs first. The Makefile (`build/`) and both CI workflows (`-B build`) create it anyway, so the failure only appears with any other build directory.
+**Fix:** none in the tests. BUILD.md's Linux section and `linux.yml` use `-B build`.
+**Validated by:** three repeat `ctest` runs green once `build/` existed.
+**Rule:** keep CMake build trees at `<repo>/build`, or create `build/` first, until the tests take a scratch directory.
+
+### 2026-10-30 — Linux builds from the Mac: arm64 CUDA container, and colima only mounts `$HOME` (#72)
+**Symptom:** (workflow) `docker run -v /tmp/x:/lp …` showed an empty `/lp` (`No such file or directory`), and an x86_64 container under emulation was too slow for CUDA builds.
+**Root cause:** colima shares only the user's home directory with its VM, and bind mounts of other host paths come up empty. `nvidia/cuda:12.9.1-devel-rockylinux8` also ships an **arm64** variant, with nvcc and CUDA 12.9 for sbsa.
+**Fix:** mount the worktree and scratch directories from under `$HOME`. Run `scripts/linux_build_deps.sh` once in the arm64 image and `docker commit` it. The full Linux build, CUDA included, then compiles and runs `ctest` (including `test_plugin_elf`) natively on the Mac in about a minute.
+**Validated by:** local CUDA-on and CUDA-off builds green before the first push. CI's x86_64 run agreed.
+**Rule:** for Linux Tier 0 from the Mac, use the arm64 CUDA container (mounts under `$HOME`). CI's x86_64 run and the workstation remain the authority for anything architecture-specific.
+### 2026-10-30 — Linux NDI source discovered but no video: ufw drops IPv6 link-local (ticket #71)
+**Symptom:** the Mac listed `COMFYBOX (send_video)` (the SDK's sample sender on the Linux box), but `ndi_verify` received no frames in 15 s. The firewall already allowed the NDI ports from both LAN subnets, and plain `nc` to port 5960 over IPv4 succeeded.
+**Root cause:** avahi publishes the host's IPv6 link-local addresses (`fe80::…`) alongside IPv4, and the macOS NDI receiver connected over IPv6. The `ufw` rules were IPv4-only, so the log showed `[UFW BLOCK] … SRC=fe80:… PROTO=TCP`, and `nc -6` to the link-local address timed out.
+**Fix:** allow the same NDI ports from `fe80::/10` (`~/linux-port-ufw-ipv6.sh` on the box).
+**Validated by:** `ndi_verify --source "COMFYBOX (send_video)" --duration 5` received 1920×1080 at 30.03 fps with 0 dropped frames.
+**Rule:** on Linux, firewall rules for NDI must cover IPv6 link-local as well as the IPv4 LAN. "The source appears but no video arrives" points at the firewall, not the sender. Search the ufw log for `SRC=fe80`.
+
+### 2026-10-30 — `libndi.so.6` hard-links Avahi client libraries (ticket #71)
+**Symptom:** none yet; caught while checking the SDK layout. `objdump -p libndi.so.6` lists `NEEDED libavahi-client.so.3` and `libavahi-common.so.3`.
+**Root cause:** on Linux the NDI runtime uses Avahi's client library for mDNS, so those libraries are a load-time dependency, beyond the daemon merely needing to run. A plugin linked against `libndi.so.6` through `RUNPATH=$ORIGIN` fails to `dlopen` on a machine without `avahi-libs`/`libavahi-client3`, and the plugin vanishes from the Effects Library with no message.
+**Fix:** for #73, resolve `libndi` at runtime instead: `dlopen` the bundled copy by sibling path through `Processing.NDI.DynamicLoad.h`. A missing runtime or Avahi then means pass-through plus a logged reason. `install.sh` (#78) checks for the Avahi libraries and the daemon.
+**Validated by:** `objdump -p` on the NDI SDK for Linux 6.3.2.0. The failure mode itself is untested so far.
+**Rule:** check what the NDI runtime itself links before choosing how the plugin links it. A dependency of the vendor library can make the plugin vanish just as a missing vendor library would.
 
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.

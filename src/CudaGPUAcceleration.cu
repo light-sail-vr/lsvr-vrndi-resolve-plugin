@@ -1,6 +1,5 @@
-#ifdef _WIN32
-
-// CUDA implementation of the GPU-module contract (Windows port ticket #22).
+// CUDA implementation of the GPU-module contract (Windows port ticket #22;
+// built on Linux too, linux-port-spec decision 12).
 // See CudaGPUAcceleration.h for the seam documentation and
 // MetalGPUAcceleration.mm for the prior art this mirrors.
 //
@@ -16,6 +15,7 @@
 // entry points (tests and the slow readback fallback). cudaDeviceSynchronize
 // and cudaDeviceReset appear nowhere in this plugin.
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -23,6 +23,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include "LinuxLog.h"
+#endif
 
 #include <cuda_runtime.h>
 
@@ -39,10 +42,12 @@
 #include <thread>
 #include <unordered_map>
 
-// Live capture via DebugView/WinDbg, same channel as the plugin's Windows
-// NDI_LOG sink (the Metal module logs through its own os_log the same way).
+// Live capture via DebugView/WinDbg on Windows, syslog/journald on Linux —
+// the same channel as the plugin's NDI_LOG sink on each platform (the Metal
+// module logs through its own os_log the same way).
 static void cudaLog(const char* fmt, ...)
 {
+#ifdef _WIN32
     char buf[1024];
     va_list args;
     va_start(args, fmt);
@@ -54,6 +59,12 @@ static void cudaLog(const char* fmt, ...)
     buf[len] = '\n';
     buf[len + 1] = '\0';
     OutputDebugStringA(buf);
+#else
+    va_list args;
+    va_start(args, fmt);
+    ndi_linux_log::vlog(fmt, args);
+    va_end(args);
+#endif
 }
 #define CUDA_LOG(fmt, ...) cudaLog("NDI Plugin CUDA: " fmt, ##__VA_ARGS__)
 
@@ -966,4 +977,3 @@ void cuda_gpu_release_buffer(void* deviceBuffer)
     cudaFree(deviceBuffer);
 }
 
-#endif // _WIN32

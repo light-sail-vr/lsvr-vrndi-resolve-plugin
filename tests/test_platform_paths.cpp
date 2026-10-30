@@ -2,13 +2,19 @@
 // UTF-16 conversion (exercised on every platform) and the fopen/stat/remove
 // shims that keep non-ASCII file paths working on Windows, where the narrow
 // CRT calls go through the ANSI code page and would fail.
-// Build & run: make test (macOS) / ctest (Windows)
+// Build & run: make test (macOS) / ctest (Windows, Linux)
 
 #include "PlatformPaths.h"
 
 #include <cstdio>
 #include <cstring>
 #include <string>
+
+#ifdef __linux__
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static int failures = 0;
 
@@ -164,12 +170,73 @@ static void testMissingFile()
                "open on a missing file returns null");
 }
 
+#ifdef __linux__
+// Linux (linux-port-spec decision 20): OFX hands the plugin UTF-8 and Linux
+// filenames are raw bytes, so the shims must pass the UTF-8 through
+// untouched — no transcoding, no normalisation. An STMap in a non-ASCII
+// directory must open, and the name on disk must be the exact bytes the
+// host gave us (readdir sees them back verbatim).
+static void testLinuxNonAsciiStmapPath()
+{
+    // "stéréo_日本/map_𝄞.exr": 2-, 3- and 4-byte sequences in both the
+    // directory and the file name.
+    const std::string dirName = "ndi_paths_st\xC3\xA9r\xC3\xA9o_\xE6\x97\xA5\xE6\x9C\xAC";
+    const std::string fileName = "map_\xF0\x9D\x84\x9E.exr";
+    const std::string path = dirName + "/" + fileName;
+    const char payload[] = "v/2 stmap bytes";
+    const long long payloadLen = static_cast<long long>(sizeof(payload) - 1);
+
+    // Clear leftovers from a run that died mid-test, so this one starts clean.
+    std::remove(path.c_str());
+    rmdir(dirName.c_str());
+
+    expectInt(mkdir(dirName.c_str(), 0700), 0, "linux: create non-ASCII directory");
+
+    std::FILE* f = ndi_path::fopenUtf8(path.c_str(), "wb");
+    expectTrue(f != nullptr, "linux: open non-ASCII STMap path for write");
+    if (f) {
+        std::fwrite(payload, 1, static_cast<size_t>(payloadLen), f);
+        std::fclose(f);
+    }
+
+    bool sawExactName = false;
+    if (DIR* d = opendir(dirName.c_str())) {
+        while (dirent* e = readdir(d)) {
+            sawExactName = sawExactName || fileName == e->d_name;
+        }
+        closedir(d);
+    }
+    expectTrue(sawExactName, "linux: name on disk is the exact UTF-8 bytes");
+
+    long long mtime = 0, size = 0;
+    expectTrue(ndi_path::statUtf8(path.c_str(), &mtime, &size) && size == payloadLen,
+               "linux: stat non-ASCII STMap path");
+
+    f = ndi_path::fopenUtf8(path.c_str(), "rb");
+    expectTrue(f != nullptr, "linux: open non-ASCII STMap path for read");
+    if (f) {
+        char buf[sizeof(payload)] = {0};
+        const size_t got = std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        expectTrue(static_cast<long long>(got) == payloadLen &&
+                       std::memcmp(buf, payload, static_cast<size_t>(payloadLen)) == 0,
+                   "linux: read back non-ASCII STMap payload");
+    }
+
+    expectInt(ndi_path::removeUtf8(path.c_str()), 0, "linux: remove non-ASCII STMap path");
+    expectInt(rmdir(dirName.c_str()), 0, "linux: remove non-ASCII directory");
+}
+#endif // __linux__
+
 int main()
 {
     testUtf8ToWide();
     testWideToUtf8();
     testFileRoundTrip();
     testMissingFile();
+#ifdef __linux__
+    testLinuxNonAsciiStmapPath();
+#endif
 
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);

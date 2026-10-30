@@ -1,0 +1,117 @@
+# Linux compile-proof CI (ticket #72; docs/linux-port-spec.md decisions 4-9,
+# Testing / Tier 0): configure + build the plugin — including the CUDA
+# translation units — inside the Rocky Linux 8 + CUDA 12.9 container the
+# release build uses (glibc 2.28, gcc-toolset), run the portable unit suite
+# and test_plugin_elf under GCC, stage and verify the bundle tree, then prove
+# the staged .ofx also loads on Ubuntu 22.04. Hosted runners have no GPU and
+# no Resolve: CUDA is compiled, not executed (test_cuda_downscale skips
+# itself), and Tiers 1-2 stay human (BUILD.md, Linux section).
+#
+# No NDI SDK is installed in CI: the build links a stub libndi.so.6 generated
+# from the checked-in export list (third_party/ndi/), so the artifact proves
+# compile + link + load, never streaming — hence the -STUB name.
+name: linux
+
+on:
+  push:
+    branches:
+      - dev
+      - master
+      - "feature/**"
+  pull_request:
+    branches:
+      - dev
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container: nvidia/cuda:12.9.1-devel-rockylinux8
+    steps:
+      - uses: actions/checkout@v4
+
+      # gcc-toolset-13, cmake 3.26, zlib-static — same script as the local
+      # container recipe in BUILD.md.
+      - name: Install build prerequisites
+        run: bash scripts/linux_build_deps.sh
+
+      - name: Configure (CMake + gcc-toolset-13 + CUDA 12.9)
+        run: |
+          source /opt/rh/gcc-toolset-13/enable
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (Release, CUDA included)
+        run: |
+          source /opt/rh/gcc-toolset-13/enable
+          cmake --build build --parallel "$(nproc)"
+
+      # Includes test_plugin_elf: NEEDED allowlist, GLIBC_ <= 2.28,
+      # RUNPATH=$ORIGIN, export allowlist, dlopen + OfxGetNumberOfPlugins()
+      # in this Rocky 8 container.
+      - name: Run unit tests + ELF hygiene (GCC)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Stage the OFX bundle tree
+        run: cmake --install build --prefix stage
+
+      - name: Verify spec bundle layout
+        run: |
+          set -euo pipefail
+          bin=stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64
+          res=stage/NDIOutput.ofx.bundle/Contents/Resources
+          for f in "$bin/NDIOutput.ofx" "$bin/libndi.so.6" \
+                   "$res/ndi_timeline_watch.lua" "$res/ndi_timeline_watch.py" \
+                   "$res/LSVR.NDIOutput.png"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Bundle layout wrong: $f missing"
+              exit 1
+            fi
+          done
+          find stage -type f | sort
+          # The staged binary, not just the build-tree one, must pass.
+          build/test_plugin_elf "$bin/NDIOutput.ofx"
+
+      - name: Upload bundle artifact (stub NDI runtime)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NDIOutput-linux-x86_64-STUB
+          path: stage/
+          if-no-files-found: error
+
+      # The checker itself (statically linked C++ runtime) for the Ubuntu job.
+      - name: Upload ELF checker
+        uses: actions/upload-artifact@v4
+        with:
+          name: test_plugin_elf-linux-x86_64
+          path: build/test_plugin_elf
+          if-no-files-found: error
+
+  # Spec Testing section: the Rocky-built binary must also load on the distro
+  # Matt tests on. Runs the same checker against the downloaded artifact; the
+  # stub libndi.so.6 beside the .ofx is what RUNPATH=$ORIGIN must find.
+  load-check-ubuntu:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container: ubuntu:22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: NDIOutput-linux-x86_64-STUB
+          path: stage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: test_plugin_elf-linux-x86_64
+          path: tools
+
+      - name: dlopen the staged plugin on Ubuntu 22.04
+        run: |
+          set -euo pipefail
+          chmod +x tools/test_plugin_elf   # artifacts drop the exec bit
+          tools/test_plugin_elf stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/NDIOutput.ofx
