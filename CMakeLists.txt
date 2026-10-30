@@ -474,6 +474,9 @@ elseif(NDI_PLATFORM_LINUX)
     target_link_options(test_plugin_elf PRIVATE -static-libstdc++ -static-libgcc)
     add_test(NAME test_plugin_elf
              COMMAND test_plugin_elf "$<TARGET_FILE:NDIOutput>" "${NDI_RUNTIME_FILE}")
+    # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
+    add_test(NAME test_linux_remote
+             COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
 endif()
 
 # --- Install: the OFX bundle tree --------------------------------------------
