@@ -1,0 +1,13 @@
+/* Linux export version script (docs/linux-port-spec.md decision 6): the
+   plugin exports the two OFX entry points and nothing else, so none of its
+   statically linked libstdc++/zlib/cudart symbols can interpose on (or be
+   interposed by) the copies Resolve loads from /opt/resolve/libs.
+   Anonymous node on purpose: a named one would add a version-definition
+   symbol to .dynsym. tests/test_plugin_elf.cpp enforces the allowlist. */
+{
+    global:
+        OfxGetNumberOfPlugins;
+        OfxGetPlugin;
+    local:
+        *;
+};
