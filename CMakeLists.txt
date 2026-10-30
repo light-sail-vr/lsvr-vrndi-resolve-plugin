@@ -479,6 +479,10 @@ elseif(NDI_PLATFORM_LINUX)
     target_link_options(test_plugin_elf PRIVATE -static-libstdc++ -static-libgcc)
     add_test(NAME test_plugin_elf
              COMMAND test_plugin_elf "$<TARGET_FILE:NDIOutput>")
+    # The log sink's per-message syslog tag (ticket #73; src/LinuxLog.h).
+    add_executable(test_linux_log tests/test_linux_log.cpp)
+    target_include_directories(test_linux_log PRIVATE src)
+    add_test(NAME test_linux_log COMMAND test_linux_log)
     # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
     add_test(NAME test_linux_remote
              COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
