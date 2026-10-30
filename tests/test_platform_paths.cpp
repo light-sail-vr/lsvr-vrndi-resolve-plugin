@@ -186,6 +186,10 @@ static void testLinuxNonAsciiStmapPath()
     const char payload[] = "v/2 stmap bytes";
     const long long payloadLen = static_cast<long long>(sizeof(payload) - 1);
 
+    // Clear leftovers from a run that died mid-test, so this one starts clean.
+    std::remove(path.c_str());
+    rmdir(dirName.c_str());
+
     expectInt(mkdir(dirName.c_str(), 0700), 0, "linux: create non-ASCII directory");
 
     std::FILE* f = ndi_path::fopenUtf8(path.c_str(), "wb");
