@@ -31,14 +31,14 @@ Other human-only steps when needed: signing setup on a new Mac (BUILD.md → "On
 
 List every PR merged into `dev` since the last tag (`git log --merges --oneline v<last>..dev`). For each one, record whether Tier 1–2 passed on macOS, on Windows, or whether the change doesn't touch that platform. **Done when** every PR has a status for both platforms. A platform may lag only if the CHANGELOG entry says so in words (CLAUDE.md allows one platform lagging, stated in the notes). Report the table to Matt.
 
-### 2. Release prep PR (agent)
+### 2. Release prep PR (agent opens, Matt merges)
 
 On `feature/release-X.Y.Z`, branched off `dev`:
 - Bump the version with `./scripts/increment_version.sh` for a patch, or `./scripts/set_version.sh X.Y.Z`. They update `VERSION`, the `#define`s and `Info.plist`.
 - Add the `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md`. The publish script turns it into the release notes, so write it for end users and include any lagging-platform note from step 1.
 - Run `make dev && make test` on the Mac, or the CMake build plus `ctest` on Windows.
 
-Open a PR into `dev`. **Done when** both CI `build` checks are green and the PR is merged.
+Open a PR into `dev`. **Done when** both CI `build` checks are green and Matt has merged it. The agent can't merge it: Claude Code's auto mode refuses `gh pr merge` (LEARNINGS 2026-10-30).
 
 ### 3. Release PR (agent opens, Matt merges)
 
@@ -99,3 +99,4 @@ Paste these on the other machine, filling in the version. Each one is self-conta
 - **`make` and link flags:** after changing `LDFLAGS`/`CXXFLAGS`, force a relink. `make` doesn't track the Makefile (LEARNINGS 2026-10-01).
 - **Plugin missing in Resolve after an install:** with Resolve closed, delete `OFXPluginCacheV2.xml` (path per platform in CLAUDE.md) and relaunch.
 - **Verify a release zip with `ditto -x -k`**, never `unzip` (LEARNINGS 2026-09-01).
+- **`write: Permission denied` during `package_release.sh`:** `pkgbuild` prints this on macOS 27 and still exits 0. It's harmless; judge the pkg by the Gatekeeper and checksum checks in step 4 (LEARNINGS 2026-10-30).

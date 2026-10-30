@@ -590,6 +590,20 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** `--source "MAC (DaVinci Resolve NDI Output)"` picks the local 4096×2048 stream while LSVR-LPK-MAC is also visible.
 **Rule:** pass the full source name to `ndi_verify`, and check the `source:` line and the frame size before trusting a dump. On a busy network a short substring can match another machine's stream.
 
+### 2026-10-30 — Changing a parameter's default changes existing projects
+**Symptom:** v1.18.0 changed the default **NDI Source Name** from "DaVinci Resolve NDI Output" to "VR.NDI Sender". The agent told Matt that existing projects would keep their saved name. They don't: a project made under 1.17.0 that never touched the field streamed as `MAC (VR.NDI Sender)` after the update.
+**Root cause:** Resolve doesn't save a parameter with the project while it sits at its default. On load the plugin's current default fills it in, so a new default reaches every project that left the value alone.
+**Fix:** no code change; Matt kept the rename. The v1.18.0 CHANGELOG and release notes warn that default-named streams are renamed and that receivers have to re-pick the source (PRs #66, #67).
+**Validated by:** Tier 2 on the 1.18.0 candidate (2026-10-29): the 1.17.0-era project, Source Name never edited, streamed as `MAC (VR.NDI Sender)`.
+**Rule:** a parameter's default is part of every saved project that never changed it. Before changing one, decide whether existing projects should follow; if they should, say so in the CHANGELOG, and if not, keep the old default.
+
+### 2026-10-30 — v1.18.0 release: `pkgbuild` printed `write: Permission denied`, and the agent couldn't merge PRs
+**Symptom:** (1) `package_release.sh` printed a bare `write: Permission denied` just before "built and signed", and still exited 0. (2) `gh pr merge 67` (the release prep PR) was refused by Claude Code's auto-mode classifier ("Merge Without Review").
+**Root cause:** (1) The component `pkgbuild` call prints it on macOS 27.0.1 (26A434). A throwaway three-file root reproduced it (four lines) both inside and outside the Claude Code sandbox, the count didn't change with more files, and the pkg was valid, so it's internal to `pkgbuild`, not our payload. (2) Auto mode treats a merge as needing human review. RELEASING.md step 2 didn't say who merges the prep PR.
+**Fix:** (branch `feature/release-1.18.0-closeout`) RELEASING.md step 2 says the agent opens the prep PR and Matt merges it; a Gotchas bullet says the `pkgbuild` line is harmless.
+**Validated by:** the v1.18.0 pkg built with that line was accepted by notarization, stapled, and passed Gatekeeper (`accepted, source=Notarized Developer ID`), `codesign --verify --strict` and the SHA256SUMS check. Its payload is 1.18.0, universal, with the icon. v1.18.0 published 2026-10-29 (macOS) and 2026-10-30 (Windows), six assets: https://github.com/light-sail-vr/lsvr-vrndi-resolve-plugin/releases/tag/v1.18.0
+**Rule:** judge a macOS release build by the Gatekeeper and checksum checks, not by a clean stderr. Matt merges every PR, the release prep PR included.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
