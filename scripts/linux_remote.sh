@@ -16,6 +16,7 @@
 #   NDI_LINUX_DIR    checkout on the box [~/ndioutput-dev]
 #   NDI_LINUX_SDK    NDI SDK for Linux on the box [~/sdks/NDI SDK for Linux]
 #   NDI_LINUX_CACHE  Resolve's OFX cache [~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml]
+#   NDI_LINUX_PROC   /proc to search for a running Resolve [/proc] (local mode; tests)
 #
 # build runs inside the Rocky Linux 8 CUDA image CI uses (spec decision 5),
 # never on the Ubuntu host toolchain: a host build pulls GLIBC_2.38 symbols
@@ -47,7 +48,16 @@ dir="${1:-$HOME/ndioutput-dev}"
 sdk="${2:-$HOME/sdks/NDI SDK for Linux}"
 cache="${3:-$HOME/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml}"
 shift 3
-resolve_pids() { pgrep -x resolve || true; }
+# Resolve by argv[0], not by name or executable: its main thread renames
+# itself "GUI Thread" (`pgrep -x resolve` never matches), and it runs under
+# `sg resolve`, which makes /proc/<pid>/exe unreadable even to its owner.
+resolve_pids() {
+    local p argv0
+    for p in "${NDI_LINUX_PROC:-/proc}"/[0-9]*; do
+        argv0="$(tr "\000" "\n" < "$p/cmdline" 2>/dev/null | head -n 1)" || continue
+        case "$argv0" in */bin/resolve) echo "${p##*/}" ;; esac
+    done
+}
 '
 
 # Runs the bash script on stdin on the box, after the prelude.
