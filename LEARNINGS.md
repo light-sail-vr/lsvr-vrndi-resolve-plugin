@@ -590,6 +590,27 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** `--source "MAC (DaVinci Resolve NDI Output)"` picks the local 4096×2048 stream while LSVR-LPK-MAC is also visible.
 **Rule:** pass the full source name to `ndi_verify`, and check the `source:` line and the frame size before trusting a dump. On a busy network a short substring can match another machine's stream.
 
+### 2026-10-30 — The first Linux `.ofx` linked cleanly but would not load: `undefined symbol: pthread_create` (#72)
+**Symptom:** the first Rocky 8 build of the plugin, before any hygiene flags, linked without a warning. `test_plugin_elf` then failed its `dlopen(RTLD_NOW)` with `undefined symbol: pthread_create`. The same binary exported 148 symbols, among them all of zlib (`inflate`, `crc32`, …) and the plugin's OFX host globals (`gHost`, `gPropHost`, …), and it had `libstdc++.so.6` and `libgcc_s.so.1` in `NEEDED`.
+**Root cause:** a shared object may leave symbols undefined by default, so a missing `-pthread` only shows up at load time; glibc 2.28 still keeps pthreads in a separate `libpthread.so.0`. `ZLIB_USE_STATIC_LIBS` linked zlib statically but, without hidden visibility, still exported every zlib symbol, where they could interpose on Resolve's own libz.
+**Fix:** (branch `feature/linux-cmake-ci`) `Threads::Threads`, plus `-Wl,--no-undefined -Wl,-z,defs`, so the next missing library fails the link, not the `dlopen` inside Resolve. Also hidden visibility with the `src/LinuxExports.map` version script, `-static-libstdc++ -static-libgcc`, `RUNPATH $ORIGIN` and `--as-needed`.
+**Validated by:** `test_plugin_elf` red on that first build (NEEDED, RUNPATH, 146 unexpected exports, dlopen) and green after the fix: 2 exports, `NEEDED` = libndi + glibc pieces, highest `GLIBC_2.25`. It also passes in `ubuntu:22.04`. Pointed at an Ubuntu 24.04 `libstdc++.so.6`, it fails the glibc ceiling (`GLIBC_2.38`).
+**Rule:** on Linux, linking statically doesn't hide anything: every plugin link needs `-z defs` and an export allowlist, and `test_plugin_elf` is the check for both.
+
+### 2026-10-30 — `test_cube_lut` fails in a fresh checkout unless the build tree is `<repo>/build` (#72)
+**Symptom:** the first Linux `ctest` (build tree outside the repo) failed `test_cube_lut` ("loadCubeFile reads a file from disk"). Re-running it passed.
+**Root cause:** `test_cube_lut` and `test_stmap` write scratch files to the relative path `build/`, run from the repo root. `test_stmap` creates that directory and `test_cube_lut` doesn't, and `test_cube_lut` runs first. The Makefile (`build/`) and both CI workflows (`-B build`) create it anyway, so the failure only appears with any other build directory.
+**Fix:** none in the tests. BUILD.md's Linux section and `linux.yml` use `-B build`.
+**Validated by:** three repeat `ctest` runs green once `build/` existed.
+**Rule:** keep CMake build trees at `<repo>/build`, or create `build/` first, until the tests take a scratch directory.
+
+### 2026-10-30 — Linux builds from the Mac: arm64 CUDA container, and colima only mounts `$HOME` (#72)
+**Symptom:** (workflow) `docker run -v /tmp/x:/lp …` showed an empty `/lp` (`No such file or directory`), and an x86_64 container under emulation was too slow for CUDA builds.
+**Root cause:** colima shares only the user's home directory with its VM, and bind mounts of other host paths come up empty. `nvidia/cuda:12.9.1-devel-rockylinux8` also ships an **arm64** variant, with nvcc and CUDA 12.9 for sbsa.
+**Fix:** mount the worktree and scratch directories from under `$HOME`. Run `scripts/linux_build_deps.sh` once in the arm64 image and `docker commit` it. The full Linux build, CUDA included, then compiles and runs `ctest` (including `test_plugin_elf`) natively on the Mac in about a minute.
+**Validated by:** local CUDA-on and CUDA-off builds green before the first push. CI's x86_64 run agreed.
+**Rule:** for Linux Tier 0 from the Mac, use the arm64 CUDA container (mounts under `$HOME`). CI's x86_64 run and the workstation remain the authority for anything architecture-specific.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 

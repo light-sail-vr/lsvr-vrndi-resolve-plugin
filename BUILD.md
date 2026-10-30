@@ -4,6 +4,7 @@ Canonical instructions for building, installing, and verifying the NDI Output OF
 
 - **macOS** — primary platform, working (Metal GPU path)
 - **Windows** — port integrated into this tree (PR #37, 2026-09-01), first released with v1.14.1: CUDA GPU-native pipeline with kernel identity tests (#22), native Browse dialogs (#24), Timeline (Auto) clip watcher (#25, one-click via Resolve's own fuscript since v1.14.1), Camera Metadata projection (#26), and the Inno Setup installer + release wiring (#23) in the build — see the Windows STATUS section below for what remains human-verified
+- **Linux** — in progress ([docs/linux-port-spec.md](docs/linux-port-spec.md), issues labelled `linux`): CMake build in a Rocky 8 container with compile-only CI (#72); not yet streamed or released — see the Linux STATUS section below
 
 ---
 
@@ -159,7 +160,7 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-`ctest` runs the portable unit suite from `make test` on macOS — including `test_platform_paths` (UTF-8⇄UTF-16 path shims) and `test_ndi_loader` (NDI runtime path derivation) — plus four Windows-side additions the Makefile doesn't build: `test_win_file_dialog` (the browse dialog's pure logic, ticket #24), `test_timeline_watch` (the watcher's Python-discovery/quoting/path seams plus a live pipe-spawn smoke test, ticket #25), `test_braw_reader` (the BRAW metadata reader's soft-fail contract, ticket #26 — see the Camera Metadata section below for its opt-in real-clip mode), and `test_plugin_delayload`, which loads the built `.ofx` with a System32-only import search (what Resolve's plugin scanner amounts to), so any stray load-time import fails Tier 0 instead of silently emptying the Effects Library. CMake refuses to configure if `VERSION` and `kPluginVersionString` in `src/NDIOutputPlugin.cpp` disagree — run `scripts/set_version.sh`, never edit either by hand.
+`ctest` runs the portable unit suite from `make test` on macOS — including `test_platform_paths` (UTF-8⇄UTF-16 path shims) and `test_ndi_loader` (NDI runtime path derivation) — plus four Windows-side additions the Makefile doesn't build: `test_win_file_dialog` (the browse dialog's pure logic, ticket #24), `test_timeline_watch` (the watcher's Python-discovery/quoting/path seams plus a live pipe-spawn smoke test, ticket #25), `test_braw_reader` (the BRAW metadata reader's soft-fail contract, ticket #26 — see the Camera Metadata section below for its opt-in real-clip mode), and `test_plugin_delayload`, which loads the built `.ofx` with a System32-only import search (what Resolve's plugin scanner amounts to), so any stray load-time import fails Tier 0 instead of silently emptying the Effects Library. `test_ndi_def_exports` (shared with Linux) checks the export-list parser the stub import library is generated from. CMake refuses to configure if `VERSION` and `kPluginVersionString` in `src/NDIOutputPlugin.cpp` disagree — run `scripts/set_version.sh`, never edit either by hand.
 
 `test_cuda_downscale` (ticket #22) is the Windows counterpart of `make test-metal`: it holds the fused CUDA kernels **byte-identical** to the shared CPU references (`ndi_stream::downscaleRGBABox`, `ndi_stmap::warpRGBABox`, the shared UYVY encoder `src/UYVYEncode.h`), including identity-STMap ≡ plain-downscale and the Output Color stage (the same preset/LUT cases as `make test-metal`), plus the slot ring and passthrough/readback contracts. It needs a CUDA device — it runs for real on the workstation and skips cleanly on GPU-less machines (hosted CI compiles it, which is CI's whole job here). Byte-identity leans on `--fmad=false` for the CUDA translation units (CMakeLists.txt) — don't "optimize" that flag away.
 
@@ -256,6 +257,98 @@ NDI_TEST_BRAW_CLIP='C:\clips\B001_10151156_C001.braw' ./build/Release/test_braw_
 [.github/workflows/windows.yml](.github/workflows/windows.yml) runs on every push to `dev`, `master`, and any `feature/`-prefixed branch (glob `feature/**`), on PRs into `dev`, and on manual dispatch: install CUDA Toolkit 12.9 (nvcc + cudart + VS integration, network method), configure + build on `windows-2022` **including the CUDA translation units**, the portable unit suite under MSVC, and a bundle-layout check, uploading the staged tree as the `NDIOutput-win64` artifact. It then builds the installer from that (stub) tree and runs `scripts/test_windows_installer.ps1` — a real silent install/uninstall cycle on the runner, which is elevated and has no Resolve — uploading `dist/` as `NDIOutput-win64-installer`. CI has no GPU and no Resolve — kernel identity executes on the workstation, and Tiers 1–2 stay human, on real hardware.
 
 Same rule as macOS: any Windows build change updates this section in the same PR.
+
+---
+
+## Linux — STATUS: CMake build + compile-only CI (#72); first stream (#73), CUDA on hardware (#74), Timeline (Auto) (#75), Browse (#76), BRAW (#77) and packaging (#78) still to come
+
+Plan and decisions: [docs/linux-port-spec.md](docs/linux-port-spec.md); work items: GitHub issues labelled `linux`. Findings go to [LEARNINGS.md](LEARNINGS.md). The same `CMakeLists.txt` drives Windows and Linux; the Makefile stays the macOS harness.
+
+**Not yet on Linux:** Browse buttons, Timeline (Auto) and BRAW Camera Metadata. Their capability macros (`NDI_HAS_BROWSE_DIALOGS`, `NDI_TIMELINE_WATCH`, the BRAW reader) are not defined on Linux, so the plugin compiles them out: Browse buttons are absent, Timeline (Auto) and Camera Metadata fall back to passthrough with a Stream Status message, and Manual Path works. Tickets #75–#77 add them.
+
+### Prerequisites
+
+Release binaries are built **inside a Rocky Linux 8 container** (spec decision 5): glibc 2.28 is the oldest Blackmagic certifies, and a binary built on a newer distro (Ubuntu's glibc) won't load on Rocky. Build on the workstation only through the container.
+
+- **Docker** (or Podman) and the image `nvidia/cuda:12.9.1-devel-rockylinux8` (CUDA 12.9, pinned like Windows; the image also exists for arm64, which is how an Apple-silicon Mac builds it).
+- Inside the container, [scripts/linux_build_deps.sh](scripts/linux_build_deps.sh) installs the rest: **gcc-toolset-13** (GCC 13 with a static `libstdc++.a`), **CMake 3.26** (≥ 3.24 is required, for static zlib), and **zlib-static** (from PowerTools). CI runs the same script.
+- **NDI SDK for Linux** (Standard, royalty-free — **not** NDI Advanced). Unpack it anywhere and point `NDI_SDK_PATH` at the `NDI SDK for Linux` folder (default: `$HOME/NDI SDK for Linux`, or the `NDI_SDK_PATH` environment variable). The build links `lib/x86_64-linux-gnu/libndi.so.6` and bundles it with `licenses/*.txt`. Without it the build links a **stub** (below).
+- `-DNDI_ENABLE_CUDA=OFF` builds the CPU-only plugin without nvcc (works in plain `rockylinux:8`).
+
+### Build (Tier 0), in the container
+
+From the repo root:
+
+```bash
+docker run --rm -it -v "$PWD":/src -w /src nvidia/cuda:12.9.1-devel-rockylinux8 bash
+```
+
+Then, inside the container:
+
+```bash
+bash scripts/linux_build_deps.sh
+source /opt/rh/gcc-toolset-13/enable
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DNDI_SDK_PATH=... for the real SDK
+cmake --build build --parallel "$(nproc)"
+ctest --test-dir build --output-on-failure
+cmake --install build --prefix stage
+```
+
+Use `build/` as the build directory: `test_cube_lut` and `test_stmap` write scratch files to `<repo>/build/` (LEARNINGS 2026-10-30). To mount the SDK, add `-v "/path/to/NDI SDK for Linux":/ndi` to `docker run` and pass `-DNDI_SDK_PATH=/ndi`. Running `docker commit` after `linux_build_deps.sh` saves a few minutes per session.
+
+`ctest` runs the portable unit suite under GCC: the `make test` tests minus the macOS watcher, `test_platform_paths` with a non-ASCII Linux STMap path case, and `test_ndi_def_exports`, which tests the export-list parser behind both NDI stubs. With CUDA it also runs `test_cuda_downscale`, the byte-identity test, which skips without a GPU. Byte identity relies on `--fmad=false` for nvcc and `-ffp-contract=off` for GCC, both set by CMake, so that neither compiler fuses a multiply-add the MSVC-built references keep separate. Keep the x86-64 baseline: never add `-march=native` or `-mfma` (spec decision 14). The Linux counterpart of `test_plugin_delayload` is also in the suite:
+
+**`test_plugin_elf`** parses the built `.ofx` and asserts the ELF-hygiene rules of spec decision 6, then copies the `.ofx` and `libndi.so.6` alone into a temp directory, `dlopen`s it with `RTLD_NOW` and calls the entry points:
+
+| Check | Why |
+| --- | --- |
+| `NEEDED` is `libndi.so.6` plus glibc pieces only (`libc`, `libm`, `libdl`, `libpthread`, `librt`, `ld-linux`) | Resolve loads its own libstdc++, zlib, … from `/opt/resolve/libs`; ours are linked statically (`-static-libstdc++ -static-libgcc`, `libz.a`, static cudart) |
+| No `GLIBC_` symbol version above 2.28 | Rocky/RHEL 8 |
+| `RUNPATH` is exactly `$ORIGIN`, no `DT_RPATH` | the bundled `libndi.so.6` beside the `.ofx` resolves without `LD_LIBRARY_PATH` |
+| Only `OfxGetNumberOfPlugins` and `OfxGetPlugin` are exported | hidden visibility + [src/LinuxExports.map](src/LinuxExports.map); nothing statically linked can interpose on the host's copies |
+| `dlopen` succeeds and `OfxGetNumberOfPlugins() == 1`, plugin 0 is `LSVR.NDIOutput` | catches unresolved symbols; `-Wl,--no-undefined -Wl,-z,defs` catches most at link time |
+
+It can be run by hand against any staged tree, e.g. `build/test_plugin_elf stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/NDIOutput.ofx` (the NDI library defaults to the `libndi.so.6` beside the `.ofx`). The binary links its C++ runtime statically, so it runs on any glibc ≥ 2.28 distro without a compiler.
+
+### The stub `libndi.so.6` (CI mode)
+
+Without the SDK, CMake generates `libndi.so.6` (SONAME `libndi.so.6`, so the plugin's `NEEDED` entry is identical to a real build) from the same export list as the Windows stub, [third_party/ndi/Processing.NDI.Lib.x64.def](third_party/ndi/Processing.NDI.Lib.x64.def), parsed by [cmake/NDIDefExports.cmake](cmake/NDIDefExports.cmake). It contains **no NDI code**: every function returns 0, so a stub-linked plugin that reaches Resolve sees `NDIlib_initialize()` fail and runs as a pass-through. Because Linux has no delay-load, the `.ofx` can't load without some `libndi.so.6` beside it, so stub builds stage the stub into the bundle. That keeps the CI load checks meaningful. A stub tree **loads but never streams**. Its artifacts are named `-STUB`, and the stub exports a marker symbol, `ndioutput_stub_libndi`, so packaging (#78) can refuse it (`nm -D libndi.so.6 | grep ndioutput_stub`).
+
+### Install layout (Tier 1 — ticket #73)
+
+`cmake --install build --prefix stage` produces the spec bundle tree (decision 7):
+
+```
+stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/NDIOutput.ofx
+stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/libndi.so.6        (+ the SDK's licenses .txt with the real SDK)
+stage/NDIOutput.ofx.bundle/Contents/Resources/{ndi_timeline_watch.lua,ndi_timeline_watch.py,LSVR.NDIOutput.png}
+```
+
+It installs under `/usr/OFX/Plugins/`. The install script, the plugin-cache location and the Tier 1–2 procedure come with #73/#78, after the host facts in ticket #71 are verified.
+
+### Logs on Linux
+
+`NDI_LOG` (and the CUDA module's log) goes to **syslog** with ident `NDIOutput` (spec decision 16). Follow it live, including over SSH:
+
+```bash
+journalctl -f -t NDIOutput
+```
+
+Set `NDI_OUTPUT_LOG_FILE` to a writable path in Resolve's environment and every line is appended there too, as on Windows.
+
+### CI
+
+[.github/workflows/linux.yml](.github/workflows/linux.yml) has the same triggers as `windows.yml` (pushes to `dev`, `master`, `feature/**`, PRs into `dev`, manual dispatch). The **build** job runs in `nvidia/cuda:12.9.1-devel-rockylinux8`:
+
+1. `scripts/linux_build_deps.sh`
+2. configure and build Release **including the CUDA translation units**
+3. `ctest`, including `test_plugin_elf`, which `dlopen`s the plugin inside Rocky 8
+4. stage the install, check the bundle layout, and re-run `test_plugin_elf` on the staged `.ofx`
+5. upload the tree as **`NDIOutput-linux-x86_64-STUB`** and the checker as `test_plugin_elf-linux-x86_64`
+
+The **load-check-ubuntu** job then runs that checker against the artifact in `ubuntu:22.04`, so the Rocky-built binary is shown to load on the distro the tier tests use. CI has no GPU, no NDI SDK and no Resolve: kernel identity runs on the workstation (#74), and Tiers 1–2 stay human.
+
+Same rule as the other platforms: any Linux build change updates this section in the same PR.
 
 ---
 
