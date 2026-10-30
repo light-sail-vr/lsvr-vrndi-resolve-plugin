@@ -401,6 +401,7 @@ set(NDI_PORTABLE_TESTS
     test_stereo_pair
     test_platform_paths
     test_ndi_loader
+    test_linux_ndi_runtime
     test_stmap
     test_brawmap)
 if(WIN32)
