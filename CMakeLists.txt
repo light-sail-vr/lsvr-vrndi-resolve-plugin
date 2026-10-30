@@ -227,6 +227,15 @@ endif()
 if(WIN32)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
 endif()
+if(NDI_PLATFORM_LINUX)
+    # GCC contracts a*b+c into FMA by default (-ffp-contract=fast) whenever
+    # the target has FMA — always on aarch64, on x86-64 the moment anyone
+    # raises -march. The CPU references must round like MSVC's (no
+    # contraction) for the CUDA byte-identity test to mean anything (Linux
+    # spec decision 14), so pin it off rather than rely on the baseline ISA.
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffp-contract=off>")
+endif()
 
 # Byte-identity flag (ticket #22): the CUDA kernels must produce bytes equal
 # to the shared CPU references, so nvcc may not contract the multiply-adds
