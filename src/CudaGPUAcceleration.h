@@ -1,7 +1,8 @@
 #ifndef CUDA_GPU_ACCELERATION_H
 #define CUDA_GPU_ACCELERATION_H
 
-#ifdef _WIN32
+// Windows (ticket #22) and Linux (linux-port-spec decision 12); macOS uses
+// the Metal module behind the same contract.
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -196,7 +197,5 @@ void  cuda_gpu_release_buffer(void* deviceBuffer);
 #ifdef __cplusplus
 }
 #endif
-
-#endif // _WIN32
 
 #endif // CUDA_GPU_ACCELERATION_H

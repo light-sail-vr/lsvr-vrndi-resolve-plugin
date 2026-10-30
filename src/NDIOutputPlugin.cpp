@@ -40,8 +40,12 @@ static void ndiWinLog(const char* fmt, ...);
 #define NDI_LOG(fmt, ...) ndiWinLog("NDI Plugin: " fmt, ##__VA_ARGS__)
 #define NDI_LOG_TEXT(str) ndiWinLog("NDI Plugin: %s", str)
 #else
-#define NDI_LOG(fmt, ...) printf("NDI Plugin: " fmt "\n", ##__VA_ARGS__)
-#define NDI_LOG_TEXT(str) printf("NDI Plugin: %s\n", str)
+// Linux sink: syslog ident "NDIOutput" (journalctl -f -t NDIOutput) plus the
+// same optional NDI_OUTPUT_LOG_FILE file sink as Windows. A desktop-launched
+// Resolve has no console, so printf would go nowhere. See LinuxLog.h.
+#include "LinuxLog.h"
+#define NDI_LOG(fmt, ...) ndi_linux_log::log("NDI Plugin: " fmt, ##__VA_ARGS__)
+#define NDI_LOG_TEXT(str) ndi_linux_log::log("NDI Plugin: %s", str)
 #endif
 
 #include "ofxImageEffect.h"
