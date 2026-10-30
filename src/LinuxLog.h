@@ -65,8 +65,8 @@ inline void vlog(const char* fmt, va_list args)
     writeLine(buf, len);
 }
 
-inline void log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-inline void log(const char* fmt, ...)
+inline void write(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+inline void write(const char* fmt, ...)
 {
     va_list args;
     va_start(args, fmt);

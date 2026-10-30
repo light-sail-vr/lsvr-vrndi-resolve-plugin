@@ -47,6 +47,7 @@
 // module logs through its own os_log the same way).
 static void cudaLog(const char* fmt, ...)
 {
+#ifdef _WIN32
     char buf[1024];
     va_list args;
     va_start(args, fmt);
@@ -55,12 +56,14 @@ static void cudaLog(const char* fmt, ...)
     if (n < 0) return;
     size_t len = static_cast<size_t>(n);
     if (len > sizeof(buf) - 2) len = sizeof(buf) - 2;
-#ifdef _WIN32
     buf[len] = '\n';
     buf[len + 1] = '\0';
     OutputDebugStringA(buf);
 #else
-    ndi_linux_log::writeLine(buf, len);
+    va_list args;
+    va_start(args, fmt);
+    ndi_linux_log::vlog(fmt, args);
+    va_end(args);
 #endif
 }
 #define CUDA_LOG(fmt, ...) cudaLog("NDI Plugin CUDA: " fmt, ##__VA_ARGS__)
