@@ -111,14 +111,14 @@ On NVIDIA hardware the pipeline is GPU-native through the existing CUDA module. 
 
 - **No new seams beyond the platform-prefixed ones above.** The GPU seam is the existing GPU-module contract, unchanged. The CUDA module's byte-identity test is the oracle on Linux, as on Windows.
 - **Tier 0 (Linux)** is a CMake build plus `ctest` under GCC. CI runs it on every push: the portable suite, the Linux watcher and dialog seam tests, and an ELF-hygiene test. The ELF-hygiene test is the Linux counterpart of `test_plugin_delayload`. It asserts:
-  - `NEEDED` libraries are only `libndi.so.6` plus glibc/libm/libdl/libpthread/librt (no `libstdc++`, no `libz`, no `libcudart`)
+  - `NEEDED` libraries are only glibc/libm/libdl/libpthread/librt (no `libstdc++`, no `libz`, no `libcudart`, and since #73 no `libndi.so.6`, which decision 8 `dlopen`s)
   - no `GLIBC_` symbol version above 2.28
-  - `RUNPATH` is `$ORIGIN`
+  - no `RUNPATH` or `RPATH` (*amended by #73: `$ORIGIN` was only there for the link-time `libndi`*)
   - only the two OFX entry points are exported
 
-  It also `dlopen`s the bundle in a Rocky 8 container and in an Ubuntu container, and calls `OfxGetNumberOfPlugins`.
+  It also `dlopen`s the `.ofx` alone (no `libndi.so.6` beside it) in a Rocky 8 container and in an Ubuntu container, and calls `OfxGetNumberOfPlugins`.
 - **Tiers 1–2 (Linux)** run on the Ubuntu box, driven over SSH from the Mac:
-  1. rsync, build, then `sudo` install to `/usr/OFX/Plugins`.
+  1. rsync, build, then install to `/usr/OFX/Plugins` (`scripts/linux_remote.sh`; `matt` owns the directory on the test box, so no `sudo`).
   2. Matt fully restarts Resolve and starts playback at the box.
   3. The stream is verified from a **second machine** (Mac NDI Video Monitor / Studio Monitor), so avahi/firewall behaviour is part of the test.
   4. `ndi_verify` and the patch and resolution charts run unchanged.

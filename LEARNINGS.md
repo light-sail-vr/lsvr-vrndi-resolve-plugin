@@ -61,6 +61,18 @@ One-time prep: keep a dedicated Resolve project (e.g. **`NDI_PLUGIN_TEST`**) wit
 - **Latency/jitter:** SDK examples `NDIlib_Latency_Test`, `NDIlib_Jitter_Measure` in `/Library/NDI Advanced SDK for Apple/examples/C++/`.
 - **GPU path/perf:** `./scripts/monitor_gpu_performance.sh` plus the log lines above; the v1.2.4 release notes list the exact strings that distinguish GPU success from CPU fallback.
 
+### The same loop per platform
+
+The tiers above are written for macOS. Windows and Linux run the same tiers with these commands (details in BUILD.md):
+
+| Platform | Tier 0 | Tier 1 (install, then fully restart Resolve) | Live logs | Plugin cache |
+|---|---|---|---|---|
+| macOS | `make dev`, `make test` | `sudo make install` | `./scripts/monitor_ndi_logs.sh` | `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/OFXPluginCacheV2.xml` |
+| Windows | CMake build + `ctest` under MSVC (CI on every push) | copy the bundle to `C:\Program Files\Common Files\OFX\Plugins\` (or the installer) | DebugView (`OutputDebugStringA`) | `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\OFXPluginCacheV2.xml` |
+| Linux (COMFYBOX, from the Mac) | `scripts/linux_remote.sh sync && scripts/linux_remote.sh build` (Rocky 8 container on the box, `ctest` included; CI on every push) | `scripts/linux_remote.sh install` (no sudo) | `scripts/linux_remote.sh logs` (`journalctl -f -t NDIOutput`) | `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml` (`linux_remote.sh cache` / `cache-reset`) |
+
+Tier 2 is the same everywhere: a human presses play, and a second machine receives (`./build/ndi_verify --source "<HOST> (VR.NDI Sender)"` from the Mac), so the firewall and discovery are part of the test. On Linux the restart and play happen at the box; ask Matt for them as numbered steps.
+
 ### Automation roadmap
 
 - **`ndi_verify` CLI** — built 2026-10-08 (`make ndi-verify` → `build/ndi_verify`, source `tools/ndi_verify.cpp`): asserts resolution, declared frame rate, FourCC and non-black frames (`--expect WxH --expect-fps N --expect-fourcc UYVY`, nonzero exit on failure), measures the received rate and SDK drop counters, dumps the last frame (`--dump frame.ppm`, auto-converted to PNG), and can mirror a specific receiver's settings (`--bandwidth lowest`, `--color best`). Pair it with `scripts/gen_resolution_chart.py` for an end-to-end resolution check. Typical Tier 2 line: `./build/ndi_verify --source "NDI Output" --expect 7200x3600 --duration 5 --dump build/last.ppm`.
@@ -97,12 +109,14 @@ From the feasibility research in [docs/2026-08-28-resolve-stereo-program-tap-fea
 
 ### Linux environment map (COMFYBOX, verified 2026-10-30, ticket #71)
 
-Reached from the Mac over SSH as `matt@100.80.25.1` (Tailscale). The LAN addresses are `192.168.1.127` (`enp6s0`, shared with the Mac's `en4`) and `172.27.48.19` (`enp64s0`, shared with the Mac's `en8`). Resolve runs in `matt`'s X11 desktop session. A second account, `connect`, installed Resolve and owns `/opt/resolve`; it's the fallback if Resolve misbehaves as `matt`.
+Reached from the Mac over SSH as `matt@100.80.25.1` (Tailscale). The LAN addresses are `192.168.1.127` (`enp6s0`, shared with the Mac's `en4`) and `172.27.48.19` (`enp64s0`, shared with the Mac's `en8`). Resolve runs in `matt`'s X11 desktop session (`:0`, GDM autologin), which Matt views through Jump Desktop. A second account, `connect`, installed Resolve and owns `/opt/resolve`; it's the fallback if Resolve misbehaves as `matt`.
 
 | What | Where / value |
 |---|---|
 | OS / GPU / driver | Ubuntu 24.04.4 (kernel 6.8), X11 session · RTX 3090 Ti · NVIDIA 610.43.02 |
-| Resolve | Studio 21.1.0 build 17, `/opt/resolve/bin/resolve`; logs "Selected compute API: CUDA" |
+| Resolve | Studio 21.1.0 build 17, `/opt/resolve/bin/resolve`; logs "Selected compute API: CUDA". Launched as `sg resolve /opt/resolve/bin/resolve`; its main thread is named `GUI Thread` and `/proc/<pid>/exe` is unreadable, so find it by argv[0] in `/proc/<pid>/cmdline` (2026-10-30 entry). Logs to syslog as `resolve` |
+| Display (`:0`) | NVIDIA driver on a virtual 1080p monitor: `/etc/X11/xorg.conf.d/10-nvidia-virtual.conf` (`ConnectedMonitor DFP-0` + `CustomEDID /etc/X11/edid-1080p.bin`, "LSV NDI-VIRTUAL"), Xorg as root (`needs_root_rights=yes`). Switch scripts `~/display-to-nvidia.sh` / `~/display-revert-dummy.sh`; backup in `/etc/X11/xorg.conf.d.backup-20261030`. The dummy driver breaks Resolve's CUDA-GL interop (2026-10-30 entry) |
+| Dev loop | `scripts/linux_remote.sh` from the Mac: checkout `~/ndioutput-dev`, builds in the `ndioutput-build:rocky8` Docker image (CI's image + `linux_build_deps.sh`). Test charts in `~/ndi-test-media/` and `/var/tmp/ndi-test-media/`; Resolve project **NDI Testing** with timelines `NDI_LINUX_TEST` (1920×1080 patch chart) and `NDI_LINUX_STEREO` (stereo clip of two 2048² charts) |
 | Plugin install dir | `/usr/OFX/Plugins/` (owned by `matt`, so dev installs need no sudo). Resolve also scans `OFX_PLUGIN_PATH` |
 | OFX plugin cache | `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml`. Delete it with Resolve closed to force a rescan |
 | Resolve app log | `~/.local/share/DaVinciResolve/logs/ResolveDebug.txt` |
@@ -111,7 +125,7 @@ Reached from the Mac over SSH as `matt@100.80.25.1` (Tailscale). The LAN address
 | Libraries Resolve ships | `libcudart` 12.8 (plus older ones) and Qt5. **No** `libstdc++` or `libz`: the plugin's `-static-libstdc++` guards against Rocky systems, not Resolve |
 | Toolchain | CUDA 12.9 at `/usr/local/cuda-12.9` (toolkit only), CMake 3.28.3, GCC 13.3, Docker 29.1.3 (`matt` is in the `docker` group) |
 | NDI SDK | Standard "NDI SDK for Linux" v6.3.2.0 (2026-04-13) at `~/sdks/NDI SDK for Linux`. The library is `lib/x86_64-linux-gnu/libndi.so.6` → `libndi.so.6.3.2`; licences are in `licenses/libndi_licenses.txt`. A release needs an SDK no more than 30 days old, so update it first |
-| Network | `avahi-daemon` active. `ufw` active with NDI rules (mDNS 5353/udp; 5959–5999, 6960–6999 and 7960–7999 tcp+udp) for `192.168.1.0/24`, `172.27.48.0/24` **and `fe80::/10`**. The scripts that set these up are `~/linux-port-setup.sh` and `~/linux-port-ufw-ipv6.sh` on the box |
+| Network | `avahi-daemon` active (**never stop it while Resolve runs**: Resolve segfaults, 2026-10-30 entry). `ufw` active with NDI rules (mDNS 5353/udp; 5959–5999, 6960–6999 and 7960–7999 tcp+udp) for `192.168.1.0/24`, `172.27.48.0/24` **and `fe80::/10`**. The scripts that set these up are `~/linux-port-setup.sh` and `~/linux-port-ufw-ipv6.sh` on the box |
 | Browse-dialog helpers | `zenity` installed; `kdialog` not |
 | Network smoke test | `~/ndi-test/send_video` (the SDK's `NDIlib_Send_Video`, built on the box). Check from the Mac with `./build/ndi_verify --source "COMFYBOX (send_video)"` |
 
@@ -643,6 +657,67 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Fix:** for #73, resolve `libndi` at runtime instead: `dlopen` the bundled copy by sibling path through `Processing.NDI.DynamicLoad.h`. A missing runtime or Avahi then means pass-through plus a logged reason. `install.sh` (#78) checks for the Avahi libraries and the daemon.
 **Validated by:** `objdump -p` on the NDI SDK for Linux 6.3.2.0. The failure mode itself is untested so far.
 **Rule:** check what the NDI runtime itself links before choosing how the plugin links it. A dependency of the vendor library can make the plugin vanish just as a missing vendor library would.
+
+### 2026-10-30 — `openlog("NDIOutput")` in the plugin re-tags Resolve's own syslog lines (#73)
+**Symptom:** (found before it shipped) `src/LinuxLog.h` from #72 called `openlog("NDIOutput", …)` once, on the plugin's first log line, and noted that host-side syslog use was unverified.
+**Root cause:** glibc keeps one syslog ident per process, and Resolve does use syslog. `/opt/resolve/bin/resolve` imports `openlog`/`syslog`, as do the `libQt5Core`, `libglib`, `libcrypto` and `liblog4cxx` it ships, and the journal holds Resolve lines with `_TRANSPORT=syslog` and ident `resolve` (Qt warnings at startup; "New connection received." when a scripting client connects). A repro on the box (a host that calls `openlog("resolvehost")`, dlopens a library that calls `openlog("NDIOutput")`, then logs again) printed `resolvehost[45029]: host line BEFORE plugin load` and then `NDIOutput[45029]: host line AFTER plugin load`. So once the plugin logged, Resolve's lines landed under `journalctl -t NDIOutput`; and if Resolve called `openlog` again later, ours would have landed under its tag.
+**Fix:** (branch `feature/linux-first-stream`) the plugin never calls `openlog`. Each line goes to `/dev/log` as its own RFC 3164 datagram, `<14>Mmm dd hh:mm:ss NDIOutput[pid]: …` (the format glibc writes), over a private `SOCK_DGRAM` socket with one reconnect. journald takes the tag from the datagram, so `journalctl -t NDIOutput` still works. `tests/test_linux_log.cpp` covers the format.
+**Validated by:** the repro above, then live in Resolve 21.1 on the box. With the old `openlog` build (pid 112025) the plugin's lines were tagged `NDIOutput` until 15:11:01, when Resolve's Bonjour layer re-opened syslog (`resolve[112025]: *** WARNING *** The program 'resolve' uses the Apple Bonjour compatibility layer of Avahi`). After that the plugin's own `NDI Plugin: Destroying instance` (15:18:27) went out as `resolve[112025]` and was missing from `journalctl -t NDIOutput`. With the per-message build (pid 140969) the same warning came at 15:35:36 and every later plugin line kept `NDIOutput`: 20,785 `NDIOutput` lines, all the plugin's, and 3 `resolve` lines, all Resolve's. `test_linux_log` is green on the box.
+**Rule:** a plugin never changes process-wide state its host also uses: no `openlog`, `setlocale`, signal handlers, or loader settings. Tag per message instead.
+
+### 2026-10-30 — `pgrep -x resolve` doesn't see a running Resolve on Linux (#73)
+**Symptom:** `scripts/linux_remote.sh cache-reset`, whose job is to refuse while Resolve runs, deleted the cache path while Resolve was up. Its own test passed, because the test faked `pgrep`.
+**Root cause:** Resolve's main thread renames itself, so its `comm` is `GUI Thread` (`ps -eo pid,comm,args`: `11049 GUI Thread /opt/resolve/bin/resolve`). `pgrep -x resolve` matches `comm`, so it never matches. The obvious fallback, `/proc/<pid>/exe`, fails too: the desktop launches Resolve as `sg resolve /opt/resolve/bin/resolve`, and the setgid switch makes the process non-dumpable, so even its owner can't read `exe`.
+**Fix:** (branch `feature/linux-first-stream`) the guard reads argv[0] from `/proc/<pid>/cmdline`, which stays readable, and matches `*/bin/resolve`. That skips the `sg` and `sh -c` launchers, whose argv[0] is `sg` / `sh`. The test now fakes `/proc` with the box's real neighbours instead of faking `pgrep`.
+**Validated by:** the new test is red on the `pgrep` version and the `exe` version, and green after. Live: `NDI_LINUX_CACHE=/nonexistent scripts/linux_remote.sh cache-reset` with Resolve running exits 3 with `Resolve is running (pid 11049)`.
+**Rule:** find Resolve on Linux by argv[0] in `/proc/<pid>/cmdline`, never by process name or `exe`. A test that fakes the probe (`pgrep`) can't catch a wrong probe; fake its data source (`/proc`) instead.
+
+### 2026-10-30 — Resolve on Linux reported "GPU out of memory" on the Color page: the X dummy driver, not memory (#73)
+**Symptom:** on the box, Resolve reported GPU out of memory as soon as the Color page opened. ComfyUI, which shares the RTX 3090 Ti, looked like the cause.
+**Root cause:** (coordinator, 15:15–15:35) `matt`'s desktop `:0` ran X's `dummy` driver with software GL (swrast), so Resolve's CUDA-GL interop failed (`Failed to register OpenGL object for CUDA interop: cudaErrorUnknown`), which Resolve reports as out of memory. Reverting with ComfyUI unloaded reproduced it: 8 interop errors on a fresh launch with only 1.2 GB of GPU in use. Nothing to do with the plugin.
+**Fix:** (box config, not the repo) `/etc/X11/xorg.conf.d/10-nvidia-virtual.conf` runs the NVIDIA driver on a virtual monitor (`ConnectedMonitor DFP-0`, `CustomEDID /etc/X11/edid-1080p.bin`), with Xorg as root (`needs_root_rights=yes`) and GDM autologin as `matt`. Without the EDID, GNOME sees no monitor and the remote view is black. Scripts: `~/display-to-nvidia.sh`, `~/display-revert-dummy.sh`; backup in `/etc/X11/xorg.conf.d.backup-20261030`.
+**Validated by:** the 15:35 and 16:05 launches logged 0 CUDA interop errors and streamed through the plugin.
+**Rule:** on a headless Linux Resolve box, run X on the NVIDIA driver (a virtual monitor with a fake EDID). A dummy or software-GL display breaks Resolve's GPU path, and Resolve calls it "out of memory".
+
+### 2026-10-30 — Stopping avahi-daemon under a running Resolve crashes Resolve (Resolve bug) (#73)
+**Symptom:** while the plugin streamed, `sudo systemctl stop avahi-daemon.socket avahi-daemon.service` at 16:03:30 killed Resolve (SIGSEGV) within the second. D-Bus re-activated `org.freedesktop.Avahi` at once, so the daemon was running again afterwards anyway.
+**Root cause:** Resolve's crash report (`/tmp/resolve.*`, base64 JSON → `Callstack.txt`) shows `libDaVinciPanelAPI.so` → `libdns_sd.so.1 DNSServiceProcessResult` → `libavahi-common avahi_simple_poll_dispatch` → `libavahi-client.so.3` → `dbus_connection_dispatch` → signal 11. That is Resolve's control-panel discovery through its own bundled Bonjour-compat `libdns_sd`/`libavahi`, the same layer that logs "uses the Apple Bonjour compatibility layer of Avahi" at startup. The plugin and `libndi` aren't on the stack, so Resolve crashes this way with or without the plugin.
+**Fix:** none possible in the plugin. Test daemon behaviour with Resolve closed, using a standalone sender, and stop the daemon with `systemctl mask --runtime` first, or D-Bus restarts it.
+**Validated by:** the crash report's call stack and the journal timing (the plugin's last line was an ordinary `Render called` in the same second).
+**Rule:** never stop avahi-daemon while Resolve runs on Linux. To test without the daemon, quit Resolve, `mask --runtime` then stop both units, and `unmask` + start them afterwards.
+
+### 2026-10-30 — `libndi` is now `dlopen`ed on Linux; its failure path first retried on every frame (#73)
+**Symptom:** (1) the #71 entry: linked through `RUNPATH=$ORIGIN`, a machine without the Avahi client libraries can't load `libndi.so.6`, so the whole plugin would vanish from the Effects Library. (2) Once the plugin `dlopen`ed `libndi` instead, the first in-Resolve failure test (a `libndi` that can't load its Avahi library) streamed nothing and passed frames through as intended, but logged `NDI not initialized, attempting to initialize... / Initializing NDI SDK... / Failed to initialize NDI, skipping frame` on every render: 273 times in 30 s.
+**Root cause:** (1) a link-time import makes every library `libndi` NEEDs a precondition of the plugin loading at all. (2) The `dlopen` itself was latched by a function-local static, but `ensureNDIReady` treated "not initialized" as retryable on every render, logging each attempt.
+**Fix:** (branch `feature/linux-first-stream`)
+- The plugin links no NDI library on Linux. `src/LinuxNDIRuntime.h` finds the bundle with `dladdr`, `dlopen`s `Contents/Linux-x86-64/libndi.so.6` (`RTLD_NOW | RTLD_LOCAL`, falling back to the system search), takes `NDIlib_v5_load()`'s table, and every call goes through `NDI_API(fn)` (`NDI_RUNTIME_DLOPEN`, Linux only).
+- A failure is logged once with every path and `dlerror`. Stream Status says why (`NDI off — Avahi client library missing …`, …) and the failure is latched for the process (`gNDIOff`).
+- `test_plugin_elf` now asserts `libndi` is not in `NEEDED`, there is no RUNPATH, and the `.ofx` `dlopen`s with no `libndi.so.6` beside it.
+**Validated by:**
+- `test_plugin_elf` was red on the old link (libndi NEEDED, RUNPATH `$ORIGIN`, dlopen failed with no libndi beside the plugin) and is green after, in Rocky 8 and Ubuntu 22.04 (CI) and with the real SDK on the box. In an `ubuntu:24.04` container with no Avahi libraries the plugin `dlopen`s while `libndi.so.6` fails with `libavahi-common.so.3: cannot open shared object file`. `test_linux_ndi_runtime` covers the path derivation and every failure status on all three platforms.
+- In Resolve, with the bundle's `libndi` patched to NEED a non-existent `libavahi-commoX.so.3` (same length, so the ELF stays valid): the plugin was listed and applied, the viewer passed through, Stream Status read `NDI off …`, the cache entry had `status="0"`, and the journal had the full reason. After the latch fix, the same test (16:49) logged the reason once and then 350 renders with no retry lines, against 273 retries in 30 s before. The working build reinstalled afterwards streamed 960×540 at 24.19 fps, 0 dropped.
+**Rule:** load a vendor runtime that has its own dependencies at runtime, never link it, and latch its failure. To test the missing-dependency path without uninstalling anything, rename the dependency in a copy of the library's `.dynstr`.
+
+### 2026-10-30 — NDI on Linux is only discoverable while avahi-daemon runs; no fallback (#73)
+**Symptom:** (question from spec decision 10) is a running `avahi-daemon` hard-required, or does `libndi` degrade gracefully?
+**Root cause:** `libndi` advertises through the daemon over D-Bus (`libavahi-client`) and has no mDNS responder of its own. With the daemon down, a sender started earlier dropped out of discovery once the Mac's cached record expired (~90 s). A sender started with the daemon down got `NDIlib_initialize: true` and `send_create: ok` and was never discoverable. A receiver that already had the address still connected and received.
+**Fix:** documentation (BUILD.md "Network: Avahi and the firewall", README). `install.sh` (#78) must check the daemon, because the plugin can't tell: nothing in the NDI API fails.
+**Validated by:** with Resolve closed, a scratch sender loading the bundle's `libndi` through the plugin's loader, the daemon masked and stopped for 11 min 46 s, and the Mac logging `ndi_verify --list` and receives every ~12 s (docs/2026-10-30-linux-host-probes.md §5). A container proxy for "no daemon" didn't work (`libavahi-client` talks to the daemon over the D-Bus system bus, which the container didn't have, so even the control run failed) and was dropped.
+**Rule:** on Linux, "source not visible anywhere" means checking `systemctl is-active avahi-daemon` before the plugin; "visible but no video" means checking the firewall (IPv6 link-local).
+
+### 2026-10-30 — The CPU path can't keep 1080p24 real time on the Linux box; Half can (#73)
+**Symptom:** with Resolution Full, the first Linux stream ran at ~15.5 fps on a 24 fps timeline, and Resolve's own playback slowed with it (probe `dt` median 65 ms). Half (960×540) and Quarter ran at a steady 24.4 fps.
+**Root cause:** until #74 the Linux build is CPU-only. The CPU path copies the float frame and converts RGBA→UYVY on the render thread (~13 ms at 960×540, so ~50 ms at 1080p), and Resolve waits for the render action. The same CPU path on macOS sits behind Metal and is rarely exercised.
+**Fix:** none in #73 (CUDA is #74). Tier 2 on the CPU build uses Half.
+**Validated by:** `ndi_verify` receive loop and the Log Render Calls capture (docs/2026-10-30-linux-host-probes.md §1, §3).
+**Rule:** judge a Linux stream's frame rate only on the GPU-native build; on the CPU build, test at Half or below.
+
+### 2026-10-30 — Switching Stereo 3D Vision to Stereo mid-playback renders no right eye until playback restarts (Linux) (#73)
+**Symptom:** with the probe on, Vision: Mono → Stereo during playback changed nothing: still `eye=L` only, and Stream Status stayed `Mono`. Matt saw that as "the status didn't update".
+**Root cause:** Resolve creates the right-eye instance and starts rendering it only when playback (re)starts. The first `eye=R` render and a second `Creating instance` came 25 s after the switch, at the playback restart. The status was accurate the whole time.
+**Fix:** none (host behaviour). The probe write-up records it.
+**Validated by:** docs/captures/2026-10-30-linux-stereo-cpu-color-page.log.
+**Rule:** after changing Stereo 3D Vision, stop and restart playback before reading Stream Status or a probe capture.
 
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
