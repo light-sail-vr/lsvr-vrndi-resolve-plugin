@@ -233,22 +233,22 @@ endif()
 if(WIN32)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
 endif()
+# Byte identity (ticket #22; Linux spec decision 14): the CUDA kernels must
+# produce bytes equal to the shared CPU references, so no compiler may fuse a
+# multiply-add into an FMA (one rounding instead of two) on either side:
+#  - nvcc: --fmad=false on every CUDA translation unit (NDI_CUDA_EXACT_MATH,
+#    applied per target below).
+#  - Host C/C++ on Linux: -ffp-contract=off. GCC contracts a*b+c by default
+#    whenever the target ISA has FMA (always on aarch64; on x86-64 as soon
+#    as -march is raised), so byte identity must not depend on the target
+#    ISA. Still never add -march=native/-mfma.
+#  - MSVC: generates no FMA at its default /arch; nothing to pin.
+# The kernels are memory-bound; the cost is noise. test_cuda_downscale is
+# the enforcement.
 if(NDI_PLATFORM_LINUX)
-    # GCC contracts a*b+c into FMA by default (-ffp-contract=fast) whenever
-    # the target has FMA — always on aarch64, on x86-64 the moment anyone
-    # raises -march. The CPU references must round like MSVC's (no
-    # contraction) for the CUDA byte-identity test to mean anything (Linux
-    # spec decision 14), so pin it off rather than rely on the baseline ISA.
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>")
     add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffp-contract=off>")
 endif()
-
-# Byte-identity flag (ticket #22): the CUDA kernels must produce bytes equal
-# to the shared CPU references, so nvcc may not contract the multiply-adds
-# the host compilers leave separate (MSVC generates no FMA at the default
-# /arch; GCC targets the x86-64 baseline, which has no FMA instructions —
-# never add -march=native/-mfma, Linux spec decision 14). The kernels are
-# memory-bound; the cost is noise. test_cuda_downscale is the enforcement.
 set(NDI_CUDA_EXACT_MATH "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
 
 # --- BRAW immersive-metadata reader (ticket #26; Windows only so far) -------
