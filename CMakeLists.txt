@@ -49,10 +49,16 @@ endif()
 # C is enabled for the generated NDI stub (ndi_stub.c, CI mode below).
 project(NDIOutput LANGUAGES C CXX)
 
-if(WIN32)
-    set(NDI_PLATFORM_LINUX FALSE)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# Platform predicates: if(WIN32) for Windows platform pieces, if(MSVC) for
+# MSVC compiler flags, and NDI_PLATFORM_LINUX — defined here, once — for
+# every Linux-only block.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(NDI_PLATFORM_LINUX TRUE)
+else()
+    set(NDI_PLATFORM_LINUX FALSE)
+endif()
+
+if(NDI_PLATFORM_LINUX)
     if(CMAKE_VERSION VERSION_LESS 3.24)
         message(FATAL_ERROR
             "The Linux build needs CMake >= 3.24 (ZLIB_USE_STATIC_LIBS); "
@@ -61,7 +67,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
         set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
     endif()
-else()
+elseif(NOT WIN32)
     message(FATAL_ERROR
         "CMake drives the Windows and Linux builds only; use the Makefile on "
         "macOS (see BUILD.md).")
@@ -152,7 +158,7 @@ if(WIN32)
             OUTPUT_NAME "${NDI_DLL_NAME}"
             PREFIX "")
     endif()
-else()
+elseif(NDI_PLATFORM_LINUX)
     # The "NDI SDK for Linux" installer unpacks into a folder of that name
     # wherever it is run; point NDI_SDK_PATH at it (or export NDI_SDK_PATH).
     if(DEFINED ENV{NDI_SDK_PATH})
@@ -347,7 +353,7 @@ if(WIN32)
     # Make any linker warning on this target fatal so it can never ship
     # quietly.
     target_link_options(NDIOutput PRIVATE "/DELAYLOAD:${NDI_DLL_NAME}.dll" "/WX")
-else()
+elseif(NDI_PLATFORM_LINUX)
     # Linux ELF hygiene (spec decision 6). Resolve loads its own C++ runtime,
     # zlib, ... from /opt/resolve/libs into the same process, so the plugin
     # isolates itself from all of it:
@@ -456,7 +462,7 @@ if(WIN32)
     target_link_options(test_plugin_delayload PRIVATE "/ENTRY:wmainCRTStartup")
     add_test(NAME test_plugin_delayload
              COMMAND test_plugin_delayload "$<TARGET_FILE:NDIOutput>")
-else()
+elseif(NDI_PLATFORM_LINUX)
     # ELF-hygiene smoke test (the Linux counterpart): NEEDED allowlist, glibc
     # ceiling, RUNPATH, export allowlist, and an isolated dlopen. Linked with a
     # static C++ runtime itself, so CI can run the Rocky-built binary in the
@@ -479,7 +485,7 @@ endif()
 # the installer tickets (#23, #78) own end-user packaging.
 if(WIN32)
     set(NDI_BUNDLE_BIN_DIR "NDIOutput.ofx.bundle/Contents/Win64")
-else()
+elseif(NDI_PLATFORM_LINUX)
     set(NDI_BUNDLE_BIN_DIR "NDIOutput.ofx.bundle/Contents/Linux-x86-64")
 endif()
 install(TARGETS NDIOutput
@@ -503,7 +509,7 @@ if(WIN32)
             "${NDI_SDK_PATH}/Bin/x64/Processing.NDI.Lib.Licenses.txt"
             DESTINATION "${NDI_BUNDLE_BIN_DIR}")
     endif()
-else()
+elseif(NDI_PLATFORM_LINUX)
     # libndi.so.6 is a load-time dependency on Linux (no delay-load), so the
     # bundle always carries one: the real runtime plus its licenses file, or —
     # stub builds only — the stub, so the staged tree still dlopens for the
