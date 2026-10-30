@@ -20,6 +20,8 @@ expect() {  # expect <name> <condition...>
     if "$@"; then echo "ok   $name"; else echo "FAIL $name" >&2; failures=$((failures + 1)); fi
 }
 
+absent() { ! grep -q "$1" "$2"; }  # absent <text> <file>
+
 # A scratch /proc: <pid>/cmdline, NUL-separated argv like the kernel's.
 # The box's real neighbours are always there: systemd-resolved, and the
 # `sg resolve /opt/resolve/bin/resolve` and `sh -c` wrappers that launch it.
@@ -33,6 +35,7 @@ fakeproc() {  # fakeproc <pid> <argv...>
 fakeproc 1100 /usr/lib/systemd/systemd-resolved
 fakeproc 11047 sg resolve /opt/resolve/bin/resolve
 fakeproc 11048 sh -c /opt/resolve/bin/resolve
+mkdir -p "$proc/121567"   # a process that exited mid-scan: no cmdline any more
 
 cache="$tmp/OFXPluginCacheV2.xml"
 reset() {  # run cache-reset against the scratch cache and /proc
@@ -48,6 +51,7 @@ reset; status=$?
 expect "refuses while Resolve runs (exit 3)" [ "$status" -eq 3 ]
 expect "cache kept while Resolve runs" [ -f "$cache" ]
 expect "names the running pid" grep -q "pid 4242)" "$tmp/out"
+expect "a vanished process is skipped silently" absent "No such file" "$tmp/out"
 
 # Resolve closed: delete it.
 rm -rf "${proc:?}/4242"

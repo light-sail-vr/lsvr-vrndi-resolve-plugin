@@ -54,7 +54,8 @@ shift 3
 resolve_pids() {
     local p argv0
     for p in "${NDI_LINUX_PROC:-/proc}"/[0-9]*; do
-        argv0="$(tr "\000" "\n" < "$p/cmdline" 2>/dev/null | head -n 1)" || continue
+        # 2>/dev/null before the <: a process may exit mid-scan.
+        argv0="$(tr "\000" "\n" 2>/dev/null < "$p/cmdline" | head -n 1)" || continue
         case "$argv0" in */bin/resolve) echo "${p##*/}" ;; esac
     done
 }
