@@ -19,8 +19,10 @@
 // Thread-safe: one mutex serialises the socket (render threads log
 // concurrently) and stdio locks each FILE*. Header-only so the plugin and
 // the CUDA module (CudaGPUAcceleration.cu) share one sink and one FILE*.
-// Without /dev/log (a container) lines are dropped there silently; the
-// file sink still works.
+// Never blocks a render thread on journald: the socket is non-blocking (a
+// full queue drops the line), and without /dev/log (a container) lines are
+// dropped there silently, retrying the connect at most once per
+// kReconnectBackoff rather than per line; the file sink still works.
 
 #ifndef LINUX_LOG_H
 #define LINUX_LOG_H
@@ -30,6 +32,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -73,12 +76,35 @@ inline size_t formatDatagram(char* buf, size_t cap, const std::tm& when, long pi
     return n;
 }
 
+// How long a failed /dev/log connect is remembered before trying again.
+constexpr std::chrono::seconds kReconnectBackoff{5};
+
+// Rate-limits connect attempts after a failure, so a host without /dev/log
+// costs one socket()+connect() per kReconnectBackoff, not one per line.
+// Not thread-safe; the caller holds the sink's mutex.
+struct ReconnectGate {
+    bool failed = false;
+    std::chrono::steady_clock::time_point lastFailure{};
+
+    bool allowed(std::chrono::steady_clock::time_point now) const
+    {
+        return !failed || now - lastFailure >= kReconnectBackoff;
+    }
+    void fail(std::chrono::steady_clock::time_point now)
+    {
+        failed = true;
+        lastFailure = now;
+    }
+    void succeed() { failed = false; }
+};
+
 namespace detail {
 
-// Connected datagram socket to /dev/log, or -1. Caller holds the mutex.
+// Connected non-blocking datagram socket to /dev/log, or -1. Caller holds
+// the mutex.
 inline int connectDevLog()
 {
-    const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) {
         return -1;
     }
@@ -96,6 +122,7 @@ inline void sendToSyslog(const char* line, size_t len)
 {
     static std::mutex mutex;
     static int fd = -1;
+    static ReconnectGate gate;
     char datagram[2304];
     const std::time_t now = std::time(nullptr);
     std::tm when = {};
@@ -107,10 +134,16 @@ inline void sendToSyslog(const char* line, size_t len)
     // One reconnect: journald restarting leaves the old socket dead.
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (fd < 0) {
+            const auto tick = std::chrono::steady_clock::now();
+            if (!gate.allowed(tick)) {
+                return; // /dev/log failed recently; drop without a syscall
+            }
             fd = connectDevLog();
             if (fd < 0) {
+                gate.fail(tick);
                 return;
             }
+            gate.succeed();
         }
         if (send(fd, datagram, n, MSG_NOSIGNAL) >= 0) {
             return;

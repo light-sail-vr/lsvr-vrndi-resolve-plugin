@@ -2,10 +2,11 @@
 // tags each message itself instead of calling openlog(), which would re-tag
 // every syslog line of Resolve's process (LEARNINGS 2026-10-30).
 // Build & run: ctest (Linux); on macOS by hand:
-//   c++ -std=c++17 -DSOCK_CLOEXEC=0 -Isrc tests/test_linux_log.cpp -o build/t && build/t
+//   c++ -std=c++17 -DSOCK_CLOEXEC=0 -DSOCK_NONBLOCK=0 -Isrc tests/test_linux_log.cpp -o build/t && build/t
 
 #include "LinuxLog.h"
 
+#include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <string>
@@ -37,8 +38,35 @@ static std::string datagram(const char* msg, size_t len, size_t cap = 512)
     return buf;
 }
 
+// A host without /dev/log must cost one connect per backoff window, not one
+// per log line (render threads log).
+static void testReconnectGate()
+{
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point t0 = Clock::time_point() + std::chrono::hours(1);
+    ndi_linux_log::ReconnectGate gate;
+    expectTrue(gate.allowed(t0), "first connect is allowed");
+
+    gate.fail(t0);
+    expectTrue(!gate.allowed(t0), "no retry right after a failure");
+    expectTrue(!gate.allowed(t0 + ndi_linux_log::kReconnectBackoff - std::chrono::milliseconds(1)),
+               "no retry inside the backoff window");
+    expectTrue(gate.allowed(t0 + ndi_linux_log::kReconnectBackoff),
+               "retry once the backoff has passed");
+
+    gate.fail(t0 + ndi_linux_log::kReconnectBackoff);
+    expectTrue(!gate.allowed(t0 + ndi_linux_log::kReconnectBackoff + std::chrono::seconds(1)),
+               "a second failure restarts the window");
+
+    gate.succeed();
+    expectTrue(gate.allowed(t0 + ndi_linux_log::kReconnectBackoff + std::chrono::seconds(1)),
+               "a success clears the backoff");
+}
+
 int main()
 {
+    testReconnectGate();
+
     // RFC 3164 as glibc's syslog() writes it, so journald derives
     // SYSLOG_IDENTIFIER=NDIOutput and _PID from the tag: <PRI> with
     // LOG_USER|LOG_INFO = 14, "Mmm dd hh:mm:ss" (day space-padded), tag[pid]:.
