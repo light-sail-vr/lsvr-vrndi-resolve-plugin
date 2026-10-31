@@ -122,10 +122,12 @@ static void ndiWinLog(const char* fmt, ...);
 // (LinuxNDIRuntime.h, spec decision 8): every call goes through the API
 // table NDIlib_v5_load() returned, set once by ensureNDIRuntimeLoaded()
 // before NDIlib_initialize. Elsewhere NDI_API(fn) is the linked NDIlib_fn.
+// Atomic (release/acquire) so a thread that never took the init lock still
+// sees the table fully written; the acquire load is free on x86-64.
 #ifdef NDI_RUNTIME_DLOPEN
 #include "LinuxNDIRuntime.h"
-static const NDIlib_v5* gNDI = nullptr;
-#define NDI_API(fn) (gNDI->fn)
+static std::atomic<const NDIlib_v5*> gNDI{nullptr};
+#define NDI_API(fn) (gNDI.load(std::memory_order_acquire)->fn)
 #else
 #define NDI_API(fn) NDIlib_##fn
 #endif
@@ -1145,7 +1147,7 @@ static bool ensureNDIRuntimeLoaded()
             gNDIOff.latch(ndi_linux_runtime::statusText(r));
             return false;
         }
-        gNDI = static_cast<const NDIlib_v5*>(r.table);
+        gNDI.store(static_cast<const NDIlib_v5*>(r.table), std::memory_order_release);
         return true;
     }();
     return loaded;
