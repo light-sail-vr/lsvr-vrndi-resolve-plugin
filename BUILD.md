@@ -273,7 +273,7 @@ Release binaries are built **inside a Rocky Linux 8 container** (spec decision 5
 - **Docker** (or Podman) and the image `nvidia/cuda:12.9.1-devel-rockylinux8` (CUDA 12.9, pinned like Windows; the image also exists for arm64, which is how an Apple-silicon Mac builds it).
 - Inside the container, [scripts/linux_build_deps.sh](scripts/linux_build_deps.sh) installs the rest: **gcc-toolset-13** (GCC 13 with a static `libstdc++.a`), **CMake 3.26** (≥ 3.24 is required, for static zlib), and **zlib-static** (from PowerTools). CI runs the same script.
 - **NDI SDK for Linux** (Standard, royalty-free — **not** NDI Advanced). Unpack it anywhere and point `NDI_SDK_PATH` at the `NDI SDK for Linux` folder (default: `$HOME/NDI SDK for Linux`, or the `NDI_SDK_PATH` environment variable). The build compiles against its headers and bundles `lib/x86_64-linux-gnu/libndi.so.6` with `licenses/*.txt`; it does **not** link it (below). Without the SDK the build bundles a **stub** instead (below).
-- `-DNDI_ENABLE_CUDA=OFF` builds the CPU-only plugin without nvcc (works in plain `rockylinux:8`).
+- **CUDA is off by default on Linux** until the CUDA path is verified on hardware (#74): a plain configure builds the CPU-only plugin without nvcc (works in plain `rockylinux:8`), which doesn't declare CUDA rendering to Resolve. `-DNDI_ENABLE_CUDA=ON` builds the CUDA module too (needs the CUDA image); CI always passes it. Windows still defaults to ON.
 
 ### Build (Tier 0), in the container
 
@@ -288,7 +288,7 @@ Then, inside the container:
 ```bash
 bash scripts/linux_build_deps.sh
 source /opt/rh/gcc-toolset-13/enable
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DNDI_SDK_PATH=... for the real SDK
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DNDI_SDK_PATH=... for the real SDK, -DNDI_ENABLE_CUDA=ON for CUDA
 cmake --build build --parallel "$(nproc)"
 ctest --test-dir build --output-on-failure
 cmake --install build --prefix stage
@@ -355,7 +355,7 @@ scripts/linux_remote.sh cache         # the plugin's entry in ~/.local/share/DaV
 scripts/linux_remote.sh cache-reset   # delete that cache; refuses while Resolve runs (it rewrites the cache on exit)
 ```
 
-- `build` runs in `nvidia/cuda:12.9.1-devel-rockylinux8` (the CI image) with `linux_build_deps.sh` committed once on the box as `ndioutput-build:rocky8`, the SDK mounted from `~/sdks/NDI SDK for Linux`. It never uses the Ubuntu toolchain: a host build picks up `GLIBC_2.38` symbols and fails `test_plugin_elf`. Until CUDA is verified on the box (#74) it builds the **CPU-only** plugin (`-DNDI_ENABLE_CUDA=OFF`, so the plugin doesn't declare CUDA rendering); `build --cuda` builds the CUDA module too.
+- `build` runs in `nvidia/cuda:12.9.1-devel-rockylinux8` (the CI image) with `linux_build_deps.sh` committed once on the box as `ndioutput-build:rocky8`, the SDK mounted from `~/sdks/NDI SDK for Linux`. It never uses the Ubuntu toolchain: a host build picks up `GLIBC_2.38` symbols and fails `test_plugin_elf`. Until CUDA is verified on the box (#74) it builds the **CPU-only** plugin (the Linux default, `NDI_ENABLE_CUDA=OFF`, so the plugin doesn't declare CUDA rendering); `build --cuda` builds the CUDA module too.
 - Overrides: `NDI_LINUX_HOST` (default `matt@100.80.25.1`), `NDI_LINUX_DIR`, `NDI_LINUX_SDK`, `NDI_LINUX_CACHE`. The three paths are on the box and may be absolute, `~/...` or relative; the last two both mean under the box's `$HOME`, for `sync` and the box-side steps alike. `tests/test_linux_remote.sh` (in `ctest` on Linux) checks the `cache-reset` guard, that path handling and the quoting of `logs` arguments locally.
 
 The box needs X on the **NVIDIA driver**. Its headless desktop runs a virtual 1080p monitor with a fake EDID (`/etc/X11/xorg.conf.d/10-nvidia-virtual.conf`). With X's dummy driver and software GL, Resolve's CUDA-GL interop fails as soon as the Color page opens, and Resolve reports it as GPU out of memory (LEARNINGS 2026-10-30).
@@ -406,7 +406,7 @@ Check that the network works without Resolve by running the SDK's sample sender 
 [.github/workflows/linux.yml](.github/workflows/linux.yml) has the same triggers as `windows.yml` (pushes to `dev`, `master`, `feature/**`, PRs into `dev`, manual dispatch). The **build** job runs in `nvidia/cuda:12.9.1-devel-rockylinux8`:
 
 1. `scripts/linux_build_deps.sh`
-2. configure and build Release **including the CUDA translation units**
+2. configure with `-DNDI_ENABLE_CUDA=ON` (the Linux default is OFF until #74) and build Release **including the CUDA translation units**
 3. `ctest`, including `test_plugin_elf`, which `dlopen`s the plugin inside Rocky 8
 4. stage the install, check the bundle layout, and re-run `test_plugin_elf` on the staged `.ofx`
 5. upload the tree as **`NDIOutput-linux-x86_64-STUB`** and the checker as `test_plugin_elf-linux-x86_64`

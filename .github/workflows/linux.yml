@@ -43,7 +43,8 @@ jobs:
       - name: Configure (CMake + gcc-toolset-13 + CUDA 12.9)
         run: |
           source /opt/rh/gcc-toolset-13/enable
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          # CUDA is OFF by default on Linux until #74; CI compiles it anyway.
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNDI_ENABLE_CUDA=ON
 
       - name: Build (Release, CUDA included)
         run: |

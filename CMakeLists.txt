@@ -80,7 +80,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Architectures (spec decision 8): Pascal + Turing + Ampere as real targets
 # plus Ampere PTX so newer GPUs (Ada, Hopper, ...) JIT forward. Must be set
 # before enable_language(CUDA).
-option(NDI_ENABLE_CUDA "Build the CUDA GPU-native pipeline" ON)
+# Linux defaults to the CPU-only plugin until the CUDA path is verified on
+# hardware (ticket #74): a CUDA build declares CUDA rendering to Resolve.
+# linux.yml still passes ON to compile-prove the module. Windows stays ON.
+if(NDI_PLATFORM_LINUX)
+    set(_ndi_cuda_default OFF)
+else()
+    set(_ndi_cuda_default ON)
+endif()
+option(NDI_ENABLE_CUDA "Build the CUDA GPU-native pipeline" ${_ndi_cuda_default})
 if(NDI_ENABLE_CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES "60-real;75-real;86-real;86-virtual")
