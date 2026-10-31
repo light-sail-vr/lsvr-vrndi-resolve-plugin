@@ -17,6 +17,8 @@
 #   NDI_LINUX_SDK    NDI SDK for Linux on the box [~/sdks/NDI SDK for Linux]
 #   NDI_LINUX_CACHE  Resolve's OFX cache [~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml]
 #   NDI_LINUX_PROC   /proc to search for a running Resolve [/proc] (local mode; tests)
+# The box paths may be absolute, "~/..." or relative; the last two both mean
+# under the box's $HOME, for sync (rsync) and the box-side steps alike.
 #
 # build runs inside the Rocky Linux 8 CUDA image CI uses (spec decision 5),
 # never on the Ubuntu host toolchain: a host build pulls GLIBC_2.38 symbols
@@ -44,9 +46,19 @@ usage() {
 # Box-side prelude, expanded there (its $HOME, not the Mac's). Every box
 # script gets dir/sdk/cache as $1-$3, then its own arguments.
 BOX_PRELUDE='set -euo pipefail
-dir="${1:-$HOME/ndioutput-dev}"
-sdk="${2:-$HOME/sdks/NDI SDK for Linux}"
-cache="${3:-$HOME/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml}"
+# "~/x" arrives literally (quoted for ssh) and relative "x" is relative to
+# $HOME, as rsync reads both; docker -v needs the absolute path.
+box_path() {
+    case "$1" in
+        /*) printf "%s\n" "$1" ;;
+        "~") printf "%s\n" "$HOME" ;;
+        "~/"*) printf "%s\n" "$HOME/${1#"~/"}" ;;
+        *) printf "%s\n" "$HOME/$1" ;;
+    esac
+}
+dir="$(box_path "${1:-$HOME/ndioutput-dev}")"
+sdk="$(box_path "${2:-$HOME/sdks/NDI SDK for Linux}")"
+cache="$(box_path "${3:-$HOME/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml}")"
 shift 3
 # Resolve by argv[0], not by name or executable: its main thread renames
 # itself "GUI Thread" (`pgrep -x resolve` never matches), and it runs under
@@ -61,22 +73,33 @@ resolve_pids() {
 }
 '
 
+# Sets QUOTED to the arguments, each quoted for the remote shell: ssh joins
+# its command words with spaces and the box's shell re-splits them (the SDK
+# path has spaces; a logs filter may too).
+quote_for_ssh() {
+    QUOTED=()
+    local a
+    for a in "$@"; do QUOTED+=("$(printf '%q' "$a")"); done
+}
+
 # Runs the bash script on stdin on the box, after the prelude.
 on_box() {
     local args=("$REMOTE_DIR" "$REMOTE_SDK" "$REMOTE_CACHE" "$@")
     if [ "$HOST" = local ]; then
         { printf '%s\n' "$BOX_PRELUDE"; cat; } | bash -s -- "${args[@]}"
     else
-        # Quote each argument for the remote shell (the SDK path has spaces).
-        local quoted=() a
-        for a in "${args[@]}"; do quoted+=("$(printf '%q' "$a")"); done
-        { printf '%s\n' "$BOX_PRELUDE"; cat; } | ssh "$HOST" bash -s -- "${quoted[@]}"
+        quote_for_ssh "${args[@]}"
+        { printf '%s\n' "$BOX_PRELUDE"; cat; } | ssh "$HOST" bash -s -- "${QUOTED[@]}"
     fi
 }
 
 cmd_sync() {
     [ "$HOST" != local ] || { echo "sync: needs a remote NDI_LINUX_HOST" >&2; exit 2; }
     local dir="${REMOTE_DIR:-ndioutput-dev}"   # rsync paths are relative to the box's $HOME
+    case "$dir" in               # so "~/x" is "x" (box_path agrees)
+        "~") dir=. ;;
+        "~/"*) dir="${dir#"~/"}" ;;
+    esac
     # build/ and stage/ on the box are excluded, so --delete never touches them.
     rsync -az --delete \
         --exclude '.git/' --exclude '/build/' --exclude '/stage/' --exclude '/dist/' \
@@ -146,7 +169,8 @@ cmd_logs() {
     if [ "$HOST" = local ]; then
         exec journalctl -f -t NDIOutput "$@"
     fi
-    exec ssh -t "$HOST" journalctl -f -t NDIOutput "$@"
+    quote_for_ssh "$@"
+    exec ssh -t "$HOST" journalctl -f -t NDIOutput ${QUOTED[@]+"${QUOTED[@]}"}
 }
 
 cmd_cache() {
@@ -166,6 +190,7 @@ if [ -n "$pids" ]; then
     exit 3
 fi
 if [ -f "$cache" ]; then
+    echo "Resolve must be closed; deleting $cache"
     rm -f "$cache"
     echo "deleted $cache; Resolve rescans every OFX plugin at its next launch"
 else

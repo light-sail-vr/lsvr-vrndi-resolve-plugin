@@ -356,7 +356,7 @@ scripts/linux_remote.sh cache-reset   # delete that cache; refuses while Resolve
 ```
 
 - `build` runs in `nvidia/cuda:12.9.1-devel-rockylinux8` (the CI image) with `linux_build_deps.sh` committed once on the box as `ndioutput-build:rocky8`, the SDK mounted from `~/sdks/NDI SDK for Linux`. It never uses the Ubuntu toolchain: a host build picks up `GLIBC_2.38` symbols and fails `test_plugin_elf`. Until CUDA is verified on the box (#74) it builds the **CPU-only** plugin (`-DNDI_ENABLE_CUDA=OFF`, so the plugin doesn't declare CUDA rendering); `build --cuda` builds the CUDA module too.
-- Overrides: `NDI_LINUX_HOST` (default `matt@100.80.25.1`), `NDI_LINUX_DIR`, `NDI_LINUX_SDK`, `NDI_LINUX_CACHE`. `tests/test_linux_remote.sh` (in `ctest` on Linux) checks the `cache-reset` guard locally.
+- Overrides: `NDI_LINUX_HOST` (default `matt@100.80.25.1`), `NDI_LINUX_DIR`, `NDI_LINUX_SDK`, `NDI_LINUX_CACHE`. The three paths are on the box and may be absolute, `~/...` or relative; the last two both mean under the box's `$HOME`, for `sync` and the box-side steps alike. `tests/test_linux_remote.sh` (in `ctest` on Linux) checks the `cache-reset` guard, that path handling and the quoting of `logs` arguments locally.
 
 The box needs X on the **NVIDIA driver**. Its headless desktop runs a virtual 1080p monitor with a fake EDID (`/etc/X11/xorg.conf.d/10-nvidia-virtual.conf`). With X's dummy driver and software GL, Resolve's CUDA-GL interop fails as soon as the Color page opens, and Resolve reports it as GPU out of memory (LEARNINGS 2026-10-30).
 
