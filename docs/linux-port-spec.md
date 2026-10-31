@@ -82,7 +82,7 @@ On NVIDIA hardware the pipeline is GPU-native through the existing CUDA module. 
 
 **Platform plumbing** (platform-prefixed files behind the existing seams; capability macros, not raw `__linux__`, at call sites)
 
-16. **Logging:** on Linux, `NDI_LOG` goes to `syslog(3)` with ident `NDIOutput`, readable live with `journalctl -f -t NDIOutput` over SSH. Add the same optional `NDI_OUTPUT_LOG_FILE` file sink Windows has. This replaces today's `printf` fallback, whose output goes nowhere when Resolve is launched from the desktop.
+16. **Logging:** on Linux, `NDI_LOG` goes to syslog (journald) tagged `NDIOutput`, readable live with `journalctl -f -t NDIOutput` over SSH. Add the same optional `NDI_OUTPUT_LOG_FILE` file sink Windows has. This replaces today's `printf` fallback, whose output goes nowhere when Resolve is launched from the desktop. *Amended by #73: the plugin does not call `openlog`/`syslog(3)`. glibc keeps one syslog ident per process, and `openlog("NDIOutput")` from the plugin re-tagged every later syslog line of Resolve itself as `NDIOutput` (verified on the box). Instead each message is its own RFC 3164 datagram on `/dev/log`, tagged `NDIOutput[pid]` (the format glibc's `syslog()` writes, so journald still derives the identifier and PID), and the process-wide syslog state stays Resolve's. The socket is non-blocking: a full journald queue drops the line rather than stall a render thread (`src/LinuxLog.h`).*
 17. **Timeline (Auto) + Timeline Color = Auto:** **macOS code stays untouched** (Matt, 2026-10-30). Linux gets its own implementation of the `TimelineClipWatcher.h` API in `src/LinuxTimelineWatch.cpp`, the way Windows has `WinTimelineWatch.cpp`. It ports the `posix_spawn`/pipe/reader-thread logic from the macOS `src/TimelineClipWatcher.cpp` rather than sharing it, and adds a `src/LinuxTimelineWatch.h` discovery seam:
     - Host executable from `/proc/self/exe`.
     - fuscript at `<resolve>/libs/Fusion/fuscript` (path to verify).
@@ -144,7 +144,8 @@ On NVIDIA hardware the pipeline is GPU-native through the existing CUDA module. 
 - `libBlackmagicRawAPI.so` path.
 - Whether `/usr/OFX/Plugins` is the only scan path.
 - The CUDA OFX property behaviour.
-- Whether `libndi` hard-requires a running avahi-daemon or only degrades discovery.
+
+**Answered by #73** (docs/2026-10-30-linux-host-probes.md §5): `libndi` does **not** need a running `avahi-daemon` to load or send. With the daemon stopped, `NDIlib_initialize` and `send_create` both succeed and the stream reaches a receiver that already has the address, but `libndi` advertises only through the daemon (it has no mDNS responder of its own), so the source is never discoverable. The daemon is therefore required for discovery, and its absence is invisible from inside the plugin, which is why `install.sh` (#78) checks for it (decision 10). Never stop the daemon while Resolve runs: Resolve's own control-panel discovery segfaults.
 
 **Estimate:** about 2–3.5 focused weeks to the first Linux release at full parity. That is less than Windows (2.5–4.5 weeks without parity) because the CUDA module, the POSIX watcher code, the test strategy and the release model already exist. The hardware already exists.
 
