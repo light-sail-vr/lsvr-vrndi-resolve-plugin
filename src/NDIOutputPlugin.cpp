@@ -1125,19 +1125,11 @@ static bool ensureNDIRuntimeLoaded()
 
 #ifdef NDI_RUNTIME_DLOPEN
 // Why NDI is off, for Stream Status. A failed runtime load (or initialize)
-// can't succeed later in the same process, so it is latched: gNDIOff is
-// published (release) after gNDIOffReason is written, once, under
-// ensureNDILibInitialized's lock; render threads read the reason only after
-// seeing gNDIOff (acquire). Without the latch every render retried and
-// logged three lines (273 in 30 s on the box, ticket #73).
-static std::string gNDIOffReason;
-static std::atomic<bool> gNDIOff{false};
-
-static void latchNDIOff(const std::string& reason)
-{
-    gNDIOffReason = reason;
-    gNDIOff.store(true, std::memory_order_release);
-}
+// can't succeed later in the same process, so it is latched exactly once
+// (OffLatch, LinuxNDIRuntime.h): the reason never changes after render
+// threads can see it. Without the latch every render retried and logged
+// three lines (273 in 30 s on the box, ticket #73).
+static ndi_linux_runtime::OffLatch gNDIOff;
 
 // dlopen the runtime beside the plugin (falling back to a system-wide one)
 // and take its API table. On failure NDI stays off for the process lifetime
@@ -1150,7 +1142,7 @@ static bool ensureNDIRuntimeLoaded()
             ndi_linux_runtime::loadBundledRuntime("libndi.so.6", "NDIlib_v5_load");
         NDI_LOG_TEXT(ndi_linux_runtime::logText(r).c_str());
         if (r.status != ndi_linux_runtime::LoadStatus::Loaded) {
-            latchNDIOff(ndi_linux_runtime::statusText(r));
+            gNDIOff.latch(ndi_linux_runtime::statusText(r));
             return false;
         }
         gNDI = static_cast<const NDIlib_v5*>(r.table);
@@ -1167,6 +1159,11 @@ static bool ensureNDILibInitialized()
     static std::mutex initMutex;
     static bool initialized = false;
     std::lock_guard<std::mutex> lock(initMutex);
+#ifdef NDI_RUNTIME_DLOPEN
+    if (gNDIOff.off()) {
+        return false; // latched: no second NDIlib_initialize, no log line
+    }
+#endif
     if (!initialized) {
 #if defined(_WIN32) || defined(NDI_RUNTIME_DLOPEN)
         if (!ensureNDIRuntimeLoaded()) {
@@ -1179,7 +1176,7 @@ static bool ensureNDILibInitialized()
         } else {
             NDI_LOG("Failed to initialize NDI library");
 #ifdef NDI_RUNTIME_DLOPEN
-            latchNDIOff("NDI off — NDIlib_initialize() failed (unsupported CPU?)");
+            gNDIOff.latch("NDI off — NDIlib_initialize() failed (unsupported CPU?)");
 #endif
         }
     }
@@ -1988,6 +1985,12 @@ static bool initializeNDI(NDIInstanceData* data)
     if (data->ndiInitialized) {
         return true;
     }
+#ifdef NDI_RUNTIME_DLOPEN
+    // Instance create and param changes land here too, not only renders.
+    if (gNDIOff.off()) {
+        return false;
+    }
+#endif
 
     NDI_LOG("Initializing NDI SDK...");
 
@@ -2184,12 +2187,12 @@ static void sendSDRFrame(NDIInstanceData* data, void* imageData, int width, int 
 // the latched reason in Stream Status from here.
 static void showNDIOffStatus(NDIInstanceData* data)
 {
-    if (!gNDIOff.load(std::memory_order_acquire)) {
+    if (!gNDIOff.off()) {
         return; // a transient failure (no reason latched)
     }
     std::lock_guard<std::mutex> statusLock(data->statusMutex);
-    if (gNDIOffReason != data->statusParamValue) {
-        data->statusParamValue = gNDIOffReason;
+    if (gNDIOff.reason() != data->statusParamValue) {
+        data->statusParamValue = gNDIOff.reason();
         data->statusParamDirty = true;
     }
 }
@@ -2203,7 +2206,7 @@ static bool ensureNDIReady(NDIInstanceData* data)
     if (!data->ndiInitialized) {
 #ifdef NDI_RUNTIME_DLOPEN
         // Latched off for this process: no retry, no per-frame log.
-        if (gNDIOff.load(std::memory_order_acquire)) {
+        if (gNDIOff.off()) {
             showNDIOffStatus(data);
             return false;
         }

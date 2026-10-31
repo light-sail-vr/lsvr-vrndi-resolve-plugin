@@ -24,9 +24,40 @@
 #ifndef LINUX_NDI_RUNTIME_H
 #define LINUX_NDI_RUNTIME_H
 
+#include <atomic>
 #include <string>
 
 namespace ndi_linux_runtime {
+
+// Why NDI is off for the rest of the process (a failed runtime load or
+// NDIlib_initialize can't succeed later), for Stream Status. Latches exactly
+// once: the first latch() claims it, writes the reason and publishes off()
+// (release); every later latch() is a no-op. So once a reader sees off()
+// (acquire) the reason is immutable and render threads may read it while
+// another thread is calling latch() again. latch() needs no caller lock.
+class OffLatch {
+public:
+    // false (reason untouched) when already latched.
+    bool latch(const std::string& why)
+    {
+        if (claimed_.exchange(true, std::memory_order_acq_rel)) {
+            return false;
+        }
+        reason_ = why;
+        off_.store(true, std::memory_order_release);
+        return true;
+    }
+
+    bool off() const { return off_.load(std::memory_order_acquire); }
+
+    // Only after off() returned true.
+    const std::string& reason() const { return reason_; }
+
+private:
+    std::atomic<bool> claimed_{false};
+    std::atomic<bool> off_{false};
+    std::string reason_;
+};
 
 // Path of `libName` in the directory containing `modulePath`. Empty when
 // modulePath has no directory component. '/' is the only separator.

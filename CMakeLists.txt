@@ -424,6 +424,9 @@ foreach(_t IN LISTS NDI_PORTABLE_TESTS)
 endforeach()
 target_link_libraries(test_stmap PRIVATE ZLIB::ZLIB)
 target_link_libraries(test_brawmap PRIVATE ZLIB::ZLIB)
+# The OffLatch race test starts threads (glibc 2.28 needs -pthread).
+find_package(Threads REQUIRED)
+target_link_libraries(test_linux_ndi_runtime PRIVATE Threads::Threads)
 if(WIN32)
     target_link_libraries(test_braw_reader PRIVATE braw_reader ZLIB::ZLIB)
     target_link_libraries(test_timeline_watch PRIVATE advapi32)  # registry discovery

@@ -8,8 +8,11 @@
 
 #include "LinuxNDIRuntime.h"
 
+#include <atomic>
 #include <cstdio>
 #include <string>
+#include <thread>
+#include <vector>
 
 static int failures = 0;
 
@@ -260,8 +263,44 @@ static void testReasonText()
                "bundle load logged with its path");
 }
 
+// The NDI-off latch keeps its first reason: render threads read it after
+// off() while instance create / param changes may latch again, so a second
+// latch must never rewrite the string (ticket #73 review).
+static void testOffLatch()
+{
+    ndi_linux_runtime::OffLatch latch;
+    expectTrue(!latch.off(), "a fresh latch is not off");
+
+    expectTrue(latch.latch("NDI off — first"), "the first latch claims it");
+    expectTrue(latch.off() && latch.reason() == "NDI off — first",
+               "off with the first reason");
+
+    const char* before = latch.reason().c_str();
+    expectTrue(!latch.latch("NDI off — second"), "a second latch is refused");
+    expectTrue(latch.reason() == "NDI off — first" && latch.reason().c_str() == before,
+               "a second latch leaves the reason string untouched");
+
+    // Concurrent latchers: exactly one wins, and the reason is the winner's.
+    ndi_linux_runtime::OffLatch raced;
+    std::atomic<int> wins{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&raced, &wins, i]() {
+            if (raced.latch("reason " + std::to_string(i))) {
+                ++wins;
+            }
+        });
+    }
+    for (std::thread& t : threads) {
+        t.join();
+    }
+    expectTrue(wins == 1 && raced.off() && raced.reason().rfind("reason ", 0) == 0,
+               "concurrent latches: exactly one wins");
+}
+
 int main()
 {
+    testOffLatch();
     testReasonText();
     testSiblingLibraryPath();
     testLoadFromBundle();
