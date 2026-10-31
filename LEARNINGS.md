@@ -719,6 +719,13 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** docs/captures/2026-10-30-linux-stereo-cpu-color-page.log.
 **Rule:** after changing Stereo 3D Vision, stop and restart playback before reading Stream Status or a probe capture.
 
+### 2026-10-30 — Review of #73: NDI-off reason race, a blocking log socket, and unquoted `logs` arguments (#73)
+**Symptom:** code review, not a field failure. (1) The NDI-off latch could rewrite its reason string while a render thread read it. (2) `LinuxLog.h`'s "drop rather than block" EAGAIN path could never fire, and without `/dev/log` every line paid `socket()`+`connect()`. (3) `linux_remote.sh logs --grep 'a b'` broke, and `;` in an argument ran on the box; `NDI_LINUX_DIR=~/x` meant different directories to `sync` and the box-side steps. (4) A plain Linux configure built CUDA, which only `linux_remote.sh` turned off.
+**Root cause:** (1) `ensureNDILibInitialized` re-ran `NDIlib_initialize` and re-latched on every call after a failure, and `initializeNDI` (instance create, param changes) never checked the latch. (2) The socket was blocking, with no connect backoff. (3) `cmd_logs` passed `"$@"` to ssh unquoted: ssh joins its words with spaces and the box's shell re-splits them; `on_box` `%q`-quoted `~` while rsync expanded it. (4) `NDI_ENABLE_CUDA` defaulted ON on every platform.
+**Fix:** `OffLatch` (LinuxNDIRuntime.h) latches once and both entry points check it; `gNDI` is atomic; `SOCK_NONBLOCK` plus `ReconnectGate` (5 s); `quote_for_ssh` for `logs`, `box_path` resolving `~/x` and relative paths under the box's `$HOME`; `NDI_ENABLE_CUDA` defaults OFF on Linux until #74, and linux.yml passes ON.
+**Validated by:** Tier 0: new unit tests (latch first-wins and race, reconnect gate, em-dash log text) and `test_linux_remote.sh` cases that are red on the old script; ctest in the arm64 container (CPU and CUDA) and on CI.
+**Rule:** anything a render thread reads after an acquire must be written once; anything a render thread calls must be non-blocking; every argument sent through ssh is `%q`-quoted.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
