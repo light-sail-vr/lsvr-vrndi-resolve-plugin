@@ -254,6 +254,12 @@ static void testReasonText()
     expectTrue(statusText(stub) == "NDI off — libndi.so.6 returned no API (CI stub build?)",
                "stub runtime named in Stream Status");
 
+    // One separator style in Stream Status and the log: the em dash.
+    expectTrue(contains(logText(missing), "NOT LOADED — streaming disabled") &&
+                   contains(logText(noEntry), ") — streaming disabled") &&
+                   contains(logText(stub), "(stub library?) — streaming disabled"),
+               "log text uses the em dash like Stream Status");
+
     LoadResult ok;
     ok.status = LoadStatus::Loaded;
     ok.fromBundle = true;

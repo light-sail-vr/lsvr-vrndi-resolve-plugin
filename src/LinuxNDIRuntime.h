@@ -178,14 +178,14 @@ inline std::string logText(const LoadResult& r)
             return "NDI runtime not beside the plugin (" + r.bundleError +
                    "); using the system one: " + r.path;
         case LoadStatus::NotFound:
-            return "NDI runtime NOT LOADED - streaming disabled. Bundle: " + r.bundleError +
+            return "NDI runtime NOT LOADED — streaming disabled. Bundle: " + r.bundleError +
                    " | system search: " + r.systemError;
         case LoadStatus::NoEntryPoint:
             return "NDI runtime " + r.path + " has no NDIlib_v5_load (" + r.symbolError +
-                   ") - streaming disabled";
+                   ") — streaming disabled";
         case LoadStatus::NullTable:
             return "NDI runtime " + r.path +
-                   ": NDIlib_v5_load() returned NULL (stub library?) - streaming disabled";
+                   ": NDIlib_v5_load() returned NULL (stub library?) — streaming disabled";
     }
     return std::string();
 }
