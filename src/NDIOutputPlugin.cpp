@@ -118,6 +118,20 @@ static void ndiWinLog(const char* fmt, ...);
 // NDI SDK (Standard)
 #include <Processing.NDI.Lib.h>
 
+// NDI entry points. Linux dlopens the bundled runtime instead of linking it
+// (LinuxNDIRuntime.h, spec decision 8): every call goes through the API
+// table NDIlib_v5_load() returned, set once by ensureNDIRuntimeLoaded()
+// before NDIlib_initialize. Elsewhere NDI_API(fn) is the linked NDIlib_fn.
+// Atomic (release/acquire) so a thread that never took the init lock still
+// sees the table fully written; the acquire load is free on x86-64.
+#ifdef NDI_RUNTIME_DLOPEN
+#include "LinuxNDIRuntime.h"
+static std::atomic<const NDIlib_v5*> gNDI{nullptr};
+#define NDI_API(fn) (gNDI.load(std::memory_order_acquire)->fn)
+#else
+#define NDI_API(fn) NDIlib_##fn
+#endif
+
 #if defined __APPLE__ || defined __linux__ || defined __FreeBSD__
 #  define EXPORT __attribute__((visibility("default")))
 #elif defined _WIN32
@@ -1111,6 +1125,35 @@ static bool ensureNDIRuntimeLoaded()
 }
 #endif // _WIN32
 
+#ifdef NDI_RUNTIME_DLOPEN
+// Why NDI is off, for Stream Status. A failed runtime load (or initialize)
+// can't succeed later in the same process, so it is latched exactly once
+// (OffLatch, LinuxNDIRuntime.h): the reason never changes after render
+// threads can see it. Without the latch every render retried and logged
+// three lines (273 in 30 s on the box, ticket #73).
+static ndi_linux_runtime::OffLatch gNDIOff;
+
+// dlopen the runtime beside the plugin (falling back to a system-wide one)
+// and take its API table. On failure NDI stays off for the process lifetime
+// and the plugin keeps working as a pass-through; the log gets every path
+// and dlerror, Stream Status one line. See LinuxNDIRuntime.h.
+static bool ensureNDIRuntimeLoaded()
+{
+    static const bool loaded = []() {
+        const ndi_linux_runtime::LoadResult r =
+            ndi_linux_runtime::loadBundledRuntime("libndi.so.6", "NDIlib_v5_load");
+        NDI_LOG_TEXT(ndi_linux_runtime::logText(r).c_str());
+        if (r.status != ndi_linux_runtime::LoadStatus::Loaded) {
+            gNDIOff.latch(ndi_linux_runtime::statusText(r));
+            return false;
+        }
+        gNDI.store(static_cast<const NDIlib_v5*>(r.table), std::memory_order_release);
+        return true;
+    }();
+    return loaded;
+}
+#endif // NDI_RUNTIME_DLOPEN
+
 // NDIlib_initialize is refcounted inside the SDK and safe to call once and
 // keep; see the hub comment for why NDIlib_destroy must never be called.
 static bool ensureNDILibInitialized()
@@ -1118,17 +1161,25 @@ static bool ensureNDILibInitialized()
     static std::mutex initMutex;
     static bool initialized = false;
     std::lock_guard<std::mutex> lock(initMutex);
+#ifdef NDI_RUNTIME_DLOPEN
+    if (gNDIOff.off()) {
+        return false; // latched: no second NDIlib_initialize, no log line
+    }
+#endif
     if (!initialized) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(NDI_RUNTIME_DLOPEN)
         if (!ensureNDIRuntimeLoaded()) {
             return false;
         }
 #endif
-        initialized = NDIlib_initialize();
+        initialized = NDI_API(initialize)();
         if (initialized) {
             NDI_LOG("NDI library initialized (process-wide, kept for process lifetime)");
         } else {
             NDI_LOG("Failed to initialize NDI library");
+#ifdef NDI_RUNTIME_DLOPEN
+            gNDIOff.latch("NDI off — NDIlib_initialize() failed (unsupported CPU?)");
+#endif
         }
     }
     return initialized;
@@ -1155,7 +1206,7 @@ static bool hubEnsureSenderLocked(SenderHub* hub)
     desc.p_groups = nullptr;
     desc.clock_video = true;
     desc.clock_audio = false;
-    hub->sender = NDIlib_send_create(&desc);
+    hub->sender = NDI_API(send_create)(&desc);
     if (!hub->sender) {
         NDI_LOG_TEXT(("Failed to create NDI sender '" + hub->name +
                       "' — the name may already be advertised on this machine "
@@ -1172,7 +1223,7 @@ static bool hubEnsureSenderLocked(SenderHub* hub)
 static void hubFlushAsyncLocked(SenderHub* hub)
 {
     if (hub->asyncInFlight && hub->sender) {
-        NDIlib_send_send_video_async_v2(hub->sender, nullptr);
+        NDI_API(send_send_video_async_v2)(hub->sender, nullptr);
     }
     hub->asyncInFlight = false;
 }
@@ -1204,7 +1255,7 @@ static void hubRelease(SenderHub* hub)
         destroy = (--hub->refCount == 0);
         if (destroy && hub->sender) {
             hub->senderReady.store(false, std::memory_order_release);
-            NDIlib_send_destroy(hub->sender); // blocks until any in-flight send completes
+            NDI_API(send_destroy)(hub->sender); // blocks until any in-flight send completes
             hub->sender = nullptr;
             NDI_LOG_TEXT(("NDI sender destroyed: '" + hub->name + "'").c_str());
         }
@@ -1274,10 +1325,10 @@ static void hubSendFrameLocked(SenderHub* hub, NDIInstanceData* data,
     }
 
     if (allowAsync && data->asyncSending) {
-        NDIlib_send_send_video_async_v2(hub->sender, &frame);
+        NDI_API(send_send_video_async_v2)(hub->sender, &frame);
         hub->asyncInFlight = true;
     } else {
-        NDIlib_send_send_video_v2(hub->sender, &frame);
+        NDI_API(send_send_video_v2)(hub->sender, &frame);
         hub->asyncInFlight = false;
     }
     hub->lastSentWidth = meta.width;
@@ -1936,6 +1987,12 @@ static bool initializeNDI(NDIInstanceData* data)
     if (data->ndiInitialized) {
         return true;
     }
+#ifdef NDI_RUNTIME_DLOPEN
+    // Instance create and param changes land here too, not only renders.
+    if (gNDIOff.off()) {
+        return false;
+    }
+#endif
 
     NDI_LOG("Initializing NDI SDK...");
 
@@ -1956,7 +2013,7 @@ static bool initializeNDI(NDIInstanceData* data)
             metadataFrame.length = strlen(hwAccelMetadata);
             metadataFrame.timecode = NDIlib_send_timecode_synthesize;
             metadataFrame.p_data = const_cast<char*>(hwAccelMetadata);
-            NDIlib_send_send_metadata(data->hub->sender, &metadataFrame);
+            NDI_API(send_send_metadata)(data->hub->sender, &metadataFrame);
         }
     }
 
@@ -2127,15 +2184,41 @@ static void sendSDRFrame(NDIInstanceData* data, void* imageData, int width, int 
     hubSubmitFromRenderThread(data, s);
 }
 
+#ifdef NDI_RUNTIME_DLOPEN
+// No hub exists while NDI is off, so hubUpdateStatusLocked never runs: put
+// the latched reason in Stream Status from here.
+static void showNDIOffStatus(NDIInstanceData* data)
+{
+    if (!gNDIOff.off()) {
+        return; // a transient failure (no reason latched)
+    }
+    std::lock_guard<std::mutex> statusLock(data->statusMutex);
+    if (gNDIOff.reason() != data->statusParamValue) {
+        data->statusParamValue = gNDIOff.reason();
+        data->statusParamDirty = true;
+    }
+}
+#endif
+
 static bool ensureNDIReady(NDIInstanceData* data)
 {
     if (!data->enabled) {
         return false;
     }
     if (!data->ndiInitialized) {
+#ifdef NDI_RUNTIME_DLOPEN
+        // Latched off for this process: no retry, no per-frame log.
+        if (gNDIOff.off()) {
+            showNDIOffStatus(data);
+            return false;
+        }
+#endif
         NDI_LOG("NDI not initialized, attempting to initialize...");
         if (!initializeNDI(data)) {
             NDI_LOG("Failed to initialize NDI, skipping frame");
+#ifdef NDI_RUNTIME_DLOPEN
+            showNDIOffStatus(data);
+#endif
             return false;
         }
     }
