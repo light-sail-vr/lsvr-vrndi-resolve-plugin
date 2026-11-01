@@ -80,15 +80,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Architectures (spec decision 8): Pascal + Turing + Ampere as real targets
 # plus Ampere PTX so newer GPUs (Ada, Hopper, ...) JIT forward. Must be set
 # before enable_language(CUDA).
-# Linux defaults to the CPU-only plugin until the CUDA path is verified on
-# hardware (ticket #74): a CUDA build declares CUDA rendering to Resolve.
-# linux.yml still passes ON to compile-prove the module. Windows stays ON.
-if(NDI_PLATFORM_LINUX)
-    set(_ndi_cuda_default OFF)
-else()
-    set(_ndi_cuda_default ON)
-endif()
-option(NDI_ENABLE_CUDA "Build the CUDA GPU-native pipeline" ${_ndi_cuda_default})
+# ON for Windows and Linux (Linux since ticket #74 verified the path on
+# hardware); a CUDA build declares CUDA rendering to Resolve.
+option(NDI_ENABLE_CUDA "Build the CUDA GPU-native pipeline" ON)
 if(NDI_ENABLE_CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES "60-real;75-real;86-real;86-virtual")
@@ -312,6 +306,11 @@ if(NDI_ENABLE_CUDA)
     # NDI_HAS_CUDA gates the plugin's GPU-native seam (NDIOutputPlugin.cpp);
     # without it the same source builds the CPU-only plugin.
     target_compile_definitions(NDIOutput PRIVATE NDI_HAS_CUDA)
+    if(NDI_PLATFORM_LINUX)
+        # Stream Status names why a render took the CPU path (ticket #74,
+        # src/LinuxGpuPath.h). Linux only: Windows behaviour is unchanged.
+        target_compile_definitions(NDIOutput PRIVATE NDI_GPU_PATH_STATUS)
+    endif()
     target_compile_options(NDIOutput PRIVATE ${NDI_CUDA_EXACT_MATH})
     # cudart must link STATICALLY: a cudart64_*.dll staged beside the plugin
     # would hit the same loader trap as z.dll (Windows never searches the
@@ -414,6 +413,7 @@ set(NDI_PORTABLE_TESTS
     test_platform_paths
     test_ndi_loader
     test_linux_ndi_runtime
+    test_linux_gpu_path
     test_stmap
     test_brawmap)
 if(WIN32)

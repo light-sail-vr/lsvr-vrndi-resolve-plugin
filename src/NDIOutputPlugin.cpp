@@ -89,6 +89,10 @@ static void ndiWinLog(const char* fmt, ...);
 #include "CudaGPUAcceleration.h"
 #endif
 
+#ifdef NDI_GPU_PATH_STATUS // Linux CUDA plugin: Stream Status says why a render took the CPU path (#74)
+#include "LinuxGpuPath.h"
+#endif
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -1004,6 +1008,14 @@ struct NDIInstanceData {
     bool asyncSending;
     bool optimalFormat;
     std::unique_ptr<GPUContext> gpuContext;
+#ifdef NDI_GPU_PATH_STATUS
+    // Render path (#74, src/LinuxGpuPath.h). gpuModule is written by the GPU
+    // init; renderPathNote by each render, read by the pump worker's status
+    // composer (a string literal, so the pointer alone is the value).
+    std::atomic<int> gpuModule{static_cast<int>(ndi_gpu_path::Module::NotTried)};
+    std::atomic<const char*> renderPathNote{""};
+    int lastRenderPath = -1;  // render thread only: logs path changes once
+#endif
     
     // Stream resolution (issue #5): divisor 1/2/4, read fresh each render
     int resolutionDivisor;
@@ -1402,6 +1414,14 @@ static std::string hubComposeStatusLocked(SenderHub* hub, NDIInstanceData* data)
             status += ", " + data->colorStatus;
         }
     }
+#ifdef NDI_GPU_PATH_STATUS
+    // Why this render took the CPU path, if it did (#74).
+    const char* pathNote = data->renderPathNote.load(std::memory_order_relaxed);
+    if (pathNote[0] != '\0') {
+        status += ", ";
+        status += pathNote;
+    }
+#endif
     return status;
 }
 
@@ -1793,19 +1813,37 @@ static bool initializeGPUContext(NDIInstanceData* data)
     data->gpuContext->initialized = false;
 
 #ifdef NDI_GPU_NATIVE
-    // Metal on macOS, CUDA on Windows — same seam. Unavailable (e.g. a
-    // non-NVIDIA Windows machine) is not an error: the caller falls back to
+    // Metal on macOS, CUDA on Windows and Linux — same seam. Unavailable
+    // (e.g. a non-NVIDIA machine) is not an error: the caller falls back to
     // the CPU conversion path (spec decision 4's documented ceiling).
+#ifdef NDI_GPU_PATH_STATUS
+    // Simulated init failure, to test the fallback on a working box.
+    if (ndi_gpu_path::forcedFailure(std::getenv("NDI_OUTPUT_FORCE_CUDA_FAIL"))) {
+        data->gpuContext->nativeContext = nullptr;
+        data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::ForcedFailure));
+        NDI_LOG("NDI_OUTPUT_FORCE_CUDA_FAIL is set - skipping CUDA init, using the CPU path");
+        return false;
+    }
+#endif
     if (!nativeGpuAvailable()) {
         NDI_LOG(NDI_GPU_BACKEND_NAME " is not available on this system - using the CPU path");
+#ifdef NDI_GPU_PATH_STATUS
+        data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::NoDevice));
+#endif
         return false;
     }
 
     data->gpuContext->nativeContext = nativeGpuInit();
     if (!data->gpuContext->nativeContext) {
         NDI_LOG("Failed to initialize " NDI_GPU_BACKEND_NAME " GPU acceleration");
+#ifdef NDI_GPU_PATH_STATUS
+        data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::InitFailed));
+#endif
         return false;
     }
+#ifdef NDI_GPU_PATH_STATUS
+    data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::Ready));
+#endif
 
     NDI_LOG(NDI_GPU_BACKEND_NAME " GPU acceleration initialized successfully");
 
@@ -2271,6 +2309,32 @@ static void flushStatusParam(NDIInstanceData* data)
         gParamHost->paramSetValue(data->stereoStatusParam, statusCopy.c_str());
     }
 }
+
+#ifdef NDI_GPU_PATH_STATUS
+// Record which path this render took for Stream Status, and log a change of
+// path once (#74, src/LinuxGpuPath.h). gpuParam is the GPU Acceleration
+// param as read at the top of the render: a failed GPU init clears
+// data->gpuAcceleration mid-render, and that is a module failure, not the
+// user switching the param off.
+static void noteRenderPath(NDIInstanceData* data, bool hostCudaFrames, bool gpuParam)
+{
+    if (data->renderIsThumbnail) {
+        return;  // a host may render thumbnails on another path; the stream's path is what counts
+    }
+    ndi_gpu_path::Inputs in;
+    in.hostCudaFrames = hostCudaFrames;
+    in.gpuAcceleration = gpuParam;
+    in.optimalFormat = data->optimalFormat;
+    in.module = static_cast<ndi_gpu_path::Module>(data->gpuModule.load());
+    const ndi_gpu_path::Decision d = ndi_gpu_path::decide(in);
+    data->renderPathNote.store(d.status, std::memory_order_relaxed);
+    if (static_cast<int>(d.path) != data->lastRenderPath) {
+        data->lastRenderPath = static_cast<int>(d.path);
+        NDI_LOG("Render path: %s",
+                d.path == ndi_gpu_path::Path::GpuNative ? "GPU-native (" NDI_GPU_BACKEND_NAME ")" : d.status);
+    }
+}
+#endif
 
 // Frame arrived in CPU memory: apply the Resolution downscale (box filter) —
 // or, in Equirect mode, the STMap warp — before the conversion+send path.
@@ -3465,8 +3529,14 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     }
 #endif
     if (gpuEnabled) {
+#ifdef NDI_GPU_PATH_STATUS
+        const bool gpuParam = myData->gpuAcceleration;
+#endif
         OfxStatus gpuStatus = renderGPUFrame(myData, srcData, dstData, width, height,
                                              srcRowBytes, dstRowBytes, gpuQueue);
+#ifdef NDI_GPU_PATH_STATUS
+        noteRenderPath(myData, true, gpuParam);
+#endif
         gEffectHost->clipReleaseImage(sourceImg);
         gEffectHost->clipReleaseImage(outputImg);
         flushStatusParam(myData);
@@ -3483,6 +3553,9 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     }
 #endif
 
+#ifdef NDI_GPU_PATH_STATUS
+    noteRenderPath(myData, false, myData->gpuAcceleration);
+#endif
     if (srcData && dstData) {
         // Simple copy for float RGBA
         memcpy(dstData, srcData, height * dstRowBytes);
@@ -3543,11 +3616,12 @@ static OfxStatus describe(OfxImageEffectHandle effect)
     // supported — the host chooses per render via kOfxImageEffectPropMetalEnabled.
     gPropHost->propSetString(props, kOfxImageEffectPropMetalRenderSupported, 0, "true");
 #elif defined(NDI_HAS_CUDA)
-    // CUDA render + CUDA-stream support, Windows only (ticket #22, spec
-    // decision 4): accept frames as CUDA device buffers, with the host's
-    // stream handed per render via kOfxImageEffectPropCudaStream. CPU
-    // rendering stays supported — non-NVIDIA machines keep receiving CPU
-    // buffers and the existing CPU path.
+    // CUDA render + CUDA-stream support, on Windows (ticket #22, spec
+    // decision 4) and Linux (ticket #74, Linux spec decision 12): accept
+    // frames as CUDA device buffers, with the host's stream handed per
+    // render via kOfxImageEffectPropCudaStream. CPU rendering stays
+    // supported — non-NVIDIA machines, and Resolve set to OpenCL, keep
+    // receiving CPU buffers and the existing CPU path.
     gPropHost->propSetString(props, kOfxImageEffectPropCudaRenderSupported, 0, "true");
     gPropHost->propSetString(props, kOfxImageEffectPropCudaStreamSupported, 0, "true");
 #endif
