@@ -7,13 +7,17 @@
 #ifdef __linux__
 
 #include "LinuxFileDialog.h"
+#include "LinuxHostEvents.h"
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
+#include <dlfcn.h>
 #include <spawn.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -24,6 +28,10 @@ namespace {
 // A helper that writes more than this is not answering a file pick; the
 // rest is drained and dropped so it can't block on a full pipe.
 const size_t kMaxCapture = 64 * 1024;
+
+// How often the idle hook runs while the helper is alive: often enough that
+// Resolve repaints smoothly and answers the window manager's ping.
+const int kIdleIntervalMs = 30;
 
 std::vector<std::string> currentEnvironment()
 {
@@ -45,15 +53,24 @@ std::vector<char*> cStrings(std::vector<std::string>& strings)
 }
 
 // Read both pipes to EOF. poll, not two blocking reads: a helper filling
-// the stderr pipe while we wait on stdout would deadlock both of us.
-void drain(int outFd, int errFd, std::string* out, std::string* err)
+// the stderr pipe while we wait on stdout would deadlock both of us. With an
+// idle hook, poll wakes every kIdleIntervalMs to run it.
+void drain(int outFd, int errFd, std::string* out, std::string* err,
+           const std::function<void()>& idle)
 {
+    using Clock = std::chrono::steady_clock;
     struct pollfd fds[2] = {{outFd, POLLIN, 0}, {errFd, POLLIN, 0}};
     std::string* sinks[2] = {out, err};
     int open = 2;
     char buf[4096];
+    Clock::time_point lastIdle = Clock::now();
     while (open > 0) {
-        if (poll(fds, 2, -1) < 0) {
+        const int ready = poll(fds, 2, idle ? kIdleIntervalMs : -1);
+        if (idle && Clock::now() - lastIdle >= std::chrono::milliseconds(kIdleIntervalMs)) {
+            idle();
+            lastIdle = Clock::now();
+        }
+        if (ready < 0) {
             if (errno == EINTR) continue;
             break;
         }
@@ -73,7 +90,10 @@ void drain(int outFd, int errFd, std::string* out, std::string* err)
     }
 }
 
-ndi_linuxdlg::SpawnResult spawnHelper(const std::vector<std::string>& argvIn)
+} // namespace
+
+ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::string>& argvIn,
+                                                     const std::function<void()>& idle)
 {
     using ndi_linuxdlg::SpawnResult;
     SpawnResult result;
@@ -134,7 +154,7 @@ ndi_linuxdlg::SpawnResult spawnHelper(const std::vector<std::string>& argvIn)
         return result;
     }
 
-    drain(outPipe[0], errPipe[0], &result.out, &result.err);
+    drain(outPipe[0], errPipe[0], &result.out, &result.err, idle);
     close(outPipe[0]);
     close(errPipe[0]);
 
@@ -159,21 +179,54 @@ ndi_linuxdlg::SpawnResult spawnHelper(const std::vector<std::string>& argvIn)
     return result;
 }
 
-thread_local std::string tLastError;
+namespace {
+
+// Main thread only (Resolve delivers browse clicks there), so plain statics.
+ndi_linuxdlg::DialogState gState;
+bool gDialogOpen = false;
+
+bool onMainThread()
+{
+    return static_cast<pid_t>(syscall(SYS_gettid)) == getpid();
+}
+
+// Resolve's Qt event pump, looked up once (LinuxHostEvents.h).
+const ndi_linux_host::EventPump& hostEventPump()
+{
+    static const ndi_linux_host::EventPump pump = ndi_linux_host::resolveEventPump(
+        [](const char* symbol) { return dlsym(RTLD_DEFAULT, symbol); });
+    return pump;
+}
 
 } // namespace
 
 bool linux_open_file_dialog(const char* message, const char* extension,
                             const char* initialPath, char* outPath, size_t outPathSize)
 {
-    return ndi_linuxdlg::openFileDialog(message, extension, initialPath, outPath, outPathSize,
-                                        currentEnvironment(), spawnHelper, &tLastError);
+    // The pump runs Resolve's non-input events while the helper is up; none
+    // of them should reach another Browse, but a second dialog stacked on the
+    // first is refused rather than nested.
+    if (gDialogOpen) {
+        gState.error = "Browse: a file dialog is already open";
+        return false;
+    }
+    gDialogOpen = true;
+    const bool mainThread = onMainThread();
+    const ndi_linux_host::EventPump& pump = hostEventPump();
+    const bool picked = ndi_linuxdlg::openFileDialog(
+        message, extension, initialPath, outPath, outPathSize, currentEnvironment(),
+        [&](const std::vector<std::string>& argv) {
+            return ndi_linuxdlg::spawnProcess(argv, [&] { pump.pump(mainThread); });
+        },
+        &gState);
+    gDialogOpen = false;
+    return picked;
 }
 
 std::string linux_take_file_dialog_error()
 {
     std::string error;
-    error.swap(tLastError);
+    error.swap(gState.error);
     return error;
 }
 

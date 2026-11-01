@@ -82,7 +82,7 @@ static void testPickAndArgv()
     expectStr(slurp(gDir + "/argv"),
               "--file-selection\n--modal\n--title=Pick the left eye\n"
               "--file-filter=EXR files | *.exr *.EXR\n--file-filter=All files | *\n"
-              "--filename=/maps/Bühne 2/\n",
+              "--filename=/maps/Bühne 2/old.exr\n",
               "argv reaches the helper verbatim, one entry each");
     const std::string env = slurp(gDir + "/env");
     expectTrue(env.find("DISPLAY=:99") != std::string::npos, "the helper inherits DISPLAY");
@@ -172,6 +172,26 @@ static void testNoDisplay()
     setenv("DISPLAY", ":99", 1);
 }
 
+// The idle hook (the host event pump in the plugin) runs about every 30 ms
+// while the helper is alive, so Resolve repaints during a long pick.
+static void testIdleWhileWaiting()
+{
+    removeHelpers();
+    writeHelper("zenity", "/usr/bin/sleep 0.5\nprintf '/maps/slow.exr\\n'\n");
+    int idles = 0;
+    const ndi_linuxdlg::SpawnResult r = ndi_linuxdlg::spawnProcess(
+        {"zenity", "--file-selection"}, [&] { ++idles; });
+    expectTrue(r.status == ndi_linuxdlg::SpawnResult::kExited && r.exitCode == 0,
+               "a slow helper still exits 0");
+    expectStr(r.out, "/maps/slow.exr\n", "and its stdout arrives whole");
+    expectTrue(idles >= 8 && idles <= 40, "the idle hook ran repeatedly during a 0.5 s pick");
+    std::printf("     (%d idle calls in 0.5 s)\n", idles);
+
+    idles = 0;
+    ndi_linuxdlg::spawnProcess({"no-such-helper"}, [&] { ++idles; });
+    expectTrue(idles == 0, "no idle calls when nothing was spawned");
+}
+
 int main()
 {
     char tmpl[] = "/tmp/ndi_lfd_XXXXXX";
@@ -196,6 +216,7 @@ int main()
     testChattyHelper();
     testSigchldIgnored();
     testNoDisplay();
+    testIdleWhileWaiting();
 
     removeHelpers();
     unlink((gDir + "/argv").c_str());
