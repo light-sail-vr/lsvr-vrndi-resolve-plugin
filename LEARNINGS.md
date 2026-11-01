@@ -796,6 +796,13 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** the quoted form synced and built in `~/ndioutput-76` on the box.
 **Rule:** pass box paths to `linux_remote.sh` quoted or relative, never as a bare `~/`.
 
+### 2026-11-01 — zenity 4.0.1: `--filename=<dir>/` selects the folder in its parent, and no filter is preselected (Linux) (#76)
+**Symptom:** Tier 2 on the box: Browse with an empty field passed `--filename=/home/matt/`, and the dialog opened in `/home` with `matt` selected rather than inside it. In every dialog the file-type menu read "(None)" and the list showed all files (`evidence.sh` in a BRAW/ILPD pick), although `--file-filter=EXR files | *.exr *.EXR` was passed.
+**Root cause:** zenity 4.0.1 (Ubuntu 24.04) passes `--filename` to `gtk_file_chooser_set_file`, which opens a file's folder with the file selected and treats a directory the same way, trailing `/` or not (`src/fileselection.c` at tag 4.0.1). Later zenity moved to `GtkFileDialog` and honours the trailing `/`. 4.0.1 also adds each `--file-filter` with `gtk_file_chooser_add_filter` but never selects one, and GTK 4.14 then filters nothing.
+**Fix:** pass a FILE: the field's value, else the last file picked in this Resolve session, and only then `$HOME/` (where 4.0.1 shows the home folder selected inside `/home`). The filter can't be selected from the command line; BUILD.md and the installer README tell users to choose it in the menu.
+**Validated by:** the Tier 2 screenshots (first frame of each dialog); unit tests for the start-file rules.
+**Rule:** check a GUI helper's argument semantics against the source of the version the target distro ships, not its `--help`.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 

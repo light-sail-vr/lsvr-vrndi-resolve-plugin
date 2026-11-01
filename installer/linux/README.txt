@@ -111,6 +111,8 @@ install; you can still type or paste the path into the field.
     Ubuntu/Debian:      sudo apt install zenity
     Rocky/RHEL/Alma:    sudo dnf install zenity
     KDE desktops:       kdialog (usually already installed)
+With zenity 4.0.1 (Ubuntu 24.04) the dialog's file-type menu starts at
+"(None)" and lists every file; choose the file type there to narrow it.
 Tested on an X11 desktop session with zenity. Wayland sessions and kdialog
 are untested.
 
