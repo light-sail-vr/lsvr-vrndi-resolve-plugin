@@ -66,6 +66,18 @@ mkdir -p "$tmp/x" && tar -xzf "$out/$tarball" -C "$tmp/x"
 expect "install.sh is executable in the tarball" [ -x "$tmp/x/$top/install.sh" ]
 expect "uninstall.sh is executable in the tarball" [ -x "$tmp/x/$top/uninstall.sh" ]
 
+# --- CPU-only packages say so in their name ------------------------------------------
+cpuball="NDIOutput-$V-linux-x86_64-cpu-only.tar.gz"
+pack --cpu-only; status=$?
+expect "--cpu-only: packages (exit 0)" [ "$status" -eq 0 ]
+expect "--cpu-only: the tarball is named -cpu-only" [ -f "$out/$cpuball" ]
+expect "--cpu-only: no unsuffixed tarball" [ ! -e "$out/$tarball" ]
+expect "--cpu-only: checksums name the -cpu-only tarball" has "$cpuball" "$out/SHA256SUMS-Linux.txt"
+pack --cuda; status=$?
+expect "the old --cuda flag is rejected (CUDA is the release default)" [ "$status" -eq 2 ]
+pack --no-cuda; status=$?
+expect "--no-cuda is rejected (--cpu-only is the one override)" [ "$status" -eq 2 ]
+
 # --- stub guard -------------------------------------------------------------------
 printf 'ELF\0ndioutput_stub_libndi\0' > "$bin/libndi.so.6"
 rm "$bin/libndi_licenses.txt"

@@ -382,10 +382,10 @@ NDIOutput-<V>-linux-x86_64/
 **Build it on the Linux box** (Docker plus the Standard NDI SDK for Linux; release order and hand-off in [docs/RELEASING.md](docs/RELEASING.md) step 4a):
 
 ```bash
-scripts/package_linux_release.sh --cuda      # on the box, in a release-only checkout
+scripts/package_linux_release.sh            # on the box, in a release-only checkout
 ```
 
-[scripts/package_linux_release.sh](scripts/package_linux_release.sh) checks `VERSION` against the source `#define`, deletes `build/` and `stage/`, builds fresh in the Rocky 8 container (`ndioutput-build:rocky8`, as `linux_remote.sh build` does, failing unless CMake says `NDI: using installed SDK`), runs `ctest` and stages. Then it packages, refusing:
+[scripts/package_linux_release.sh](scripts/package_linux_release.sh) checks `VERSION` against the source `#define`, deletes `build/` and `stage/`, builds fresh in the Rocky 8 container (`ndioutput-build:rocky8`, as `linux_remote.sh build` does, failing unless CMake says `NDI: using installed SDK`), runs `ctest` and stages. A release build always passes `-DNDI_ENABLE_CUDA=ON` and fails unless CMake reports the CUDA GPU-native pipeline, whatever CMake's Linux default is. `--cpu-only` builds with `-DNDI_ENABLE_CUDA=OFF` instead and names the tarball `NDIOutput-<V>-linux-x86_64-cpu-only.tar.gz`; `publish_github_release.sh` accepts either name (never both) and says CPU-only in the notes, so a CPU-only release is never silent. Then it packages, refusing:
 
 | Refusal | Override (never for a release) |
 | --- | --- |

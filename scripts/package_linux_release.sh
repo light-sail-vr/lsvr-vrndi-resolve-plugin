@@ -4,11 +4,12 @@
 # (macOS) and scripts/package_windows_release.ps1 produce. One VERSION, one
 # CHANGELOG, one release event with per-platform artifacts.
 #
-#   scripts/package_linux_release.sh [--cuda|--no-cuda] [--sdk PATH] [--allow-old-sdk]
+#   scripts/package_linux_release.sh [--cpu-only] [--sdk PATH] [--allow-old-sdk]
 #       Release mode, on the Linux box (Docker + the Standard NDI SDK for Linux):
-#       a fresh build in the Rocky Linux 8 container (spec decision 5), ctest,
-#       cmake --install into stage/, then the packaging steps below.
-#   scripts/package_linux_release.sh --stage DIR [--allow-stub] [--elf-checker PATH]
+#       a fresh build in the Rocky Linux 8 container (spec decision 5) with
+#       -DNDI_ENABLE_CUDA=ON, ctest, cmake --install into stage/, then the
+#       packaging steps below.
+#   scripts/package_linux_release.sh --stage DIR [--cpu-only] [--allow-stub] [--elf-checker PATH]
 #       Package an already-staged tree (CI's -STUB tarball, the tests).
 #
 # Packaging refuses a stub libndi.so.6 (the CI stub exports
@@ -20,8 +21,10 @@
 #   SHA256SUMS-Linux.txt                      (SHA256SUMS.txt is the macOS file in the same folder)
 #
 # Options:
+#   --cpu-only       build with -DNDI_ENABLE_CUDA=OFF (no GPU-native path) and
+#                    name the tarball ...-linux-x86_64-cpu-only.tar.gz, so a
+#                    CPU-only release says so (the release notes do too)
 #   --sdk PATH       NDI SDK for Linux [$NDI_SDK_PATH, else ~/sdks/NDI SDK for Linux]
-#   --cuda/--no-cuda NDI_ENABLE_CUDA for the build [CMake's Linux default]
 #   --elf-checker P  test_plugin_elf binary [build/test_plugin_elf]
 #   --out DIR        output folder [dist/v<VERSION>]
 # Release order and the Linux hand-off: docs/RELEASING.md.
@@ -35,7 +38,7 @@ BUILD_IMAGE="ndioutput-build:rocky8"
 
 STAGE=""
 SDK="${NDI_SDK_PATH:-$HOME/sdks/NDI SDK for Linux}"
-CUDA=""
+CUDA=ON
 CHECKER=""
 OUT=""
 ALLOW_STUB=0
@@ -44,13 +47,12 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --stage) STAGE="$2"; shift ;;
         --sdk) SDK="$2"; shift ;;
-        --cuda) CUDA=ON ;;
-        --no-cuda) CUDA=OFF ;;
+        --cpu-only) CUDA=OFF ;;
         --elf-checker) CHECKER="$2"; shift ;;
         --out) OUT="$2"; shift ;;
         --allow-stub) ALLOW_STUB=1 ;;
         --allow-old-sdk) ALLOW_OLD_SDK=1 ;;
-        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^# Release order/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
@@ -114,16 +116,24 @@ if [ -z "$STAGE" ]; then
         docker commit ndioutput-build-prep "$BUILD_IMAGE" >/dev/null
         docker rm ndioutput-build-prep >/dev/null
     fi
-    echo "== fresh Rocky 8 container build of v$VERSION (CUDA: ${CUDA:-CMake default})"
+    if [ "$CUDA" = ON ]; then
+        echo "== fresh Rocky 8 container build of v$VERSION with the CUDA GPU-native pipeline"
+        cuda_status="build with the CUDA GPU-native pipeline"
+    else
+        echo "== fresh Rocky 8 container build of v$VERSION, CPU-only (--cpu-only)"
+        cuda_status="CPU-only build"
+    fi
     # A fresh tree: a release never inherits a dev build's cache (CUDA, SDK path).
     rm -rf "$REPO/build" "$REPO/stage"
     docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e NDI_CUDA="$CUDA" \
+        -e NDI_CUDA_STATUS="$cuda_status" \
         -v "$REPO:/src" -v "$SDK:/ndi:ro" -w /src "$BUILD_IMAGE" bash -c '
         set -euo pipefail
         source /opt/rh/gcc-toolset-13/enable
         cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNDI_SDK_PATH=/ndi \
-            ${NDI_CUDA:+-DNDI_ENABLE_CUDA=$NDI_CUDA} | tee build-configure.log
+            -DNDI_ENABLE_CUDA="$NDI_CUDA" | tee build-configure.log
         grep -q "NDI: using installed SDK" build-configure.log
+        grep -q "$NDI_CUDA_STATUS" build-configure.log
         rm -f build-configure.log
         cmake --build build --parallel "$(nproc)"
         ctest --test-dir build --output-on-failure
@@ -153,6 +163,7 @@ fi
 echo "== test_plugin_elf on the staged .ofx"
 "$CHECKER" "$bin/NDIOutput.ofx" || fail "test_plugin_elf rejected $bin/NDIOutput.ofx"
 
+[ "$CUDA" = ON ] || suffix="-cpu-only$suffix"
 name="NDIOutput-$VERSION-linux-x86_64$suffix"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"

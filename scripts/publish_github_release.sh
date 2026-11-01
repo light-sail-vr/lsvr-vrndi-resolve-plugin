@@ -60,11 +60,23 @@ if ls "$DIST"/*-STUB.* >/dev/null 2>&1; then
     echo "STUB artifacts present in $DIST — those never ship. Remove them and package against the real NDI SDK."
     exit 1
 fi
-# Linux artifacts: optional and all-or-nothing, like Windows.
+# Linux artifacts: optional and all-or-nothing, like Windows. The tarball is
+# the default (CUDA) build or, from package_linux_release.sh --cpu-only, the
+# -cpu-only one; never both.
 LNX_TGZ="$DIST/NDIOutput-$VERSION-linux-x86_64.tar.gz"
+LNX_CPU_TGZ="$DIST/NDIOutput-$VERSION-linux-x86_64-cpu-only.tar.gz"
 LNX_SUMS="$DIST/SHA256SUMS-Linux.txt"
 LNX_FILES=()
 lnx_present=0
+lnx_cpu_only=0
+if [ -f "$LNX_CPU_TGZ" ]; then
+    if [ -f "$LNX_TGZ" ]; then
+        echo "Both $LNX_TGZ and $LNX_CPU_TGZ are in $DIST: keep the one SHA256SUMS-Linux.txt names."
+        exit 1
+    fi
+    LNX_TGZ="$LNX_CPU_TGZ"
+    lnx_cpu_only=1
+fi
 for f in "$LNX_TGZ" "$LNX_SUMS"; do
     [ -f "$f" ] && lnx_present=$((lnx_present + 1))
 done
@@ -94,7 +106,7 @@ if [ "$lnx_present" -eq 2 ]; then
     (cd "$DIST" && shasum -a 256 -c "$(basename "$LNX_SUMS")") || {
         echo "$LNX_SUMS does not match the Linux tarball — copy both again from the Linux box."; exit 1; }
     LNX_FILES=("$LNX_TGZ" "$LNX_SUMS")
-    echo "Linux artifacts found — attaching the Linux tarball."
+    echo "Linux artifacts found — attaching $(basename "$LNX_TGZ")."
 elif [ "$lnx_present" -eq 1 ]; then
     echo "Only 1 of 2 Linux artifacts present in $DIST:"
     for f in "$LNX_TGZ" "$LNX_SUMS"; do
@@ -173,18 +185,25 @@ if [ "$lnx_present" -eq 2 ]; then
     # verified on hardware (with the README platform-table cell and the NDI
     # runtime paragraph of installer/linux/README.txt).
     LNX_GPU="Linux runs the CPU path today, which has a lower practical resolution ceiling (stream at Half or Quarter). The GPU-native CUDA path for NVIDIA GPUs arrives with #74."
+    if [ "$lnx_cpu_only" -eq 1 ]; then
+        LNX_GPU="This Linux build is CPU-only (\`-cpu-only\` in its name): it has no GPU-native path on any GPU, and the CPU path has a lower practical resolution ceiling (stream at Half or Quarter)."
+    fi
+    lnx_name="$(basename "$LNX_TGZ" .tar.gz)"
     cat >> "$NOTES" <<'EOF'
 
 ### Install — Linux
 
-Download `NDIOutput-*-linux-x86_64.tar.gz`, then:
-
-```bash
-sha256sum -c SHA256SUMS-Linux.txt          # optional: verify the download
-tar -xzf NDIOutput-<version>-linux-x86_64.tar.gz
-cd NDIOutput-<version>-linux-x86_64
-sudo ./install.sh                          # installs to /usr/OFX/Plugins; sudo ./uninstall.sh removes it
-```
+EOF
+    printf '%s\n' \
+        "Download \`$lnx_name.tar.gz\`, then:" \
+        "" \
+        '```bash' \
+        "sha256sum -c SHA256SUMS-Linux.txt          # optional: verify the download" \
+        "tar -xzf $lnx_name.tar.gz" \
+        "cd $lnx_name" \
+        "sudo ./install.sh                          # installs to /usr/OFX/Plugins; sudo ./uninstall.sh removes it" \
+        '```' >> "$NOTES"
+    cat >> "$NOTES" <<'EOF'
 
 Restart DaVinci Resolve, then find the plugin on the Color page under **OpenFX → LSVR → VR.NDI Sender**. The NDI runtime is included. `install.sh` checks the prerequisites below and warns about anything missing; `README.txt` in the tarball has the details.
 
