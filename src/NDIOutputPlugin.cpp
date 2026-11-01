@@ -1871,6 +1871,9 @@ static void shutdownGPUContext(NDIInstanceData* data)
         data->gpuContext->nativeContext = nullptr;
     }
 #endif
+#ifdef NDI_GPU_PATH_STATUS
+    data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::NotTried));
+#endif
 
     data->gpuContext->initialized = false;
 }
@@ -2311,27 +2314,28 @@ static void flushStatusParam(NDIInstanceData* data)
 }
 
 #ifdef NDI_GPU_PATH_STATUS
-// Record which path this render took for Stream Status, and log a change of
-// path once (#74, src/LinuxGpuPath.h). gpuParam is the GPU Acceleration
-// param as read at the top of the render: a failed GPU init clears
-// data->gpuAcceleration mid-render, and that is a module failure, not the
-// user switching the param off.
-static void noteRenderPath(NDIInstanceData* data, bool hostCudaFrames, bool gpuParam)
+// Record the path this render actually took (#74, src/LinuxGpuPath.h), for
+// Stream Status, and log a change of outcome once. Called where the render
+// commits to a path, BEFORE it submits the frame: the submit recomposes
+// Stream Status, which must already describe this frame.
+static void storeRenderPathNote(NDIInstanceData* data, ndi_gpu_path::Outcome outcome)
+{
+    if (!data->renderIsThumbnail) {  // a host may render thumbnails on another path; the stream's path is what counts
+        data->renderPathNote.store(ndi_gpu_path::statusNote(outcome), std::memory_order_relaxed);
+    }
+}
+
+static void noteRenderPath(NDIInstanceData* data, ndi_gpu_path::Outcome outcome)
 {
     if (data->renderIsThumbnail) {
-        return;  // a host may render thumbnails on another path; the stream's path is what counts
+        return;
     }
-    ndi_gpu_path::Inputs in;
-    in.hostCudaFrames = hostCudaFrames;
-    in.gpuAcceleration = gpuParam;
-    in.optimalFormat = data->optimalFormat;
-    in.module = static_cast<ndi_gpu_path::Module>(data->gpuModule.load());
-    const ndi_gpu_path::Decision d = ndi_gpu_path::decide(in);
-    data->renderPathNote.store(d.status, std::memory_order_relaxed);
-    if (static_cast<int>(d.path) != data->lastRenderPath) {
-        data->lastRenderPath = static_cast<int>(d.path);
+    storeRenderPathNote(data, outcome);
+    if (data->lastRenderPath != static_cast<int>(outcome)) {
+        data->lastRenderPath = static_cast<int>(outcome);
         NDI_LOG("Render path: %s",
-                d.path == ndi_gpu_path::Path::GpuNative ? "GPU-native (" NDI_GPU_BACKEND_NAME ")" : d.status);
+                outcome == ndi_gpu_path::Outcome::GpuNative ? "GPU-native (" NDI_GPU_BACKEND_NAME ")"
+                                                            : ndi_gpu_path::statusNote(outcome));
     }
 }
 #endif
@@ -2408,6 +2412,12 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
         NDI_LOG("GPU render: missing device buffer, skipping frame");
         return kOfxStatOK; // matches the CPU path's leniency for absent images
     }
+#ifdef NDI_GPU_PATH_STATUS
+    // The param as the render read it: a failed GPU init inside
+    // ensureNDIReady below clears data->gpuAcceleration, and that is a module
+    // failure, not the user switching the param off.
+    const bool gpuParam = data->gpuAcceleration;
+#endif
 
     // GPU Acceleration may have been enabled after NDI init skipped the context.
     if (data->gpuAcceleration && !data->gpuContext) {
@@ -2444,8 +2454,17 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
     const int rowFloats = srcRowBytes / static_cast<int>(sizeof(float));
 
     bool handledByFastPath = false;
-    if (data->gpuAcceleration && nativeContext &&
-        data->optimalFormat) {
+#ifdef NDI_GPU_PATH_STATUS
+    // The one gate (src/LinuxGpuPath.h); outcome then tracks what really
+    // happened and drives Stream Status.
+    ndi_gpu_path::Outcome outcome = ndi_gpu_path::fastPathGate(
+        gpuParam, data->optimalFormat, nativeContext != nullptr,
+        static_cast<ndi_gpu_path::Module>(data->gpuModule.load()));
+    const bool tryFastPath = (outcome == ndi_gpu_path::Outcome::GpuNative);
+#else
+    const bool tryFastPath = data->gpuAcceleration && nativeContext && data->optimalFormat;
+#endif
+    if (tryFastPath) {
         // Non-blocking fast path (v1.6.0): ENQUEUE the fused kernel and
         // return. No GPU wait here — that wait (plus the CPU-side NDI work
         // that followed it) was ~90ms of render-thread blocking per eye and
@@ -2481,6 +2500,16 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
             // stays INVALID and falls through to the readback + CPU warp, so
             // the stream keeps its corrected geometry (slowly) either way.
             void* mapBuffer = stmapNativeBufferForQueue(data->renderStmap, nativeContext, gpuQueue);
+#ifdef NDI_GPU_PATH_STATUS
+            if (!mapBuffer) {
+                outcome = ndi_gpu_path::Outcome::StmapUploadFailed;
+            } else {
+                // Before the submit: the pump worker recomposes Stream Status
+                // when this frame's kernel completes. Note only; the log
+                // line waits for the submit's verdict (below).
+                storeRenderPathNote(data, outcome);
+            }
+#endif
             if (mapBuffer) {
                 st = nativeGpuWarpSubmit(nativeContext, gpuQueue, srcBuffer,
                                          width, height, rowFloats,
@@ -2489,12 +2518,25 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
                                          pumpOnConvertDone, ctx);
             }
         } else if (colorOk) {
+#ifdef NDI_GPU_PATH_STATUS
+            storeRenderPathNote(data, outcome);  // before the submit, as above
+#endif
             st = nativeGpuDownscaleSubmit(nativeContext, gpuQueue, srcBuffer,
                                           width, height, rowFloats, divisor,
                                           outWidth, outHeight, color,
                                           pumpOnConvertDone, ctx);
         }
         data->timerConvMs = msSince(convT0);
+#ifdef NDI_GPU_PATH_STATUS
+        if (!colorOk) {
+            outcome = ndi_gpu_path::Outcome::ColorUploadFailed;
+        } else if (st == kNativeSubmitInvalid && outcome == ndi_gpu_path::Outcome::GpuNative) {
+            outcome = ndi_gpu_path::Outcome::SubmitInvalid;
+        }
+        if (outcome == ndi_gpu_path::Outcome::GpuNative) {
+            noteRenderPath(data, outcome);  // enqueued, or dropped on a full ring: logs a change once
+        }
+#endif
         if (st == kNativeSubmitOK) {
             handledByFastPath = true;
             NDI_LOG("GPU-native async: %dx%d device frame -> %dx%d UYVY enqueued (divisor %d, warp %d, color %d)",
@@ -2528,6 +2570,9 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
         if (readOk) {
             NDI_LOG("Device frame full readback -> CPU fallback path (%dx%d, gpu=%d)",
                     width, height, data->gpuAcceleration ? 1 : 0);
+#ifdef NDI_GPU_PATH_STATUS
+            noteRenderPath(data, outcome);  // before the send recomposes Stream Status
+#endif
             sendCPUFrameToNDI(data, data->readbackBuffer.data(), width, height, srcRowBytes);
         } else {
             NDI_LOG("Device frame readback failed — NDI frame skipped");
@@ -3529,14 +3574,9 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     }
 #endif
     if (gpuEnabled) {
-#ifdef NDI_GPU_PATH_STATUS
-        const bool gpuParam = myData->gpuAcceleration;
-#endif
+        // renderGPUFrame notes the path it takes (NDI_GPU_PATH_STATUS).
         OfxStatus gpuStatus = renderGPUFrame(myData, srcData, dstData, width, height,
                                              srcRowBytes, dstRowBytes, gpuQueue);
-#ifdef NDI_GPU_PATH_STATUS
-        noteRenderPath(myData, true, gpuParam);
-#endif
         gEffectHost->clipReleaseImage(sourceImg);
         gEffectHost->clipReleaseImage(outputImg);
         flushStatusParam(myData);
@@ -3554,7 +3594,7 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
 #endif
 
 #ifdef NDI_GPU_PATH_STATUS
-    noteRenderPath(myData, false, myData->gpuAcceleration);
+    noteRenderPath(myData, ndi_gpu_path::Outcome::HostCpuFrames);  // before the send below
 #endif
     if (srcData && dstData) {
         // Simple copy for float RGBA

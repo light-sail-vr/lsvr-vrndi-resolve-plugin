@@ -1,14 +1,15 @@
 // Tests for the Linux render-path seam (src/LinuxGpuPath.h, ticket #74):
-// which path a render takes (GPU-native CUDA, or the CPU path) and the
-// Stream Status note that says why. Pure, so it runs on every platform; the
-// fallbacks themselves are exercised on the box (Tier 2: Resolve set to
-// OpenCL, and a forced CUDA init failure).
+// the fast-path gate, the outcome a render records, and the Stream Status
+// note that says why a frame took the CPU path. Pure, so it runs on every
+// platform; the fallbacks themselves are exercised on the box (Tier 2:
+// Resolve set to OpenCL, and a forced CUDA init failure).
 // Build & run: ctest (Windows, Linux); on macOS by hand:
 //   c++ -std=c++17 -Isrc tests/test_linux_gpu_path.cpp -o build/t && build/t
 
 #include "LinuxGpuPath.h"
 
 #include <cstdio>
+#include <set>
 #include <string>
 
 static int failures = 0;
@@ -29,76 +30,109 @@ static bool contains(const char* haystack, const char* needle)
 }
 
 using ndi_gpu_path::Module;
+using ndi_gpu_path::Outcome;
 using ndi_gpu_path::Path;
-using ndi_gpu_path::Inputs;
-using ndi_gpu_path::decide;
+using ndi_gpu_path::fastPathGate;
+using ndi_gpu_path::pathOf;
+using ndi_gpu_path::statusNote;
 
-static Inputs cudaFrames(Module module)
+static const Outcome kAllOutcomes[] = {
+    Outcome::GpuNative,        Outcome::HostCpuFrames,     Outcome::GpuParamOff,
+    Outcome::OptimalFormatOff, Outcome::ModuleNotTried,    Outcome::ModuleNoDevice,
+    Outcome::ModuleInitFailed, Outcome::ModuleForced,      Outcome::ColorUploadFailed,
+    Outcome::StmapUploadFailed, Outcome::SubmitInvalid,
+};
+
+static void testGateGpuNative()
 {
-    Inputs in;
-    in.hostCudaFrames = true;
-    in.gpuAcceleration = true;
-    in.optimalFormat = true;
-    in.module = module;
-    return in;
+    const Outcome o = fastPathGate(true, true, true, Module::Ready);
+    expectTrue(o == Outcome::GpuNative, "param on + optimal format + live context -> try GPU-native");
+    expectTrue(pathOf(o) == Path::GpuNative, "GPU-native outcome is the GPU-native path");
+    expectTrue(std::string(statusNote(o)).empty(), "GPU-native adds no Stream Status note");
 }
 
-static void testGpuNative()
+static void testGateParamsOff()
 {
-    const ndi_gpu_path::Decision d = decide(cudaFrames(Module::Ready));
-    expectTrue(d.path == Path::GpuNative, "CUDA frames + ready module -> GPU-native");
-    expectTrue(std::string(d.status).empty(), "GPU-native adds no Stream Status note");
+    Outcome o = fastPathGate(false, true, true, Module::Ready);
+    expectTrue(o == Outcome::GpuParamOff && contains(statusNote(o), "GPU Acceleration"),
+               "GPU Acceleration off -> readback, names the param");
+    o = fastPathGate(true, false, true, Module::Ready);
+    expectTrue(o == Outcome::OptimalFormatOff && contains(statusNote(o), "Optimal Color Format"),
+               "Optimal Color Format off -> readback, names the param");
+    // The param read at the top of the render wins over a module that then
+    // failed (the plugin clears its working copy of the param on failure).
+    o = fastPathGate(false, true, false, Module::InitFailed);
+    expectTrue(o == Outcome::GpuParamOff, "param off is reported as the param, not the module");
 }
 
-static void testHostCpuFrames()
-{
-    // Resolve set to OpenCL hands CPU buffers, whatever our module did.
-    Inputs in = cudaFrames(Module::Ready);
-    in.hostCudaFrames = false;
-    const ndi_gpu_path::Decision d = decide(in);
-    expectTrue(d.path == Path::CpuHostFrames, "CPU frames from Resolve -> CPU path");
-    expectTrue(contains(d.status, "CPU path"), "CPU frames note names the CPU path");
-    expectTrue(contains(d.status, "CUDA"), "CPU frames note points at Resolve's GPU mode");
-
-    in.module = Module::InitFailed;
-    expectTrue(decide(in).path == Path::CpuHostFrames,
-               "CPU frames win over a failed module (nothing to read back)");
-}
-
-static void testReadbackFallbacks()
+static void testGateNoContext()
 {
     struct Case {
         Module module;
+        Outcome expected;
         const char* needle;
         const char* name;
     } cases[] = {
-        {Module::NoDevice, "no CUDA device", "no device -> readback, says no device"},
-        {Module::InitFailed, "init failed", "init failure -> readback, says init failed"},
-        {Module::ForcedFailure, "NDI_OUTPUT_FORCE_CUDA_FAIL",
+        {Module::NoDevice, Outcome::ModuleNoDevice, "no CUDA device", "no device -> readback, says no device"},
+        {Module::InitFailed, Outcome::ModuleInitFailed, "init failed", "init failure -> readback, says init failed"},
+        {Module::ForcedFailure, Outcome::ModuleForced, "NDI_OUTPUT_FORCE_CUDA_FAIL",
          "forced failure -> readback, names the switch"},
-        {Module::NotTried, "CPU path", "untried module -> readback"},
+        {Module::NotTried, Outcome::ModuleNotTried, "not initialized", "untried module -> readback"},
+        // Shut down (or torn down) under a render while the module said Ready:
+        // the old decide() called this GPU-native; the gate follows the context.
+        {Module::Ready, Outcome::ModuleNotTried, "not initialized",
+         "Ready module without a live context -> readback, not GPU-native"},
     };
     for (const Case& c : cases) {
-        const ndi_gpu_path::Decision d = decide(cudaFrames(c.module));
-        expectTrue(d.path == Path::CpuReadback && contains(d.status, "CPU path") &&
-                       contains(d.status, c.needle),
+        const Outcome o = fastPathGate(true, true, false, c.module);
+        expectTrue(o == c.expected && pathOf(o) == Path::CpuReadback && contains(statusNote(o), "CPU path") &&
+                       contains(statusNote(o), c.needle),
                    c.name);
     }
 }
 
-static void testParamsOff()
+static void testFastPathFailuresAreReported()
 {
-    Inputs in = cudaFrames(Module::Ready);
-    in.gpuAcceleration = false;
-    ndi_gpu_path::Decision d = decide(in);
-    expectTrue(d.path == Path::CpuReadback && contains(d.status, "GPU Acceleration"),
-               "GPU Acceleration off -> readback, names the param");
+    // renderGPUFrame passed the gate, then the colour upload, the STMap
+    // upload or the submit failed: the frame is read back, and Stream
+    // Status must say so (the old decide() still said GPU-native).
+    struct Case {
+        Outcome outcome;
+        const char* needle;
+        const char* name;
+    } cases[] = {
+        {Outcome::ColorUploadFailed, "Output Color", "colour upload failure -> readback, names Output Color"},
+        {Outcome::StmapUploadFailed, "STMap", "STMap upload failure -> readback, names the STMap"},
+        {Outcome::SubmitInvalid, "refused", "kernel refusal (INVALID) -> readback, says refused"},
+    };
+    for (const Case& c : cases) {
+        expectTrue(pathOf(c.outcome) == Path::CpuReadback && contains(statusNote(c.outcome), "CPU path") &&
+                       contains(statusNote(c.outcome), c.needle),
+                   c.name);
+    }
+}
 
-    in = cudaFrames(Module::Ready);
-    in.optimalFormat = false;
-    d = decide(in);
-    expectTrue(d.path == Path::CpuReadback && contains(d.status, "Optimal Color Format"),
-               "Optimal Color Format off -> readback, names the param");
+static void testHostCpuFrames()
+{
+    const Outcome o = Outcome::HostCpuFrames;
+    expectTrue(pathOf(o) == Path::CpuHostFrames, "CPU frames from Resolve -> CPU path");
+    expectTrue(contains(statusNote(o), "CPU path") && contains(statusNote(o), "CUDA"),
+               "CPU frames note names the CPU path and points at Resolve's GPU mode");
+}
+
+static void testEveryFallbackHasItsOwnNote()
+{
+    std::set<std::string> notes;
+    for (Outcome o : kAllOutcomes) {
+        if (o == Outcome::GpuNative) {
+            continue;
+        }
+        expectTrue(pathOf(o) != Path::GpuNative, "a fallback outcome is never the GPU-native path");
+        expectTrue(contains(statusNote(o), "CPU path: "), "a fallback note starts with \"CPU path: \"");
+        notes.insert(statusNote(o));
+    }
+    expectTrue(notes.size() == sizeof(kAllOutcomes) / sizeof(kAllOutcomes[0]) - 1,
+               "every fallback outcome has a distinct note");
 }
 
 static void testForcedFailureSwitch()
@@ -113,10 +147,12 @@ static void testForcedFailureSwitch()
 
 int main()
 {
-    testGpuNative();
+    testGateGpuNative();
+    testGateParamsOff();
+    testGateNoContext();
+    testFastPathFailuresAreReported();
     testHostCpuFrames();
-    testReadbackFallbacks();
-    testParamsOff();
+    testEveryFallbackHasItsOwnNote();
     testForcedFailureSwitch();
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);
