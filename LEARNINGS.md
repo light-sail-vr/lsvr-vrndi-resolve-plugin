@@ -754,6 +754,27 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** the out-of-tree build survived later syncs and `test_cuda_downscale` passed from it.
 **Rule:** on the box, keep everything that isn't the Mac's worktree outside `NDI_LINUX_DIR`, except `build/` and `stage/`.
 
+### 2026-11-01 — Resolve's "GPU memory full" on the box was ComfyUI holding the VRAM (#74)
+**Symptom:** with the CUDA build on an 8160×7200 stereo timeline, Resolve showed several "GPU memory full" dialogs; ResolveDebug.txt has `cudaErrorMemoryAllocation` and "Flushing GPU memory" from `DeviceResourceTypeCUDA.cpp`.
+**Root cause:** not the plugin. ComfyUI (`~/comfyui-easy-install`, plus `~/comfyui-flux3`) shares the 3090 Ti and held up to 18.6 GB of its 24 GB, at up to 100% utilisation. Resolve was left about 4 GB, and one 8160×7200 float eye is about 940 MB. The plugin's own allocations are a slot ring of small UYVY buffers, and its kernels took about 1.3 ms per 8K eye.
+**Fix:** none in code. Run 8K and real-time Tier 2 on the box only while ComfyUI is unloaded or idle.
+**Validated by:** `nvidia-smi --query-compute-apps` during the dialogs, and the plugin journal (`Render path: GPU-native (CUDA)`, `wtimer gpu=1.27`).
+**Rule:** before any GPU or real-time measurement on COMFYBOX, check `nvidia-smi` for other processes; a Resolve GPU error there is a shared-GPU problem until shown otherwise.
+
+### 2026-11-01 — The Mac sees no NDI sources from the box when it's off the box's LAN (#74)
+**Symptom:** `ndi_verify --list` showed zero sources, while the plugin was attached and the box listened on 5960/5961; `ping 192.168.1.127` returned "No route to host".
+**Root cause:** the MacBook was on a different 192.168.1.x network (Wi-Fi elsewhere) and reached the box only over Tailscale. mDNS doesn't cross Tailscale, so NDI discovery found nothing.
+**Fix:** point the NDI SDK at the box directly, without touching `~/.ndi`. Write `{"ndi":{"networks":{"ips":"100.80.25.1","discovery":""}}}` to `<dir>/ndi-config.v1.json` and run `NDI_CONFIG_DIR=<dir> ./build/ndi_verify …`. Video then flows over Tailscale. That tests neither Avahi nor the LAN firewall, and the link's bandwidth caps the measured fps (3840×1080 arrived at 14.4 fps while the box sent 21.8).
+**Validated by:** `--list` found `COMFYBOX (VR.NDI Sender)` with the config and nothing without it; 1080p receives worked over Tailscale.
+**Rule:** if `ndi_verify --list` is empty, first check that the Mac can route to the box's LAN address; a Tailscale-only receive is fine for content checks, but not for discovery, firewall or full-rate cadence results.
+
+### 2026-11-01 — `Project:SetCurrentTimeline` from fuscript didn't switch the timeline (#74)
+**Symptom:** a script on the box created `NDI_LINUX_8K_STEREO` and made it current, then `SetCurrentTimeline(GetTimelineByIndex(1))` returned nothing and the current timeline stayed the 8K one. Matt then applied the node to the wrong timeline.
+**Root cause:** unknown (Resolve 21.1, Color page open, playback stopped); the call returns false/nil with no log line.
+**Fix:** none; Matt switches timelines in the Media Pool, and step lists say which timeline he should see.
+**Validated by:** re-reading `GetCurrentTimeline()` right after the call.
+**Rule:** after any scripted Resolve state change, read the state back before telling a human what's on screen.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
