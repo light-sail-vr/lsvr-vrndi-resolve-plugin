@@ -44,9 +44,10 @@ but only Ubuntu is tested end to end. Other x86-64 distributions with glibc
 supported (Resolve has no Linux ARM build).
 
 The plugin ships its own NDI runtime (libndi.so.6, inside the bundle): you
-don't need the NDI SDK or NDI Tools on this machine. The GPU-native path needs
-an NVIDIA GPU and driver; anything else uses the CPU path, which has a lower
-resolution ceiling (use the Resolution control to stream Half or Quarter).
+don't need the NDI SDK or NDI Tools on this machine. On Linux the plugin runs
+its CPU path today, which has a lower resolution ceiling (use the Resolution
+control to stream Half or Quarter); the GPU-native CUDA path for NVIDIA GPUs
+arrives in a later release.
 
 
 Prerequisites: Avahi

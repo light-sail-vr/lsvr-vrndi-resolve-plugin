@@ -169,6 +169,10 @@ EOF
 fi
 
 if [ "$lnx_present" -eq 2 ]; then
+    # The Linux GPU status: the one line #74 flips once the CUDA path is
+    # verified on hardware (with the README platform-table cell and the NDI
+    # runtime paragraph of installer/linux/README.txt).
+    LNX_GPU="Linux runs the CPU path today, which has a lower practical resolution ceiling (stream at Half or Quarter). The GPU-native CUDA path for NVIDIA GPUs arrives with #74."
     cat >> "$NOTES" <<'EOF'
 
 ### Install — Linux
@@ -184,7 +188,10 @@ sudo ./install.sh                          # installs to /usr/OFX/Plugins; sudo 
 
 Restart DaVinci Resolve, then find the plugin on the Color page under **OpenFX → LSVR → VR.NDI Sender**. The NDI runtime is included. `install.sh` checks the prerequisites below and warns about anything missing; `README.txt` in the tarball has the details.
 
-**Support:** tested on Ubuntu 24.04 with Resolve Studio 21.1. Built for Rocky Linux 8+ (glibc 2.28+), the platform Blackmagic certifies: the binary is checked to load there, but only Ubuntu is tested end to end. x86-64 only. The GPU-native path needs an NVIDIA GPU; elsewhere the plugin falls back to the CPU path (stream at Half or Quarter).
+**Support:** tested on Ubuntu 24.04 with Resolve Studio 21.1. Built for Rocky Linux 8+ (glibc 2.28+), the platform Blackmagic certifies: the binary is checked to load there, but only Ubuntu is tested end to end. x86-64 only.
+EOF
+    printf '\n**GPU:** %s\n' "$LNX_GPU" >> "$NOTES"
+    cat >> "$NOTES" <<'EOF'
 
 **Avahi is required:** the client libraries (`libavahi-client3` on Ubuntu, `avahi-libs` on Rocky), without which the plugin can't stream, and a running `avahi-daemon`, without which the source isn't discoverable. **Never stop `avahi-daemon` while Resolve is running**: Resolve crashes.
 
