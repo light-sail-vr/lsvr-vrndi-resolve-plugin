@@ -3,6 +3,7 @@
 // braw_reader on Linux only (CMakeLists.txt, NDI_HAS_BRAW_READER).
 
 #include "LinuxBRAWRuntime.h"
+#include "LinuxLog.h"
 
 #include <dlfcn.h>
 #include <limits.h>
@@ -27,12 +28,24 @@ std::string exePath()
     return std::string(buf, static_cast<size_t>(n));
 }
 
+// Whether the library the last successful openLibrary() returned was
+// already resident (Resolve's own copy) before the plugin asked for it.
+bool gLastOpenWasResident = false;
+
 // RTLD_LOCAL: if Resolve already has the library loaded this just takes a
 // reference to that copy; otherwise none of its symbols become visible to
 // anything else in the process.
 void* openLibrary(const char* path)
 {
-    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void* resident = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+    if (resident) {
+        dlclose(resident);  // only probing; the open below holds the reference
+    }
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (handle) {
+        gLastOpenWasResident = (resident != nullptr);
+    }
+    return handle;
 }
 
 void* findSymbol(void* handle, const char* name)
@@ -59,6 +72,14 @@ const Api* runtime(std::string* error)
     if (!bound) {
         const LoaderOps ops = {&exePath, &openLibrary, &findSymbol, &lastError};
         bound = load(ops, &api, error);
+        if (bound) {
+            // Once per process: names the copy actually bound, so the
+            // journal shows Resolve's own runtime was used (ticket #77).
+            ndi_linux_log::write("NDI Plugin: BRAW runtime bound: %s (%s)",
+                                 api.libraryPath.c_str(),
+                                 gLastOpenWasResident ? "already loaded by the host"
+                                                      : "loaded by the plugin");
+        }
     }
     return bound ? &api : nullptr;
 }
