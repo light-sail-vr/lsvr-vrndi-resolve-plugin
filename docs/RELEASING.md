@@ -82,7 +82,7 @@ Run this between the Mac Tier 1–2 gate and the publish gate in step 4, from th
 1. After Matt's go-ahead, run step 4's publish **without** `--publish`, so the release is a draft.
 2. Download the Linux tarball from the draft (`gh release download vX.Y.Z --pattern '*linux*' --dir /tmp/rel` on the Mac, then `scp` it to the box) and repeat the Tier 1–2 steps above from that file; then Matt runs `sudo ./uninstall.sh` and the agent confirms `/usr/OFX/Plugins/NDIOutput.ofx.bundle` is gone.
 3. Report the result to Matt and **ask before publishing**. Only on his explicit go-ahead: `gh release edit vX.Y.Z --draft=false`.
-4. Afterwards reinstall the current dev build on the box (`linux_remote.sh install`).
+4. Afterwards reinstall the current dev build on the box (`linux_remote.sh install`), and in the close-out (step 6) drop "not yet released" from the Linux row of the README's platform table, by PR into `dev`.
 
 ### 5. Windows build and upload (workstation)
 

@@ -23,15 +23,15 @@ A modern OpenFX plugin that sends video frames from DaVinci Resolve to NDI (Netw
 
 ### Platforms
 
-<!-- #74 flips the Linux "GPU-native path" cell once CUDA is verified on hardware; the matching lines are LNX_GPU in scripts/publish_github_release.sh and the NDI runtime paragraph of installer/linux/README.txt. -->
+<!-- The first release with a Linux tarball drops the Linux row's "not yet released". #74 flips the Linux "GPU-native path" cell once CUDA is verified on hardware; the matching lines are LNX_GPU in scripts/publish_github_release.sh and the NDI runtime paragraph of installer/linux/README.txt. -->
 
 | Platform | Release artifact | Installs to | GPU-native path | Tested on |
 |---|---|---|---|---|
 | macOS 13+ (Apple Silicon, Intel) | `NDIOutput-<version>-macOS.pkg` (signed, notarized) | `/Library/OFX/Plugins` | Metal | Resolve 20 and 21.1 |
 | Windows 10/11 x64 | `NDIOutput-<version>-Windows-x64.exe` (unsigned) | `C:\Program Files\Common Files\OFX\Plugins` | CUDA (NVIDIA) | Resolve 20 |
-| Linux x86-64, glibc 2.28+ | `NDIOutput-<version>-linux-x86_64.tar.gz` + `install.sh` | `/usr/OFX/Plugins` | none yet: CPU path today; CUDA (NVIDIA) arrives with #74 | Ubuntu 24.04, Resolve Studio 21.1; built for Rocky Linux 8+ (load-checked in CI, not tested end to end) |
+| Linux x86-64, glibc 2.28+ | `NDIOutput-<version>-linux-x86_64.tar.gz` + `install.sh` (**not yet released**: build from source for now) | `/usr/OFX/Plugins` | none yet: CPU path today; CUDA (NVIDIA) arrives with #74 | Ubuntu 24.04, Resolve Studio 21.1; built for Rocky Linux 8+ (load-checked in CI, not tested end to end) |
 
-Every platform ships the NDI runtime inside the plugin and falls back to the CPU path without a supported GPU (stream at Half or Quarter there). One version and one release carry all three; a release whose notes say a platform lags ships without that platform's artifact.
+Every platform ships the NDI runtime inside the plugin and falls back to the CPU path without a supported GPU (stream at Half or Quarter there). One version and one release carry all three platforms once Linux ships its first tarball; a release whose notes say a platform lags ships without that platform's artifact.
 
 ## Installation
 
