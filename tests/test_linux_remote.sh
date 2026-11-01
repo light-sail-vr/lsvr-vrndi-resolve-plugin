@@ -2,8 +2,8 @@
 # Tests for scripts/linux_remote.sh. The cache-reset guard: deleting Resolve's
 # OFX plugin cache while Resolve runs is undone when it rewrites the cache on
 # exit, so the script must refuse. Also box-path normalisation ("~/x" and
-# relative paths mean under $HOME, as rsync reads them) and the quoting of
-# `logs` arguments for the remote shell. Runs the box-side steps locally
+# relative paths mean under $HOME, as rsync reads them), the quoting of
+# `logs` arguments for the remote shell, and `build`'s CUDA flag (#74). Runs the box-side steps locally
 # (NDI_LINUX_HOST=local) against a scratch cache file and a scratch /proc
 # (NDI_LINUX_PROC) standing in for a running or stopped Resolve. Resolve is
 # found by argv[0], not its name: its main thread renames itself "GUI
@@ -100,6 +100,34 @@ expect "logs never runs an argument as a command" [ ! -e "$tmp/pwned" ]
 PATH="$bin:$PATH" NDI_LINUX_HOST=fakebox \
     bash "$repo/scripts/linux_remote.sh" logs >"$tmp/out" 2>&1
 expect "logs with no extra arguments" [ "$(cat "$tmp/out")" = "$(printf -- '-f\n-t\nNDIOutput')" ]
+
+# build: CUDA by default since #74, --cpu opts out, anything else is usage.
+# A fake docker records the NDI_CUDA it was handed; a scratch checkout and
+# SDK stand in for the box's.
+work="$tmp/work"; sdkdir="$tmp/sdk"
+mkdir -p "$work/stage" "$sdkdir/include"
+touch "$sdkdir/include/Processing.NDI.Lib.h"
+cat > "$bin/docker" <<FAKE
+#!/usr/bin/env bash
+[ "\$1" = run ] || exit 0   # image inspect: the build image exists
+for a in "\$@"; do case "\$a" in NDI_CUDA=*) echo "\$a" >> "$tmp/docker"; esac; done
+FAKE
+chmod +x "$bin/docker"
+build() {  # build [flag]: run the box-side build locally with the fake docker
+    rm -f "$tmp/docker"
+    PATH="$bin:$PATH" NDI_LINUX_HOST=local NDI_LINUX_DIR="$work" NDI_LINUX_SDK="$sdkdir" \
+        bash "$repo/scripts/linux_remote.sh" build "$@" >"$tmp/out" 2>&1
+}
+built() {  # built <exit status> <ON|OFF>: the build succeeded with that CUDA setting
+    [ "$1" -eq 0 ] && grep -qx "NDI_CUDA=$2" "$tmp/docker"
+}
+refused() {  # refused <exit status>: usage error, docker never ran
+    [ "$1" -eq 2 ] && [ ! -e "$tmp/docker" ]
+}
+build; expect "build defaults to CUDA" built $? ON
+build --cpu; expect "build --cpu builds CPU-only" built $? OFF
+build --cuda; expect "build --cuda still means the default" built $? ON
+build --bogus; expect "build rejects an unknown flag (exit 2)" refused $?
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures failure(s)" >&2
