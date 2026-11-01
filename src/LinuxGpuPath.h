@@ -26,6 +26,8 @@
 #ifndef LINUX_GPU_PATH_H
 #define LINUX_GPU_PATH_H
 
+#include <string>
+
 namespace ndi_gpu_path {
 
 // The plugin's CUDA module for this instance.
@@ -145,6 +147,35 @@ inline Outcome fastPathGate(bool gpuParam, bool optimalFormat, bool haveContext,
 inline bool forcedFailure(const char* envValue)
 {
     return envValue && envValue[0] != '\0' && !(envValue[0] == '0' && envValue[1] == '\0');
+}
+
+// ---------------------------------------------------------------------------
+// The plugin's own CUDA runtime can't reach the GPU (ticket #74 review).
+// Resolve can still hand CUDA frames: its CUDA works, ours doesn't (cudart is
+// linked statically, so a driver too old for CUDA 12.9, or a device hidden
+// from our process, fails only us). Then neither the passthrough copy nor a
+// readback can touch the frame, so no CPU path exists and no frame is sent:
+// say NDI is off and why, and latch it, because a CUDA runtime that failed to
+// initialize stays failed for the process.
+// ---------------------------------------------------------------------------
+
+enum class CopyFailure {
+    Transient,         // the runtime works; this copy failed (log only, retry next frame)
+    RuntimeUnusable,   // latch cudaOffStatus() and stop touching CUDA frames
+};
+
+// runtimeError: the plugin's runtime probe after the failed passthrough copy
+// (cuda_gpu_runtime_error(): nullptr or "" when it reaches a device).
+inline CopyFailure classifyCopyFailure(const char* runtimeError)
+{
+    return (runtimeError && runtimeError[0] != '\0') ? CopyFailure::RuntimeUnusable
+                                                     : CopyFailure::Transient;
+}
+
+inline std::string cudaOffStatus(const char* runtimeError)
+{
+    return std::string("NDI off — the plugin's CUDA runtime can't use the GPU (") + runtimeError +
+           "): update the NVIDIA driver, or set Resolve's GPU processing to OpenCL";
 }
 
 }  // namespace ndi_gpu_path

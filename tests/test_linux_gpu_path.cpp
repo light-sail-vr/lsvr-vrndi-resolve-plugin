@@ -1,6 +1,8 @@
 // Tests for the Linux render-path seam (src/LinuxGpuPath.h, ticket #74):
-// the fast-path gate, the outcome a render records, and the Stream Status
-// note that says why a frame took the CPU path. Pure, so it runs on every
+// the fast-path gate, the outcome a render records, the Stream Status note
+// that says why a frame took the CPU path, and the "NDI off" verdict when
+// the plugin's own CUDA runtime can't copy Resolve's CUDA frames (the real
+// runtime side runs natively on the box: tests/test_cuda_runtime_unavailable.cpp). Pure, so it runs on every
 // platform; the fallbacks themselves are exercised on the box (Tier 2:
 // Resolve set to OpenCL, and a forced CUDA init failure).
 // Build & run: ctest (Windows, Linux); on macOS by hand:
@@ -145,6 +147,27 @@ static void testForcedFailureSwitch()
     expectTrue(forcedFailure("yes"), "any other value -> forced failure");
 }
 
+static void testCudaRuntimeUnavailable()
+{
+    using ndi_gpu_path::CopyFailure;
+    using ndi_gpu_path::classifyCopyFailure;
+    expectTrue(classifyCopyFailure(nullptr) == CopyFailure::Transient,
+               "failed copy, runtime reaches a device -> transient (retry next frame, no latch)");
+    expectTrue(classifyCopyFailure("") == CopyFailure::Transient, "empty probe error -> transient");
+    const char* err = "CUDA driver version is insufficient for CUDA runtime version";
+    expectTrue(classifyCopyFailure(err) == CopyFailure::RuntimeUnusable,
+               "failed copy + runtime error -> runtime unusable (latch)");
+    expectTrue(classifyCopyFailure("no CUDA device") == CopyFailure::RuntimeUnusable,
+               "failed copy + no device for our runtime -> runtime unusable");
+
+    const std::string status = ndi_gpu_path::cudaOffStatus(err);
+    expectTrue(status.rfind("NDI off", 0) == 0, "CUDA-off status says NDI is off (not \"CPU path\")");
+    expectTrue(!contains(status.c_str(), "CPU path"), "CUDA-off status never claims the CPU path");
+    expectTrue(contains(status.c_str(), err), "CUDA-off status carries the runtime's reason");
+    expectTrue(contains(status.c_str(), "OpenCL") && contains(status.c_str(), "driver"),
+               "CUDA-off status names both fixes (driver, or OpenCL)");
+}
+
 int main()
 {
     testGateGpuNative();
@@ -154,6 +177,7 @@ int main()
     testHostCpuFrames();
     testEveryFallbackHasItsOwnNote();
     testForcedFailureSwitch();
+    testCudaRuntimeUnavailable();
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

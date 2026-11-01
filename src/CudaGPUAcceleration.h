@@ -59,6 +59,12 @@ void cuda_gpu_shutdown(CudaGPUContextRef context);
 // True when a CUDA device is present and the runtime is usable.
 bool cuda_gpu_is_available(void);
 
+// Why this module's CUDA runtime can't use a device (cudaGetDeviceCount's
+// error string, or "no CUDA device"), or NULL when it can. The string is
+// static. The Linux plugin latches it when Resolve hands CUDA frames its
+// runtime can't copy (src/LinuxGpuPath.h, ticket #74).
+const char* cuda_gpu_runtime_error(void);
+
 // ---------------------------------------------------------------------------
 // Blocking fused kernels: box-downscale (divisor 1/2/4) + vertical flip +
 // color conversion, reading the float RGBA frame the host left on the device

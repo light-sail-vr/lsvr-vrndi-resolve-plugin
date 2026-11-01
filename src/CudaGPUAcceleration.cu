@@ -384,6 +384,14 @@ bool cuda_gpu_is_available(void)
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
+const char* cuda_gpu_runtime_error(void)
+{
+    int count = 0;
+    const cudaError_t err = cudaGetDeviceCount(&count);
+    if (err != cudaSuccess) return cudaGetErrorString(err);
+    return count > 0 ? nullptr : "no CUDA device";
+}
+
 static void dispatcherLoop(CudaGPUContext* context)
 {
     for (;;) {

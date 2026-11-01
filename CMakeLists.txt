@@ -465,6 +465,18 @@ if(NDI_ENABLE_CUDA)
     target_link_libraries(test_cuda_downscale PRIVATE ZLIB::ZLIB)
     add_test(NAME test_cuda_downscale COMMAND test_cuda_downscale)
     set_tests_properties(test_cuda_downscale PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(NDI_PLATFORM_LINUX)
+        # The plugin's own CUDA runtime unable to reach the GPU (#74 review;
+        # src/LinuxGpuPath.h): hides the devices with CUDA_VISIBLE_DEVICES,
+        # so it is meaningful on the box and passes without a GPU too.
+        add_executable(test_cuda_runtime_unavailable
+            tests/test_cuda_runtime_unavailable.cpp
+            src/CudaGPUAcceleration.cu)
+        target_include_directories(test_cuda_runtime_unavailable PRIVATE src)
+        target_compile_options(test_cuda_runtime_unavailable PRIVATE ${NDI_CUDA_EXACT_MATH})
+        set_target_properties(test_cuda_runtime_unavailable PROPERTIES CUDA_RUNTIME_LIBRARY Static)
+        add_test(NAME test_cuda_runtime_unavailable COMMAND test_cuda_runtime_unavailable)
+    endif()
 endif()
 
 if(WIN32)

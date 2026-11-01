@@ -2245,6 +2245,28 @@ static void showNDIOffStatus(NDIInstanceData* data)
 }
 #endif
 
+#ifdef NDI_GPU_PATH_STATUS
+// The plugin's own CUDA runtime can't use the GPU while Resolve hands it CUDA
+// frames (src/LinuxGpuPath.h): no output copy, no readback, no frame. A
+// runtime that failed to initialize stays failed, so the reason is latched
+// once per process (OffLatch, like gNDIOff) and later CUDA-frame renders
+// fail fast without touching CUDA or logging. CPU-frame renders still
+// stream; their submit recomposes Stream Status over this text.
+static ndi_linux_runtime::OffLatch gCudaOff;
+
+static void showCudaOffStatus(NDIInstanceData* data)
+{
+    if (!gCudaOff.off()) {
+        return;  // another render is mid-latch; its own call shows the reason
+    }
+    std::lock_guard<std::mutex> statusLock(data->statusMutex);
+    if (gCudaOff.reason() != data->statusParamValue) {
+        data->statusParamValue = gCudaOff.reason();
+        data->statusParamDirty = true;
+    }
+}
+#endif
+
 static bool ensureNDIReady(NDIInstanceData* data)
 {
     if (!data->enabled) {
@@ -2429,6 +2451,13 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
     NativeGPUContextRef nativeContext =
         (data->gpuContext && data->gpuContext->initialized) ? data->gpuContext->nativeContext : nullptr;
 
+#ifdef NDI_GPU_PATH_STATUS
+    if (gCudaOff.off()) {
+        showCudaOffStatus(data);
+        return kOfxStatFailed;  // what the passthrough copy would return
+    }
+#endif
+
     // Host output first: the effect is a passthrough. No wait — the host
     // orders its downstream reads on the same queue (cf. the Resolve
     // GainPlugin sample).
@@ -2438,6 +2467,17 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
     data->timerBlitMs = msSince(blitT0);
     if (!blitOk) {
         NDI_LOG("GPU render: passthrough copy failed");
+#ifdef NDI_GPU_PATH_STATUS
+        // Ours or the moment's? Only a runtime that can't reach a device is
+        // latched; any other failure retries next frame.
+        const char* runtimeError = cuda_gpu_runtime_error();
+        if (ndi_gpu_path::classifyCopyFailure(runtimeError) == ndi_gpu_path::CopyFailure::RuntimeUnusable) {
+            if (gCudaOff.latch(ndi_gpu_path::cudaOffStatus(runtimeError))) {
+                NDI_LOG_TEXT(gCudaOff.reason().c_str());
+            }
+            showCudaOffStatus(data);
+        }
+#endif
         return kOfxStatFailed;
     }
 
