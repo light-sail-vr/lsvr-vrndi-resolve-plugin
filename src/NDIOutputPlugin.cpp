@@ -1009,12 +1009,15 @@ struct NDIInstanceData {
     bool optimalFormat;
     std::unique_ptr<GPUContext> gpuContext;
 #ifdef NDI_GPU_PATH_STATUS
-    // Render path (#74, src/LinuxGpuPath.h). gpuModule is written by the GPU
-    // init; renderPathNote by each render, read by the pump worker's status
-    // composer (a string literal, so the pointer alone is the value).
-    std::atomic<int> gpuModule{static_cast<int>(ndi_gpu_path::Module::NotTried)};
+    // Render path (#74, src/LinuxGpuPath.h). All three are atomic: the plugin
+    // is kOfxImageEffectRenderFullySafe, so the host may run renders of one
+    // instance concurrently (and thumbnails among them). gpuModule is written by the GPU init and
+    // shutdown; renderPathNote by each render, read by the pump worker's
+    // status composer (a string literal, so the pointer alone is the value);
+    // lastRenderOutcome makes a change of outcome log once (-1: none yet).
+    std::atomic<ndi_gpu_path::Module> gpuModule{ndi_gpu_path::Module::NotTried};
     std::atomic<const char*> renderPathNote{""};
-    int lastRenderPath = -1;  // render thread only: logs path changes once
+    std::atomic<int> lastRenderOutcome{-1};
 #endif
     
     // Stream resolution (issue #5): divisor 1/2/4, read fresh each render
@@ -1817,10 +1820,11 @@ static bool initializeGPUContext(NDIInstanceData* data)
     // (e.g. a non-NVIDIA machine) is not an error: the caller falls back to
     // the CPU conversion path (spec decision 4's documented ceiling).
 #ifdef NDI_GPU_PATH_STATUS
-    // Simulated init failure, to test the fallback on a working box.
+    // Simulated init failure, to test the fallback on a working box. Read on
+    // every init (each instance, each re-init), from Resolve's environment.
     if (ndi_gpu_path::forcedFailure(std::getenv("NDI_OUTPUT_FORCE_CUDA_FAIL"))) {
         data->gpuContext->nativeContext = nullptr;
-        data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::ForcedFailure));
+        data->gpuModule.store(ndi_gpu_path::Module::ForcedFailure);
         NDI_LOG("NDI_OUTPUT_FORCE_CUDA_FAIL is set - skipping CUDA init, using the CPU path");
         return false;
     }
@@ -1828,7 +1832,7 @@ static bool initializeGPUContext(NDIInstanceData* data)
     if (!nativeGpuAvailable()) {
         NDI_LOG(NDI_GPU_BACKEND_NAME " is not available on this system - using the CPU path");
 #ifdef NDI_GPU_PATH_STATUS
-        data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::NoDevice));
+        data->gpuModule.store(ndi_gpu_path::Module::NoDevice);
 #endif
         return false;
     }
@@ -1837,12 +1841,12 @@ static bool initializeGPUContext(NDIInstanceData* data)
     if (!data->gpuContext->nativeContext) {
         NDI_LOG("Failed to initialize " NDI_GPU_BACKEND_NAME " GPU acceleration");
 #ifdef NDI_GPU_PATH_STATUS
-        data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::InitFailed));
+        data->gpuModule.store(ndi_gpu_path::Module::InitFailed);
 #endif
         return false;
     }
 #ifdef NDI_GPU_PATH_STATUS
-    data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::Ready));
+    data->gpuModule.store(ndi_gpu_path::Module::Ready);
 #endif
 
     NDI_LOG(NDI_GPU_BACKEND_NAME " GPU acceleration initialized successfully");
@@ -1872,7 +1876,7 @@ static void shutdownGPUContext(NDIInstanceData* data)
     }
 #endif
 #ifdef NDI_GPU_PATH_STATUS
-    data->gpuModule.store(static_cast<int>(ndi_gpu_path::Module::NotTried));
+    data->gpuModule.store(ndi_gpu_path::Module::NotTried);
 #endif
 
     data->gpuContext->initialized = false;
@@ -2331,8 +2335,7 @@ static void noteRenderPath(NDIInstanceData* data, ndi_gpu_path::Outcome outcome)
         return;
     }
     storeRenderPathNote(data, outcome);
-    if (data->lastRenderPath != static_cast<int>(outcome)) {
-        data->lastRenderPath = static_cast<int>(outcome);
+    if (data->lastRenderOutcome.exchange(static_cast<int>(outcome)) != static_cast<int>(outcome)) {
         NDI_LOG("Render path: %s",
                 outcome == ndi_gpu_path::Outcome::GpuNative ? "GPU-native (" NDI_GPU_BACKEND_NAME ")"
                                                             : ndi_gpu_path::statusNote(outcome));
@@ -2459,7 +2462,7 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
     // happened and drives Stream Status.
     ndi_gpu_path::Outcome outcome = ndi_gpu_path::fastPathGate(
         gpuParam, data->optimalFormat, nativeContext != nullptr,
-        static_cast<ndi_gpu_path::Module>(data->gpuModule.load()));
+        data->gpuModule.load());
     const bool tryFastPath = (outcome == ndi_gpu_path::Outcome::GpuNative);
 #else
     const bool tryFastPath = data->gpuAcceleration && nativeContext && data->optimalFormat;

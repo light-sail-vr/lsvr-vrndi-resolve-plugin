@@ -16,9 +16,12 @@
 // plays in real time (the CPU path managed ~15.5 fps at 1080p24 Full
 // Resolution on the box, #73) and the user can usually fix the cause.
 //
-// Pure and platform-neutral so the unit suite runs it everywhere
-// (tests/test_linux_gpu_path.cpp). NDI_GPU_PATH_STATUS (defined by CMake
-// for the Linux CUDA plugin) gates the plugin's call sites.
+// Why a Linux-prefixed file for platform-neutral logic: Matt's rule for the
+// Linux tickets is no shared-code refactors and no behaviour change on
+// macOS or Windows, so the seam is Linux-only (NDI_GPU_PATH_STATUS, defined
+// by CMake for the Linux CUDA plugin, gates every call site). It is pure
+// C++ so the unit suite runs it on every platform
+// (tests/test_linux_gpu_path.cpp); Windows could adopt it later, renamed.
 
 #ifndef LINUX_GPU_PATH_H
 #define LINUX_GPU_PATH_H
@@ -135,7 +138,8 @@ inline Outcome fastPathGate(bool gpuParam, bool optimalFormat, bool haveContext,
     return Outcome::GpuNative;
 }
 
-// NDI_OUTPUT_FORCE_CUDA_FAIL, read once at module init: set (to anything
+// NDI_OUTPUT_FORCE_CUDA_FAIL, read by every initializeGPUContext (so per
+// instance and per re-init, from Resolve's environment): set (to anything
 // but "" or "0") it makes the plugin skip its CUDA init and behave as if
 // the init had failed, so the fallback can be tested on a working box.
 inline bool forcedFailure(const char* envValue)
