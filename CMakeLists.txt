@@ -500,6 +500,9 @@ elseif(NDI_PLATFORM_LINUX)
     # installer/linux/install.sh + uninstall.sh against fake roots (ticket #78).
     add_test(NAME test_linux_installer
              COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_installer.sh")
+    # scripts/package_linux_release.sh's stub, SDK-age and ELF guards (#78).
+    add_test(NAME test_package_linux_release
+             COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_package_linux_release.sh")
 endif()
 
 # --- Install: the OFX bundle tree --------------------------------------------
