@@ -747,6 +747,13 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** new cases in `tests/test_linux_installer.sh` and `tests/test_package_linux_release.sh` that fail on the previous scripts (the SIGPIPE one through a fake `ldconfig` that `exec`s `cat` on a 1 MB cache, so it dies of SIGPIPE as the real one does).
 **Rule:** never pipe into `grep -q` (or `head`) under `pipefail` when the writer's exit status matters; capture first. A guard that compares parsed values must fail when parsing fails.
 
+### 2026-11-01 — `linux_remote.sh sync` wipes a native build directory inside the box checkout (#74)
+**Symptom:** a native Ubuntu build of `test_cuda_downscale` in `~/ndioutput-74/build-native` lost almost every file at the next `sync`; rsync printed `cannot delete non-empty directory: build-native/…` for what was left.
+**Root cause:** `sync` mirrors the Mac worktree with `rsync --delete` and excludes only `/build/`, `/stage/`, `/dist/` and the macOS bundle, so any other directory on the box side is deleted as "extraneous".
+**Fix:** build natively out of tree (`cmake -S . -B ../ndioutput-<ticket>-native`); BUILD.md "CUDA on Linux" says so.
+**Validated by:** the out-of-tree build survived later syncs and `test_cuda_downscale` passed from it.
+**Rule:** on the box, keep everything that isn't the Mac's worktree outside `NDI_LINUX_DIR`, except `build/` and `stage/`.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
