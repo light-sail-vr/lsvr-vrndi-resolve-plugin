@@ -497,6 +497,9 @@ elseif(NDI_PLATFORM_LINUX)
     # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
     add_test(NAME test_linux_remote
              COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
+    # installer/linux/install.sh + uninstall.sh against fake roots (ticket #78).
+    add_test(NAME test_linux_installer
+             COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_installer.sh")
 endif()
 
 # --- Install: the OFX bundle tree --------------------------------------------
