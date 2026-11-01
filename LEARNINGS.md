@@ -782,6 +782,13 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** `test_linux_gpu_path` (gate, outcomes, distinct notes, the copy-failure verdict) and `test_cuda_runtime_unavailable`, which hides the GPU with `CUDA_VISIBLE_DEVICES=-1` and passed natively on the box's 3090 Ti: probe `no CUDA-capable device is detected`, init refused, copy and readback failed. Not yet seen in Resolve (box round 2 covers OpenCL and the forced failure).
 **Rule:** a status that names a path must be written by the code that took the path, at the point it commits, before the frame is submitted; never re-derive it from inputs afterwards. A fallback that reads device memory needs a working runtime of its own, so check that the fallback exists before calling it one.
 
+### 2026-11-01 — `linux_remote.sh sync` from a git worktree breaks `package_linux_release.sh` on the box (#78)
+**Symptom:** the #78 box test synced an Orca worktree to `~/ndioutput-78t2` and ran the RELEASING step 4a command, `scripts/package_linux_release.sh`. It failed at once: `git status failed in /home/matt/ndioutput-78t2: fatal: not a git repository: /Users/…/.git/worktrees/linux-78-boxtest`.
+**Root cause:** sync's rsync excluded `.git/`, and the trailing slash matches only a directory. In a worktree `.git` is a one-line file (`gitdir: <Mac path>`), so it reached the box. The packager then took the box folder for a git checkout and couldn't run `git status` in it. A re-sync with the fix doesn't remove the stale file, because rsync's `--delete` never deletes excluded files.
+**Fix:** exclude `.git` with no slash (a file or a directory, at any depth), on branch `feature/linux-packaging-fix`. `test_linux_remote` runs a real rsync through a fake ssh and checks that neither form reaches the box.
+**Validated by:** the new test fails on the old script and passes on the fix, with both the Mac's openrsync and the box's rsync 3.2.7. A fresh `~/ndioutput-78t2` sync then packaged without `--force` (`[info] … is not a git checkout`).
+**Rule:** an rsync exclude meant for `.git` must not end in a slash; worktrees and submodules use a `.git` file. After you fix an exclude, delete the stale copy on the box yourself.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
