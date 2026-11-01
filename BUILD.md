@@ -371,25 +371,31 @@ Tier 1–2 after `install`:
 
 The plugin declares CUDA render + CUDA-stream support, the same contract as Windows: Resolve set to **CUDA** hands device buffers on its own stream, and the fused kernels downscale, warp and convert them before the readback. Everything is enqueued on the host's stream; the plugin never calls `cudaDeviceSynchronize` or `cudaDeviceReset`. `journalctl -t NDIOutput` shows `Render path: GPU-native (CUDA)` once, then a `GPU-native async: …` line per frame.
 
-**Byte identity on the GPU.** The Rocky container has no GPU (the box has no `nvidia-container-toolkit`), so `test_cuda_downscale` skips there. Run it with a native Ubuntu build, out of tree. Only this test may come from the host toolchain; the plugin `.ofx` always comes from the container (glibc ceiling, above). Keep the build directory outside the synced checkout: `sync` mirrors with `--delete` and wipes anything it doesn't exclude (LEARNINGS 2026-11-01).
+**Byte identity on the GPU.** The Rocky container has no GPU (the box has no `nvidia-container-toolkit`), so `test_cuda_downscale` skips there. Run it with a native Ubuntu build, out of tree, together with `test_cuda_runtime_unavailable` (it hides the GPU from its own CUDA runtime with `CUDA_VISIBLE_DEVICES=-1`, so it is only meaningful where a GPU exists). Only these tests may come from the host toolchain; the plugin `.ofx` always comes from the container (glibc ceiling, above). Keep the build directory outside the synced checkout: `sync` mirrors with `--delete` and wipes anything it doesn't exclude (LEARNINGS 2026-11-01).
 
 ```bash
 cd ~/ndioutput-<ticket>                    # after linux_remote.sh sync
 cmake -S . -B ../ndioutput-<ticket>-native -DCMAKE_BUILD_TYPE=Release -DNDI_ENABLE_CUDA=ON \
       -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DNDI_SDK_PATH="$HOME/sdks/NDI SDK for Linux"
-cmake --build ../ndioutput-<ticket>-native --target test_cuda_downscale --parallel 8
-../ndioutput-<ticket>-native/test_cuda_downscale   # from the repo root: "All CUDA fast-path tests passed"
+cmake --build ../ndioutput-<ticket>-native --target test_cuda_downscale test_cuda_runtime_unavailable --parallel 8
+../ndioutput-<ticket>-native/test_cuda_downscale             # from the repo root: "All CUDA fast-path tests passed"
+../ndioutput-<ticket>-native/test_cuda_runtime_unavailable   # "All CUDA-runtime-unavailable tests passed"
 ```
 
-**CPU fallbacks**, each with a Stream Status note ([src/LinuxGpuPath.h](src/LinuxGpuPath.h)) and one `Render path: …` log line when it starts:
+**CPU fallbacks**, each with a Stream Status note ([src/LinuxGpuPath.h](src/LinuxGpuPath.h)) and one `Render path: …` log line when it starts. The note is the path the render actually took, recorded before the frame is sent:
 
 | Cause | Path | Stream Status ends with |
 |---|---|---|
 | Resolve's GPU processing set to OpenCL (or a non-NVIDIA GPU) | Resolve hands CPU frames | `CPU path: Resolve sends CPU frames (set GPU processing to CUDA)` |
-| The plugin's CUDA init fails (no device for it, driver too old) | device frames read back on Resolve's stream | `CPU path: no CUDA device for the plugin (driver too old?)` or `CPU path: CUDA init failed (see log)` |
+| The plugin's CUDA init fails while its runtime still works | device frames read back on Resolve's stream | `CPU path: CUDA init failed (see log)` (or `… CUDA not initialized`) |
 | **GPU Acceleration** or **Optimal Color Format** unticked | device frames read back | `CPU path: GPU Acceleration is off` / `… Optimal Color Format is off` |
+| The Output Color transform or the STMap doesn't reach the GPU, or the kernel refuses the frame | device frames read back (and warped on the CPU) | `CPU path: Output Color upload to the GPU failed (see log)` / `… STMap upload …` / `CPU path: the CUDA kernel refused this frame (see log)` |
 
-To simulate an init failure on a working box, launch Resolve with `NDI_OUTPUT_FORCE_CUDA_FAIL=1` in its environment (from a terminal on the box's desktop: `NDI_OUTPUT_FORCE_CUDA_FAIL=1 sg resolve /opt/resolve/bin/resolve`, the way the box launches it). The note then reads `CPU path: CUDA init failure forced (NDI_OUTPUT_FORCE_CUDA_FAIL)`. Windows has neither the notes nor the switch.
+**No path at all:** if the plugin's own CUDA runtime can't reach the GPU while Resolve's can (a driver too old for the plugin's static CUDA 12.9 runtime), Resolve still hands CUDA frames that the plugin can neither copy nor read back. Then no frame is sent, Resolve gets a failed render, and Stream Status says so, latched once per process: `NDI off — the plugin's CUDA runtime can't use the GPU (<reason>): update the NVIDIA driver, or set Resolve's GPU processing to OpenCL`. `test_cuda_runtime_unavailable` simulates it.
+
+To simulate an init failure on a working box, launch Resolve with `NDI_OUTPUT_FORCE_CUDA_FAIL=1` in its environment (from a terminal on the box's desktop: `NDI_OUTPUT_FORCE_CUDA_FAIL=1 sg resolve /opt/resolve/bin/resolve`, the way the box launches it). The note then reads `CPU path: CUDA init failure forced (NDI_OUTPUT_FORCE_CUDA_FAIL)`. The switch is read on every CUDA init, so it applies to each instance. Windows has neither the notes nor the switch.
+
+**User-facing wording waits for 8K stereo.** The end-user texts still say Linux runs its CPU path: `LNX_GPU` in `scripts/publish_github_release.sh`, the README's Linux cell and its HTML comment, and `installer/linux/README.txt` ("runs its CPU path today"). They flip to GPU-native only after box round 2 verifies 8K stereo in real time (#74's remaining checklist), in that round's PR.
 
 ### Release packaging: the tarball and `install.sh` (ticket #78)
 
