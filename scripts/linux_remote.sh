@@ -115,7 +115,6 @@ cmd_build() {
     case "${1:-}" in
         "") ;;
         --cpu) cuda=OFF ;;
-        --cuda) ;;  # the default; accepted for old command lines
         *) usage ;;
     esac
     on_box "$cuda" "$BASE_IMAGE" "$BUILD_IMAGE" <<'EOF'

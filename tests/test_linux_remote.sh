@@ -3,9 +3,10 @@
 # OFX plugin cache while Resolve runs is undone when it rewrites the cache on
 # exit, so the script must refuse. Also box-path normalisation ("~/x" and
 # relative paths mean under $HOME, as rsync reads them), the quoting of
-# `logs` arguments for the remote shell, and `build`'s CUDA flag (#74). Runs the box-side steps locally
-# (NDI_LINUX_HOST=local) against a scratch cache file and a scratch /proc
-# (NDI_LINUX_PROC) standing in for a running or stopped Resolve. Resolve is
+# `logs` arguments for the remote shell, and `build`'s CUDA flag (#74).
+# Runs the box-side steps locally (NDI_LINUX_HOST=local) against a scratch
+# cache file and a scratch /proc (NDI_LINUX_PROC) standing in for a running
+# or stopped Resolve. Resolve is
 # found by argv[0], not its name: its main thread renames itself "GUI
 # Thread", so `pgrep -x resolve` never matches, and it runs under
 # `sg resolve`, which makes /proc/<pid>/exe unreadable (LEARNINGS 2026-10-30).
@@ -126,7 +127,7 @@ refused() {  # refused <exit status>: usage error, docker never ran
 }
 build; expect "build defaults to CUDA" built $? ON
 build --cpu; expect "build --cpu builds CPU-only" built $? OFF
-build --cuda; expect "build --cuda still means the default" built $? ON
+build --cuda; expect "build rejects the retired --cuda flag (CUDA is the default)" refused $?
 build --bogus; expect "build rejects an unknown flag (exit 2)" refused $?
 
 if [ "$failures" -ne 0 ]; then
