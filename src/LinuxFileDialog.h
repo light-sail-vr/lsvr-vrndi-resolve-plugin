@@ -15,6 +15,7 @@
 #ifndef LINUX_FILE_DIALOG_H
 #define LINUX_FILE_DIALOG_H
 
+#include <cstddef>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -23,12 +24,13 @@
 namespace ndi_linuxdlg {
 
 // What the plugin asks for: title, one extension or a ';'-separated list
-// ("braw;ilpd"), the field's current value (may be empty), and $HOME for
-// when it is.
+// ("braw;ilpd"), the field's current value (may be empty), and where to
+// start when it is: the last file this process picked, else $HOME.
 struct Request {
     std::string title;
     std::string extensions;
     std::string initialPath;
+    std::string lastPicked;
     std::string home;
 };
 
@@ -86,10 +88,21 @@ inline std::string filterLabel(const std::string& extensions)
     return label + " files";
 }
 
-// The folder the dialog opens in: the field's directory, else $HOME.
+// The file to start from: the field's value, else the last pick. Only
+// absolute paths: the helper's working directory is Resolve's, so a relative
+// path would mean nothing to it.
+inline std::string startFile(const Request& r)
+{
+    if (!r.initialPath.empty() && r.initialPath[0] == '/') return r.initialPath;
+    if (!r.lastPicked.empty() && r.lastPicked[0] == '/') return r.lastPicked;
+    return std::string();
+}
+
+// The folder the dialog opens in: the start file's directory, else $HOME,
+// with a trailing '/'. Empty when there is neither.
 inline std::string startDirectory(const Request& r)
 {
-    std::string dir = parentDirectory(r.initialPath);
+    std::string dir = parentDirectory(startFile(r));
     if (dir.empty() && !r.home.empty()) {
         dir = r.home;
         if (dir.back() != '/') dir += "/";
@@ -100,6 +113,10 @@ inline std::string startDirectory(const Request& r)
 // argv for zenity (GTK). Each element is one argv entry, handed to
 // posix_spawnp as-is: no shell, so spaces and non-ASCII need no quoting.
 // --modal is only a window-manager hint (zenity 4 can't take a parent).
+// --filename gets a FILE whenever there is one: zenity 4.0.1 passes it to
+// gtk_file_chooser_set_file, which opens the file's folder with it selected,
+// but selects a directory inside its parent, trailing '/' or not (seen on
+// the box). Only $HOME goes in as a directory, as there is no file to name.
 inline std::vector<std::string> zenityArgv(const Request& r)
 {
     std::vector<std::string> argv = {"zenity", "--file-selection", "--modal"};
@@ -109,8 +126,9 @@ inline std::vector<std::string> zenityArgv(const Request& r)
                        filterPatterns(r.extensions));
         argv.push_back("--file-filter=All files | *");
     }
-    const std::string dir = startDirectory(r);
-    if (!dir.empty()) argv.push_back("--filename=" + dir);
+    const std::string file = startFile(r);
+    const std::string start = file.empty() ? startDirectory(r) : file;
+    if (!start.empty()) argv.push_back("--filename=" + start);
     return argv;
 }
 
@@ -268,36 +286,46 @@ inline std::vector<std::string> childEnvironment(const std::vector<std::string>&
     return out;
 }
 
+// What outlives one Browse: the last file picked (where an empty field's
+// dialog starts) and the last failure's one-line reason.
+struct DialogState {
+    std::string lastPicked;
+    std::string error;
+};
+
 // The native_open_file_dialog contract (MacFileDialog.h) over runDialog:
 // true and outPath filled only on a pick; cancel and every failure return
-// false with outPath untouched. *error gets the failure's one-line reason,
-// and is cleared on a pick or a cancel. A path that doesn't fit is a
-// failure, never a truncation.
+// false with outPath untouched. state->error gets the failure's one-line
+// reason and is cleared on a pick or a cancel; a pick becomes
+// state->lastPicked. A path that doesn't fit is a failure, never a
+// truncation.
 inline bool openFileDialog(const char* message, const char* extension, const char* initialPath,
                            char* outPath, size_t outPathSize, const std::vector<std::string>& env,
-                           const Spawner& spawn, std::string* error)
+                           const Spawner& spawn, DialogState* state)
 {
-    error->clear();
+    state->error.clear();
     if (!outPath || outPathSize == 0) {
-        *error = "Browse: no buffer for the picked path";
+        state->error = "Browse: no buffer for the picked path";
         return false;
     }
     Request request;
     request.title = message ? message : "";
     request.extensions = extension ? extension : "";
     request.initialPath = initialPath ? initialPath : "";
+    request.lastPicked = state->lastPicked;
     request.home = envValue(env, "HOME");
     const Result r = runDialog(request, hasDisplay(env), spawn);
     if (r.outcome != Outcome::kPicked) {
-        *error = r.error;
+        state->error = r.error;
         return false;
     }
     if (r.path.size() + 1 > outPathSize) {
-        *error = "Browse: the picked path is too long (" + std::to_string(r.path.size()) +
-                 " bytes)";
+        state->error = "Browse: the picked path is too long (" + std::to_string(r.path.size()) +
+                       " bytes)";
         return false;
     }
     std::memcpy(outPath, r.path.c_str(), r.path.size() + 1);
+    state->lastPicked = r.path;
     return true;
 }
 
@@ -305,19 +333,30 @@ inline bool openFileDialog(const char* message, const char* extension, const cha
 
 #ifdef __linux__
 
+namespace ndi_linuxdlg {
+
+// The real Spawner (LinuxFileDialog.cpp): posix_spawnp with stdout/stderr
+// captured, the child environment above, and idle (when set) run about
+// every 30 ms until the helper exits.
+SpawnResult spawnProcess(const std::vector<std::string>& argv, const std::function<void()>& idle);
+
+} // namespace ndi_linuxdlg
+
 // Same contract as mac_open_file_dialog / win_open_file_dialog (extension may
 // be a ';'-separated list; initialPath may be NULL/empty, and when set the
-// dialog opens in its directory). Returns true and fills outPath (UTF-8)
-// only when the user picks a file; cancel and every failure return false
-// with outPath untouched. Blocks the calling thread until the helper exits,
-// like the modal panels do; the helper is a separate process, so nothing in
-// Resolve's own event loop is re-entered.
+// dialog starts at it). Returns true and fills outPath (UTF-8) only when the
+// user picks a file; cancel and every failure return false with outPath
+// untouched. Modal like the other platforms' dialogs: it returns when the
+// helper exits, and meanwhile runs Resolve's Qt event loop for everything
+// but user input (LinuxHostEvents.h), so Resolve keeps repainting. Called
+// from Resolve's main thread (instanceChanged); a second call while one is
+// open fails.
 bool linux_open_file_dialog(const char* message, const char* extension,
                             const char* initialPath, char* outPath, size_t outPathSize);
 
-// Why the calling thread's last linux_open_file_dialog failed (empty after
-// a pick or a cancel), cleared by the read: the one line the plugin puts in
-// Stream Status, e.g. the package to install when neither helper exists.
+// Why the last linux_open_file_dialog failed (empty after a pick or a
+// cancel), cleared by the read: the one line the plugin puts in Stream
+// Status, e.g. the package to install when neither helper exists.
 std::string linux_take_file_dialog_error();
 
 #endif // __linux__

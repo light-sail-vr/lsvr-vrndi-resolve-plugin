@@ -9,6 +9,7 @@
 //   c++ -std=c++17 -Isrc tests/test_linux_file_dialog.cpp -o build/t && build/t
 
 #include "LinuxFileDialog.h"
+#include "LinuxHostEvents.h"
 
 #include <cstdio>
 #include <cstring>
@@ -64,16 +65,18 @@ static Request request(const char* title, const char* extensions, const char* in
 
 // zenity gets the title, one filter row for the extension (both cases:
 // Linux filesystems are case-sensitive and cameras write .EXR), an "All
-// files" escape hatch, and the field's directory with a trailing slash so
-// GTK opens IN it rather than selecting a file named after it.
+// files" escape hatch, and the field's file itself as --filename: zenity
+// 4.0.1 hands it to gtk_file_chooser_set_file, which opens the file's folder
+// with the file selected. A directory there (even with a trailing '/') is
+// selected inside ITS parent instead (seen on the box, #76 Tier 2).
 static void testZenityArgv()
 {
     expectStr(joined(ndi_linuxdlg::zenityArgv(
                   request("Choose the left-eye STMap EXR", "exr", "/media/maps/left.exr"))),
               "[zenity][--file-selection][--modal][--title=Choose the left-eye STMap EXR]"
               "[--file-filter=EXR files | *.exr *.EXR][--file-filter=All files | *]"
-              "[--filename=/media/maps/]",
-              "zenity argv: title, filters, start directory");
+              "[--filename=/media/maps/left.exr]",
+              "zenity argv: title, filters, the field's file");
 
     // A ';'-separated list becomes one row; paths with spaces and UTF-8 go
     // through verbatim (no shell between us and the helper).
@@ -81,21 +84,34 @@ static void testZenityArgv()
                   request("Choose a clip", "braw;ilpd", "/media/Bühne 2/A001 clip.braw"))),
               "[zenity][--file-selection][--modal][--title=Choose a clip]"
               "[--file-filter=BRAW/ILPD files | *.braw *.BRAW *.ilpd *.ILPD]"
-              "[--file-filter=All files | *][--filename=/media/Bühne 2/]",
+              "[--file-filter=All files | *][--filename=/media/Bühne 2/A001 clip.braw]",
               "zenity argv: extension list, spaces and non-ASCII verbatim");
 
-    // An empty field opens in $HOME, not in Resolve's working directory.
+    // An empty field starts at the last file this process picked, so the
+    // right eye's Browse opens where the left eye's left off.
+    Request again = request("Choose the right-eye STMap EXR", "exr", "");
+    again.lastPicked = "/media/Bühne 2/left eye.exr";
+    expectStr(joined(ndi_linuxdlg::zenityArgv(again)),
+              "[zenity][--file-selection][--modal][--title=Choose the right-eye STMap EXR]"
+              "[--file-filter=EXR files | *.exr *.EXR][--file-filter=All files | *]"
+              "[--filename=/media/Bühne 2/left eye.exr]",
+              "zenity argv: empty field starts at the last pick");
+
+    // Nothing picked yet: $HOME, not Resolve's working directory. (zenity
+    // 4.0.1 shows it selected inside /home; newer zenity opens it.)
     expectStr(joined(ndi_linuxdlg::zenityArgv(request("Choose the LUT", "cube", ""))),
               "[zenity][--file-selection][--modal][--title=Choose the LUT]"
               "[--file-filter=CUBE files | *.cube *.CUBE][--file-filter=All files | *]"
               "[--filename=/home/matt/]",
-              "zenity argv: empty field opens in $HOME");
+              "zenity argv: nothing to start from opens $HOME");
 
-    // A bare name with no directory and no $HOME: no --filename at all.
+    // A relative field value means nothing to the helper (its working
+    // directory is Resolve's): treated as empty. No $HOME either: no
+    // --filename at all.
     expectStr(joined(ndi_linuxdlg::zenityArgv(request("T", "cube", "lut.cube", ""))),
               "[zenity][--file-selection][--modal][--title=T]"
               "[--file-filter=CUBE files | *.cube *.CUBE][--file-filter=All files | *]",
-              "zenity argv: no directory, no $HOME");
+              "zenity argv: relative field, no $HOME");
 }
 
 // kdialog (KDE) takes a positional start directory and a KDE-style filter
@@ -113,6 +129,12 @@ static void testKdialogArgv()
     expectStr(joined(ndi_linuxdlg::kdialogArgv(request("T", "exr", "", ""))),
               "[kdialog][--title][T][--getopenfilename][.][*.exr *.EXR|EXR files\n*|All files]",
               "kdialog argv: placeholder start directory");
+
+    Request again = request("T", "exr", "");
+    again.lastPicked = "/media/Bühne 2/left eye.exr";
+    expectStr(joined(ndi_linuxdlg::kdialogArgv(again)),
+              "[kdialog][--title][T][--getopenfilename][/media/Bühne 2/][*.exr *.EXR|EXR files\n*|All files]",
+              "kdialog argv: empty field starts in the last pick's folder");
 }
 
 // A fake helper set: records every argv it is asked to run and answers per
@@ -269,43 +291,58 @@ static void testContract()
     h.answers.push_back({"zenity", {SpawnResult::kExited, 0, "/maps/l.exr\n", ""}});
     char buf[64];
     std::strcpy(buf, "sentinel");
-    std::string error = "stale";
+    ndi_linuxdlg::DialogState state;
+    state.error = "stale";
     expectTrue(ndi_linuxdlg::openFileDialog("T", "exr", "/maps/old.exr", buf, sizeof(buf),
-                                            kDesktopEnv, h.spawner(), &error),
+                                            kDesktopEnv, h.spawner(), &state),
                "a pick returns true");
     expectStr(buf, "/maps/l.exr", "a pick fills the buffer");
-    expectStr(error, "", "a pick clears the error");
+    expectStr(state.error, "", "a pick clears the error");
+    expectStr(state.lastPicked, "/maps/l.exr", "a pick is remembered for the next Browse");
 
     FakeHelpers c;
     c.answers.push_back({"zenity", {SpawnResult::kExited, 1, "", ""}});
     std::strcpy(buf, "sentinel");
     expectTrue(!ndi_linuxdlg::openFileDialog("T", "exr", nullptr, buf, sizeof(buf), kDesktopEnv,
-                                             c.spawner(), &error),
+                                             c.spawner(), &state),
                "a cancel returns false");
     expectStr(buf, "sentinel", "a cancel leaves the buffer untouched");
-    expectStr(error, "", "a cancel leaves no error");
+    expectStr(state.error, "", "a cancel leaves no error");
+    expectStr(state.lastPicked, "/maps/l.exr", "a cancel keeps the last pick");
 
     FakeHelpers none;
     std::strcpy(buf, "sentinel");
     expectTrue(!ndi_linuxdlg::openFileDialog("T", "exr", "", buf, sizeof(buf), kDesktopEnv,
-                                             none.spawner(), &error),
+                                             none.spawner(), &state),
                "no helper returns false");
     expectStr(buf, "sentinel", "no helper leaves the buffer untouched");
-    expectTrue(error.find("install") != std::string::npos, "no helper reports the install hint");
+    expectTrue(state.error.find("install") != std::string::npos, "no helper reports the install hint");
 
     // Too long for the caller's buffer: a failure, never a truncation.
     FakeHelpers big;
     big.answers.push_back({"zenity", {SpawnResult::kExited, 0, "/" + std::string(70, 'x') + "\n", ""}});
     std::strcpy(buf, "sentinel");
     expectTrue(!ndi_linuxdlg::openFileDialog("T", "exr", "", buf, sizeof(buf), kDesktopEnv,
-                                             big.spawner(), &error),
+                                             big.spawner(), &state),
                "a path too long for the buffer returns false");
     expectStr(buf, "sentinel", "a too-long path leaves the buffer untouched");
-    expectTrue(!error.empty(), "a too-long path is reported");
+    expectTrue(!state.error.empty(), "a too-long path is reported");
 
-    // $HOME from the environment seeds the start directory.
-    FakeHelpers seen;
+    // The last pick seeds an empty field's start...
     std::vector<std::string> argv;
+    auto record = [&](const std::vector<std::string>& a) {
+        argv = a;
+        SpawnResult r;
+        r.status = SpawnResult::kExited;
+        r.exitCode = 1;
+        return r;
+    };
+    ndi_linuxdlg::openFileDialog("T", "exr", "", buf, sizeof(buf), kDesktopEnv, record, &state);
+    expectStr(argv.empty() ? std::string() : argv.back(), "--filename=/maps/l.exr",
+              "an empty field starts at the last pick");
+
+    // ...and $HOME from the environment when nothing was picked yet.
+    state = ndi_linuxdlg::DialogState();
     ndi_linuxdlg::openFileDialog("T", "exr", "", buf, sizeof(buf), kDesktopEnv,
                                  [&](const std::vector<std::string>& a) {
                                      argv = a;
@@ -314,7 +351,7 @@ static void testContract()
                                      r.exitCode = 1;
                                      return r;
                                  },
-                                 &error);
+                                 &state);
     expectStr(argv.empty() ? std::string() : argv.back(), "--filename=/home/matt/",
               "$HOME comes from the environment");
 }
@@ -341,6 +378,63 @@ static void testChildEnvironment()
               "child environment drops the loader and Qt plugin paths only");
 }
 
+// The host event pump (src/LinuxHostEvents.h): while the helper runs, the
+// plugin lets Resolve's Qt event loop handle everything but user input, so
+// Resolve repaints and answers the window manager's ping instead of going
+// "not responding" (#76 Tier 2). Resolved by symbol at runtime; any doubt
+// means no pump, i.e. the plain blocking wait.
+static int gPumpCalls = 0;
+static int gPumpFlags = -1;
+static void fakeProcessEvents(int flags)
+{
+    ++gPumpCalls;
+    gPumpFlags = flags;
+}
+static void* gFakeApp = &gPumpCalls; // any non-null QCoreApplication*
+static void* gNoApp = nullptr;
+
+static ndi_linux_host::Lookup lookupWith(bool haveProcessEvents, void** self)
+{
+    return [=](const char* name) -> void* {
+        if (std::strcmp(name, ndi_linux_host::kProcessEventsSymbol) == 0) {
+            return haveProcessEvents ? reinterpret_cast<void*>(&fakeProcessEvents) : nullptr;
+        }
+        if (std::strcmp(name, ndi_linux_host::kAppSelfSymbol) == 0) {
+            return self;
+        }
+        return nullptr;
+    };
+}
+
+static void testEventPump()
+{
+    expectStr(ndi_linux_host::kProcessEventsSymbol,
+              "_ZN16QCoreApplication13processEventsE6QFlagsIN10QEventLoop17ProcessEventsFlagEE",
+              "processEvents is looked up by its Qt 5.15 symbol (nm -D on Resolve's libQt5Core)");
+
+    gPumpCalls = 0;
+    ndi_linux_host::EventPump pump = ndi_linux_host::resolveEventPump(lookupWith(true, &gFakeApp));
+    pump.pump(true);
+    expectTrue(gPumpCalls == 1, "the pump runs Qt's processEvents on the main thread");
+    expectTrue(gPumpFlags == 1, "with ExcludeUserInputEvents (0x01) only");
+
+    gPumpCalls = 0;
+    pump.pump(false);
+    expectTrue(gPumpCalls == 0, "never off the main thread (Qt's loop belongs to it)");
+
+    gPumpCalls = 0;
+    ndi_linux_host::resolveEventPump(lookupWith(true, &gNoApp)).pump(true);
+    expectTrue(gPumpCalls == 0, "no pump before a QCoreApplication exists");
+
+    gPumpCalls = 0;
+    ndi_linux_host::resolveEventPump(lookupWith(true, nullptr)).pump(true);
+    expectTrue(gPumpCalls == 0, "no pump without QCoreApplication::self");
+
+    gPumpCalls = 0;
+    ndi_linux_host::resolveEventPump(lookupWith(false, &gFakeApp)).pump(true);
+    expectTrue(gPumpCalls == 0, "no pump in a host without Qt (plain blocking wait)");
+}
+
 int main()
 {
     testZenityArgv();
@@ -355,6 +449,7 @@ int main()
     testContract();
     testDisplayDetection();
     testChildEnvironment();
+    testEventPump();
 
     if (failures) {
         std::fprintf(stderr, "%d test(s) failed\n", failures);
