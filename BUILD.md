@@ -260,11 +260,11 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 
 ---
 
-## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending); Timeline (Auto) (#75), Browse (#76) and BRAW (#77) still to come
+## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending), Timeline (Auto) + Timeline Color = Auto (#75); Browse (#76) and BRAW (#77) still to come
 
 Plan and decisions: [docs/linux-port-spec.md](docs/linux-port-spec.md); work items: GitHub issues labelled `linux`. Findings go to [LEARNINGS.md](LEARNINGS.md). The same `CMakeLists.txt` drives Windows and Linux; the Makefile stays the macOS harness.
 
-**Not yet on Linux:** Browse buttons, Timeline (Auto) and BRAW Camera Metadata. Their capability macros (`NDI_HAS_BROWSE_DIALOGS`, `NDI_TIMELINE_WATCH`, the BRAW reader) are not defined on Linux, so the plugin compiles them out: Browse buttons are absent, Timeline (Auto) and Camera Metadata fall back to passthrough with a Stream Status message, and Manual Path works. Tickets #75–#77 add them.
+**Not yet on Linux:** Browse buttons and BRAW Camera Metadata. Their capability macros (`NDI_HAS_BROWSE_DIALOGS`, the BRAW reader) are not defined on Linux, so the plugin compiles them out: Browse buttons are absent, Camera Metadata falls back to passthrough with a Stream Status message, and Manual Path works. Tickets #76–#77 add them. Timeline (Auto) and Timeline Color = Auto are in (#75, below).
 
 ### Prerequisites
 
@@ -296,7 +296,7 @@ cmake --install build --prefix stage
 
 Use `build/` as the build directory: `test_cube_lut` and `test_stmap` write scratch files to `<repo>/build/` (LEARNINGS 2026-10-30). To mount the SDK, add `-v "/path/to/NDI SDK for Linux":/ndi` to `docker run` and pass `-DNDI_SDK_PATH=/ndi`. Running `docker commit` after `linux_build_deps.sh` saves a few minutes per session.
 
-`ctest` runs the portable unit suite under GCC: the `make test` tests minus the macOS watcher, `test_platform_paths` with a non-ASCII Linux STMap path case, and `test_ndi_def_exports`, which tests the export-list parser behind both NDI stubs. With CUDA it also runs `test_cuda_downscale`, the byte-identity test, which skips without a GPU, and so always skips in the container (next section). Byte identity relies on `--fmad=false` for nvcc and `-ffp-contract=off` for GCC, both set by CMake, so that neither compiler fuses a multiply-add the MSVC-built references keep separate. Keep the x86-64 baseline: never add `-march=native` or `-mfma` (spec decision 14). The Linux counterpart of `test_plugin_delayload` is also in the suite:
+`ctest` runs the portable unit suite under GCC: the `make test` tests minus the macOS watcher, the Linux watcher's two seams (`test_linux_timeline_watch`, pure path derivation, also run on Windows CI; `test_linux_timeline_spawn`, the posix_spawn plumbing, Linux only), `test_platform_paths` with a non-ASCII Linux STMap path case, and `test_ndi_def_exports`, which tests the export-list parser behind both NDI stubs. With CUDA it also runs `test_cuda_downscale`, the byte-identity test, which skips without a GPU, and so always skips in the container (next section). Byte identity relies on `--fmad=false` for nvcc and `-ffp-contract=off` for GCC, both set by CMake, so that neither compiler fuses a multiply-add the MSVC-built references keep separate. Keep the x86-64 baseline: never add `-march=native` or `-mfma` (spec decision 14). The Linux counterpart of `test_plugin_delayload` is also in the suite:
 
 **`test_plugin_elf`** parses the built `.ofx` and asserts the ELF-hygiene rules of spec decision 6, then copies the `.ofx` **alone** into a temp directory, `dlopen`s it with `RTLD_NOW` and calls the entry points:
 
@@ -437,6 +437,18 @@ It writes `dist/v<V>/NDIOutput-<V>-linux-x86_64.tar.gz` and `dist/v<V>/SHA256SUM
 - prints an `NVIDIA driver:` line from `/proc/driver/nvidia/version` (information only), the Resolve-restart hint (plus "Resolve is running" when it is, found by argv[0] as in `linux_remote.sh`) and the cache-reset path in the invoking user's home (`SUDO_USER`).
 
 **Tests:** `tests/test_linux_installer.sh` drives both scripts against fake roots (the test-only `NDIOUTPUT_ROOT` stands in for `/`, `NDIOUTPUT_TEST_EUID` for the uid, and a fake `ldconfig` on `PATH` for the loader cache) and `tests/test_package_linux_release.sh` checks the packaging refusals on fake staged trees (`NDIOUTPUT_TODAY` pins the date); both run in `ctest` on Linux and by hand on the Mac. `tests/linux_installer_container_test.sh <tarball> --avahi-libs yes|no [--elf-checker PATH]` runs the real install/uninstall cycle as root inside a throwaway container; linux.yml runs it on `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries. It uses no `find` or `cmp`, because Rocky 8's base image has neither and `install.sh` mustn't need them.
+
+### Timeline (Auto) and Timeline Color = Auto (#75)
+
+The Linux counterpart of the macOS and Windows playhead watcher, with the same helper scripts and line protocol. [src/LinuxTimelineWatch.cpp](src/LinuxTimelineWatch.cpp) implements the `TimelineClipWatcher.h` API (a port of the macOS reader loop, not shared code). [src/LinuxTimelineWatch.h](src/LinuxTimelineWatch.h) is the discovery seam and [src/LinuxTimelineSpawn.h](src/LinuxTimelineSpawn.h) the spawn seam. `NDI_TIMELINE_WATCH` is defined on Linux.
+
+- **Primary helper:** `Contents/Resources/ndi_timeline_watch.lua` under Resolve's own `fuscript -q -l lua`. The plugin reads the host executable from `/proc/self/exe` (`/opt/resolve/bin/resolve`), takes the install root two levels up, and runs `<root>/libs/Fusion/fuscript`, so a relocated install works. If that has no fuscript, it tries the stock `/opt/resolve`. The helper scripts are found from the plugin's own path (`dladdr`): `Contents/Linux-x86-64/NDIOutput.ofx` → `Contents/Resources/`.
+- **Fallback:** `ndi_timeline_watch.py` under `/usr/bin/python3` (a real interpreter on Linux, still probed once with `--version`). The plugin sets `RESOLVE_SCRIPT_API=<root>/Developer/Scripting` and `RESOLVE_SCRIPT_LIB=<root>/libs/Fusion/fusionscript.so` for the child, puts `<root>/Developer/Scripting/Modules` first on `PYTHONPATH`, and drops `PYTHONHOME`. Verified standalone on the box with Ubuntu 24.04's python 3.12.
+- **Spawn hygiene:** the helper inherits only stdin/stdout/stderr (`/dev/null`, the pipe, `/dev/null`), with every descriptor from 3 up closed. glibc ≥ 2.34 does this with `posix_spawn_file_actions_addclosefrom_np`, looked up at run time because the Rocky 8 baseline lacks it; older glibc gets a close action per `/proc/self/fd` entry. The helper also starts with an empty signal mask and default dispositions (LEARNINGS 2026-11-01).
+- **Requirement:** Resolve's **Preferences → System → General → External scripting using: Local**, as on the other platforms. Without it the journal says `TimelineWatch: scriptapp('Resolve') returned nothing - is external scripting enabled?`, and Manual Path still works.
+- **Logs:** watcher lines go to the journal with the rest of `NDI_LOG`, prefixed `NDI Plugin: TimelineWatch:`. They name the chain that spawned and the playhead clip whenever it changes, and a dead helper's exit status (`helper exited (signal 9) — retrying in 30 s`). The helper respawns after 30 s.
+- **Finding the helper:** fuscript names its process `ScriptState`, so `pgrep -x fuscript` misses it. Use `pgrep -af 'libs/Fusion/fuscrip[t] -q -l lua'`, or `pgrep -P <resolve pid>`. To check its descriptors, `ls -l /proc/<pid>/fd` should list 0–2 plus its own connection to Resolve's scripting port.
+- **Standalone check** (Resolve open, no install needed): `/opt/resolve/libs/Fusion/fuscript -q -l lua src/ndi_timeline_watch.lua` prints the playhead clip twice a second, or a `!` status line explaining why not, plus an `@color` line whenever the timeline's colour settings change.
 
 ### Logs on Linux
 
