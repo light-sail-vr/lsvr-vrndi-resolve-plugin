@@ -19,11 +19,13 @@ This continues [2026-10-30-linux-host-probes.md](2026-10-30-linux-host-probes.md
 | `page=?` | **Still empty** (L): `page=?` on all 125,785 calls, including an instance added fresh from the UI on the Color page (09:16:31, `Instance created successfully on page '?'`). So on Linux, as on macOS, Resolve 21.1 doesn't deliver `OfxImageEffectPropResolvePage` even to a freshly added effect |
 | Thumbnails | 92×46, 208×117, 288×162 `thumb=1` with scale < 1, correctly flagged; they take no Stream Status path note |
 | 8K stereo (8160×7200/eye) real time | **Pending.** Both eyes ran GPU-native (`8160x7200 device frame -> … UYVY enqueued`), but only briefly, at Resolution Full, before the VRAM errors. Needs ComfyUI idle |
+| HDR (the ticket's "HDR + every Output Color preset") | **Moot.** HDR send (P216 + colour metadata) was removed after v1.14.2: commit `f5f88f2` "Remove HDR output (P216 + color metadata) — Standard SDK streams SDR" (PR #48), CHANGELOG `[1.15.0] - 2026-10-01`, Removed: "**HDR output** (#48). The plugin is built on the Standard NDI SDK and now streams SDR only (8-bit, Rec.709)." The CUDA path has no HDR mode to test; round 2 checks the 7 display presets (Rec.2020 G2.4 is the wide-gamut one), Passthrough and optionally LUT File instead |
 | Output Color presets (`tools/ndi_color_check.py`) | **Pending** |
 | STMap warp on the GPU | **Pending.** Maps generated: `/var/tmp/ndi-test-media/stmap_identity_1920x1080.exr` (expect Passthrough patches) and `stmap_mirror_4096x4096.exr` (8K, labels mirrored), from `scripts/gen_stmap_exr.py` |
 | Edit page vs Color page, Standard Immersive, proxy, Render Cache on | **Pending** |
 | Fallback: Resolve set to OpenCL | **Pending** (expect `CPU path: Resolve sends CPU frames …` in Stream Status) |
 | Fallback: forced CUDA init failure (`NDI_OUTPUT_FORCE_CUDA_FAIL=1`) | **Pending** (expect `CPU path: CUDA init failure forced …`, with device frames read back) |
+| The plugin's CUDA runtime can't reach the GPU (Resolve's can) | **Simulated, not in Resolve** (L): `test_cuda_runtime_unavailable` hides the devices with `CUDA_VISIBLE_DEVICES=-1` on the 3090 Ti. The probe reports `no CUDA-capable device is detected`, init is refused, the passthrough copy and the readback of a CUDA frame both fail, and Stream Status reads `NDI off — the plugin's CUDA runtime can't use the GPU (no CUDA-capable device is detected): update the NVIDIA driver, or set Resolve's GPU processing to OpenCL` (latched once). Before the #74 review fix it read `CPU path: no CUDA device …` while no frame was sent |
 
 ## Observation: a mono timeline after a stereo one streams "Stereo degraded"
 
