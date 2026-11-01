@@ -5,19 +5,20 @@
 // glibc Blackmagic certifies (decision 5). Parses the ELF directly, so no
 // binutils are needed where it runs (the Ubuntu load-check container), and
 // asserts:
-//   1. NEEDED is libndi.so.6 plus glibc pieces only (no libstdc++, libgcc_s,
-//      libz or libcudart: those are linked statically)
+//   1. NEEDED is glibc pieces only: no libstdc++, libgcc_s, libz or
+//      libcudart (linked statically) and no libndi.so.6, which the plugin
+//      dlopens from its bundle at runtime (spec decision 8, amended by #71:
+//      libndi itself NEEDs the Avahi client libraries, so a link-time import
+//      would hide the plugin on machines without them)
 //   2. no GLIBC_ symbol version above 2.28 (Rocky/RHEL 8)
-//   3. RUNPATH is exactly $ORIGIN (so the bundled libndi.so.6 resolves), and
-//      there is no legacy DT_RPATH
+//   3. no RUNPATH and no legacy DT_RPATH: nothing is resolved beside the
+//      plugin by the loader any more
 //   4. the only exported symbols are the two OFX entry points
 //   5. the plugin dlopens with RTLD_NOW and OfxGetNumberOfPlugins() == 1
-// For 5 the .ofx and libndi.so.6 are copied ALONE into a temp directory, so
-// only RUNPATH=$ORIGIN can satisfy the NDI dependency.
+// For 5 the .ofx is copied ALONE into a temp directory: no libndi.so.6
+// beside it, the case the runtime loading exists for.
 //
-// Usage: test_plugin_elf <NDIOutput.ofx> [libndi.so.6]
-//   The second argument defaults to the libndi.so.6 beside the .ofx (the
-//   staged bundle layout); CMake passes the stub or real SDK library.
+// Usage: test_plugin_elf <NDIOutput.ofx>
 
 #include "ofxCore.h"
 
@@ -183,7 +184,7 @@ static bool parseGlibcVersion(const std::string& name, int v[3])
 static bool isAllowedNeeded(const std::string& lib)
 {
     static const char* const kAllowed[] = {
-        "libndi.so.6", "libc.so.6", "libm.so.6", "libdl.so.2",
+        "libc.so.6", "libm.so.6", "libdl.so.2",
         "libpthread.so.0", "librt.so.1",
     };
     for (const char* a : kAllowed) {
@@ -194,28 +195,17 @@ static bool isAllowedNeeded(const std::string& lib)
     return lib.compare(0, 9, "ld-linux-") == 0;
 }
 
-static std::string dirOf(const std::string& path)
-{
-    const size_t slash = path.rfind('/');
-    return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
-}
-
 int main(int argc, char** argv)
 {
-    if (argc != 2 && argc != 3) {
-        std::fprintf(stderr, "usage: test_plugin_elf <NDIOutput.ofx> [libndi.so.6]\n");
+    if (argc != 2) {
+        std::fprintf(stderr, "usage: test_plugin_elf <NDIOutput.ofx>\n");
         return 2;
     }
     const std::string ofxPath = argv[1];
-    const std::string ndiPath = argc == 3 ? argv[2] : dirOf(ofxPath) + "/libndi.so.6";
 
-    std::vector<unsigned char> ofx, ndi;
+    std::vector<unsigned char> ofx;
     if (!readFile(ofxPath, &ofx)) {
         std::fprintf(stderr, "cannot read %s\n", ofxPath.c_str());
-        return 2;
-    }
-    if (!readFile(ndiPath, &ndi)) {
-        std::fprintf(stderr, "cannot read %s\n", ndiPath.c_str());
         return 2;
     }
 
@@ -232,7 +222,7 @@ int main(int argc, char** argv)
         expectTrue(isAllowedNeeded(lib), "NEEDED " + lib + " is allowed");
         sawNdi = sawNdi || lib == "libndi.so.6";
     }
-    expectTrue(sawNdi, "NEEDED includes libndi.so.6");
+    expectTrue(!sawNdi, "NEEDED excludes libndi.so.6 (dlopened from the bundle at runtime)");
 
     // 2. glibc symbol-version ceiling.
     int maxV[3] = {0, 0, 0};
@@ -252,9 +242,9 @@ int main(int argc, char** argv)
     expectTrue(!std::lexicographical_compare(ceiling, ceiling + 3, maxV, maxV + 3),
                "highest glibc version " + maxName + " <= GLIBC_2.28");
 
-    // 3. RUNPATH.
-    expectTrue(facts.runpath.size() == 1 && facts.runpath[0] == "$ORIGIN",
-               "RUNPATH is exactly $ORIGIN (got " +
+    // 3. No library search path baked in.
+    expectTrue(facts.runpath.empty(),
+               "no RUNPATH (got " +
                    (facts.runpath.empty() ? std::string("none") : facts.runpath[0]) + ")");
     expectTrue(facts.rpath.empty(), "no legacy DT_RPATH");
 
@@ -268,7 +258,7 @@ int main(int argc, char** argv)
     }
     std::printf("     (%zu exported symbol(s))\n", facts.exported.size());
 
-    // 5. dlopen from an isolated directory; RUNPATH must find libndi.so.6.
+    // 5. dlopen from an isolated directory with no libndi.so.6 beside it.
     char tmpl[] = "/tmp/ndi_plugin_elf_XXXXXX";
     const char* dir = mkdtemp(tmpl);
     if (!dir) {
@@ -276,13 +266,12 @@ int main(int argc, char** argv)
         return 2;
     }
     const std::string stagedOfx = std::string(dir) + "/NDIOutput.ofx";
-    const std::string stagedNdi = std::string(dir) + "/libndi.so.6";
-    if (!writeFile(stagedOfx, ofx) || !writeFile(stagedNdi, ndi)) {
+    if (!writeFile(stagedOfx, ofx)) {
         std::fprintf(stderr, "cannot stage files in %s\n", dir);
         return 2;
     }
     void* h = dlopen(stagedOfx.c_str(), RTLD_NOW | RTLD_LOCAL);
-    expectTrue(h != nullptr, std::string("dlopen(RTLD_NOW) succeeds") +
+    expectTrue(h != nullptr, std::string("dlopen(RTLD_NOW) succeeds without libndi.so.6") +
                                  (h ? "" : std::string(": ") + dlerror()));
     if (h) {
         using GetCount = int (*)();
@@ -300,7 +289,6 @@ int main(int argc, char** argv)
         // Deliberately no dlclose: process exit is the host's unload model.
     }
     unlink(stagedOfx.c_str());
-    unlink(stagedNdi.c_str());
     rmdir(dir);
 
     if (failures) {

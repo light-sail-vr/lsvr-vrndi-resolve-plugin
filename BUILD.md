@@ -260,7 +260,7 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 
 ---
 
-## Linux — STATUS: CMake build + compile-only CI (#72); first stream (#73), CUDA on hardware (#74), Timeline (Auto) (#75), Browse (#76), BRAW (#77) and packaging (#78) still to come
+## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73); CUDA on hardware (#74), Timeline (Auto) (#75), Browse (#76), BRAW (#77) and packaging (#78) still to come
 
 Plan and decisions: [docs/linux-port-spec.md](docs/linux-port-spec.md); work items: GitHub issues labelled `linux`. Findings go to [LEARNINGS.md](LEARNINGS.md). The same `CMakeLists.txt` drives Windows and Linux; the Makefile stays the macOS harness.
 
@@ -272,8 +272,8 @@ Release binaries are built **inside a Rocky Linux 8 container** (spec decision 5
 
 - **Docker** (or Podman) and the image `nvidia/cuda:12.9.1-devel-rockylinux8` (CUDA 12.9, pinned like Windows; the image also exists for arm64, which is how an Apple-silicon Mac builds it).
 - Inside the container, [scripts/linux_build_deps.sh](scripts/linux_build_deps.sh) installs the rest: **gcc-toolset-13** (GCC 13 with a static `libstdc++.a`), **CMake 3.26** (≥ 3.24 is required, for static zlib), and **zlib-static** (from PowerTools). CI runs the same script.
-- **NDI SDK for Linux** (Standard, royalty-free — **not** NDI Advanced). Unpack it anywhere and point `NDI_SDK_PATH` at the `NDI SDK for Linux` folder (default: `$HOME/NDI SDK for Linux`, or the `NDI_SDK_PATH` environment variable). The build links `lib/x86_64-linux-gnu/libndi.so.6` and bundles it with `licenses/*.txt`. Without it the build links a **stub** (below).
-- `-DNDI_ENABLE_CUDA=OFF` builds the CPU-only plugin without nvcc (works in plain `rockylinux:8`).
+- **NDI SDK for Linux** (Standard, royalty-free — **not** NDI Advanced). Unpack it anywhere and point `NDI_SDK_PATH` at the `NDI SDK for Linux` folder (default: `$HOME/NDI SDK for Linux`, or the `NDI_SDK_PATH` environment variable). The build compiles against its headers and bundles `lib/x86_64-linux-gnu/libndi.so.6` with `licenses/*.txt`; it does **not** link it (below). Without the SDK the build bundles a **stub** instead (below).
+- **CUDA is off by default on Linux** until the CUDA path is verified on hardware (#74): a plain configure builds the CPU-only plugin without nvcc (works in plain `rockylinux:8`), which doesn't declare CUDA rendering to Resolve. `-DNDI_ENABLE_CUDA=ON` builds the CUDA module too (needs the CUDA image); CI always passes it. Windows still defaults to ON.
 
 ### Build (Tier 0), in the container
 
@@ -288,7 +288,7 @@ Then, inside the container:
 ```bash
 bash scripts/linux_build_deps.sh
 source /opt/rh/gcc-toolset-13/enable
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DNDI_SDK_PATH=... for the real SDK
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DNDI_SDK_PATH=... for the real SDK, -DNDI_ENABLE_CUDA=ON for CUDA
 cmake --build build --parallel "$(nproc)"
 ctest --test-dir build --output-on-failure
 cmake --install build --prefix stage
@@ -298,23 +298,39 @@ Use `build/` as the build directory: `test_cube_lut` and `test_stmap` write scra
 
 `ctest` runs the portable unit suite under GCC: the `make test` tests minus the macOS watcher, `test_platform_paths` with a non-ASCII Linux STMap path case, and `test_ndi_def_exports`, which tests the export-list parser behind both NDI stubs. With CUDA it also runs `test_cuda_downscale`, the byte-identity test, which skips without a GPU. Byte identity relies on `--fmad=false` for nvcc and `-ffp-contract=off` for GCC, both set by CMake, so that neither compiler fuses a multiply-add the MSVC-built references keep separate. Keep the x86-64 baseline: never add `-march=native` or `-mfma` (spec decision 14). The Linux counterpart of `test_plugin_delayload` is also in the suite:
 
-**`test_plugin_elf`** parses the built `.ofx` and asserts the ELF-hygiene rules of spec decision 6, then copies the `.ofx` and `libndi.so.6` alone into a temp directory, `dlopen`s it with `RTLD_NOW` and calls the entry points:
+**`test_plugin_elf`** parses the built `.ofx` and asserts the ELF-hygiene rules of spec decision 6, then copies the `.ofx` **alone** into a temp directory, `dlopen`s it with `RTLD_NOW` and calls the entry points:
 
 | Check | Why |
 | --- | --- |
-| `NEEDED` is `libndi.so.6` plus glibc pieces only (`libc`, `libm`, `libdl`, `libpthread`, `librt`, `ld-linux`) | Resolve loads its own libstdc++, zlib, … from `/opt/resolve/libs`; ours are linked statically (`-static-libstdc++ -static-libgcc`, `libz.a`, static cudart) |
+| `NEEDED` is glibc pieces only (`libc`, `libm`, `libdl`, `libpthread`, `librt`, `ld-linux`): no `libndi.so.6` | Resolve loads its own libstdc++, zlib, … from `/opt/resolve/libs`; ours are linked statically (`-static-libstdc++ -static-libgcc`, `libz.a`, static cudart). `libndi` is `dlopen`ed at runtime (next section) |
 | No `GLIBC_` symbol version above 2.28 | Rocky/RHEL 8 |
-| `RUNPATH` is exactly `$ORIGIN`, no `DT_RPATH` | the bundled `libndi.so.6` beside the `.ofx` resolves without `LD_LIBRARY_PATH` |
+| No `RUNPATH`, no `DT_RPATH` | nothing is resolved beside the plugin by the loader |
 | Only `OfxGetNumberOfPlugins` and `OfxGetPlugin` are exported | hidden visibility + [src/LinuxExports.map](src/LinuxExports.map); nothing statically linked can interpose on the host's copies |
-| `dlopen` succeeds and `OfxGetNumberOfPlugins() == 1`, plugin 0 is `LSVR.NDIOutput` | catches unresolved symbols; `-Wl,--no-undefined -Wl,-z,defs` catches most at link time |
+| `dlopen` succeeds with no `libndi.so.6` beside it, `OfxGetNumberOfPlugins() == 1`, plugin 0 is `LSVR.NDIOutput` | the plugin must load (and show up in Resolve) whatever state the NDI runtime is in; also catches unresolved symbols, which `-Wl,--no-undefined -Wl,-z,defs` catches at link time |
 
-It can be run by hand against any staged tree, e.g. `build/test_plugin_elf stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/NDIOutput.ofx` (the NDI library defaults to the `libndi.so.6` beside the `.ofx`). The binary links its C++ runtime statically, so it runs on any glibc ≥ 2.28 distro without a compiler.
+It can be run by hand against any staged tree, e.g. `build/test_plugin_elf stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/NDIOutput.ofx`. The binary links its C++ runtime statically, so it runs on any glibc ≥ 2.28 distro without a compiler.
+
+### The NDI runtime is loaded at runtime (`dlopen`), not linked
+
+`libndi.so.6` itself has `NEEDED libavahi-client.so.3` and `libavahi-common.so.3`. Linked normally, it would make the whole `.ofx` fail to load, and the plugin vanish from the Effects Library without a message, on any machine without the Avahi client libraries (spec decision 8, amended by #71). So the plugin links no NDI library. On the first NDI use, [src/LinuxNDIRuntime.h](src/LinuxNDIRuntime.h) finds the plugin's own path with `dladdr`, `dlopen`s `Contents/Linux-x86-64/libndi.so.6` beside it (`RTLD_NOW | RTLD_LOCAL`), falls back to a system-wide `libndi.so.6` by name, and takes the API table from `NDIlib_v5_load()` (the SDK's `Processing.NDI.DynamicLoad.h` pattern). Every NDI call goes through that table (`NDI_API(fn)` in the plugin, gated on `NDI_RUNTIME_DLOPEN`, which CMake defines for Linux only).
+
+If the load fails, the plugin still loads and passes frames through. The journal gets every path tried and its `dlerror`, and **Stream Status** gets one line:
+
+| Stream Status | Cause |
+| --- | --- |
+| `NDI off — Avahi client library missing (install libavahi-client3 / avahi-libs)` | `libndi.so.6` is there, but a `libavahi-*` it NEEDs isn't |
+| `NDI off — libndi.so.6 missing from the plugin bundle` | no `libndi.so.6` beside the plugin and none on the system |
+| `NDI off — libndi.so.6 is not an NDI 5+ runtime` | it has no `NDIlib_v5_load` |
+| `NDI off — libndi.so.6 returned no API (CI stub build?)` | the CI stub (every function returns 0) |
+| `NDI off — NDIlib_initialize() failed (unsupported CPU?)` | the runtime loaded but refused to start |
+
+`tests/test_linux_ndi_runtime.cpp` covers the path derivation and every row above with a fake loader, and runs on all platforms.
 
 ### The stub `libndi.so.6` (CI mode)
 
-Without the SDK, CMake generates `libndi.so.6` (SONAME `libndi.so.6`, so the plugin's `NEEDED` entry is identical to a real build) from the same export list as the Windows stub, [third_party/ndi/Processing.NDI.Lib.x64.def](third_party/ndi/Processing.NDI.Lib.x64.def), parsed by [cmake/NDIDefExports.cmake](cmake/NDIDefExports.cmake). It contains **no NDI code**: every function returns 0, so a stub-linked plugin that reaches Resolve sees `NDIlib_initialize()` fail and runs as a pass-through. Because Linux has no delay-load, the `.ofx` can't load without some `libndi.so.6` beside it, so stub builds stage the stub into the bundle. That keeps the CI load checks meaningful. A stub tree **loads but never streams**. Its artifacts are named `-STUB`, and the stub exports a marker symbol, `ndioutput_stub_libndi`, so packaging (#78) can refuse it (`nm -D libndi.so.6 | grep ndioutput_stub`).
+Without the SDK, CMake generates `libndi.so.6` (SONAME `libndi.so.6`) from the same export list as the Windows stub, [third_party/ndi/Processing.NDI.Lib.x64.def](third_party/ndi/Processing.NDI.Lib.x64.def), parsed by [cmake/NDIDefExports.cmake](cmake/NDIDefExports.cmake), and stages it beside the `.ofx` where the real runtime would go. It contains **no NDI code**: every function returns 0, so a stub bundle that reaches Resolve gets NULL from `NDIlib_v5_load()` and runs as a pass-through with `NDI off — libndi.so.6 returned no API (CI stub build?)`. A stub tree **loads but never streams**. Its artifacts are named `-STUB`, and the stub exports a marker symbol, `ndioutput_stub_libndi`, so packaging (#78) and `linux_remote.sh install` can refuse it (`nm -D libndi.so.6 | grep ndioutput_stub`).
 
-### Install layout (Tier 1 — ticket #73)
+### Install layout
 
 `cmake --install build --prefix stage` produces the spec bundle tree (decision 7):
 
@@ -324,24 +340,73 @@ stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/libndi.so.6        (+ the SDK's
 stage/NDIOutput.ofx.bundle/Contents/Resources/{ndi_timeline_watch.lua,ndi_timeline_watch.py,LSVR.NDIOutput.png}
 ```
 
-It installs under `/usr/OFX/Plugins/`. The install script, the plugin-cache location and the Tier 1–2 procedure come with #73/#78, after the host facts in ticket #71 are verified.
+It installs under `/usr/OFX/Plugins/` (the end-user `install.sh` is #78). Resolve also scans `OFX_PLUGIN_PATH`.
+
+### Dev loop from the Mac: `scripts/linux_remote.sh` (Tiers 0–2)
+
+The Linux box (COMFYBOX; LEARNINGS.md → "Linux environment map") builds, installs and logs over SSH; a human only restarts Resolve and presses play there (spec user story 16).
+
+```bash
+scripts/linux_remote.sh sync          # rsync this worktree to ~/ndioutput-dev on the box (.git, build/, stage/ excluded)
+scripts/linux_remote.sh build         # Tier 0 on the box: Rocky 8 container, real SDK, ctest, then stage/
+scripts/linux_remote.sh install       # Tier 1: stage/ bundle -> /usr/OFX/Plugins (matt owns it: no sudo); refuses a stub
+scripts/linux_remote.sh logs          # journalctl -f -t NDIOutput on the box (extra args pass through, e.g. --since -10min)
+scripts/linux_remote.sh cache         # the plugin's entry in ~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml
+scripts/linux_remote.sh cache-reset   # delete that cache; refuses while Resolve runs (it rewrites the cache on exit)
+```
+
+- `build` runs in `nvidia/cuda:12.9.1-devel-rockylinux8` (the CI image) with `linux_build_deps.sh` committed once on the box as `ndioutput-build:rocky8`, the SDK mounted from `~/sdks/NDI SDK for Linux`. It never uses the Ubuntu toolchain: a host build picks up `GLIBC_2.38` symbols and fails `test_plugin_elf`. Until CUDA is verified on the box (#74) it builds the **CPU-only** plugin (the Linux default, `NDI_ENABLE_CUDA=OFF`, so the plugin doesn't declare CUDA rendering); `build --cuda` builds the CUDA module too.
+- Overrides: `NDI_LINUX_HOST` (default `matt@100.80.25.1`), `NDI_LINUX_DIR`, `NDI_LINUX_SDK`, `NDI_LINUX_CACHE`. The three paths are on the box and may be absolute, `~/...` or relative; the last two both mean under the box's `$HOME`, for `sync` and the box-side steps alike. `tests/test_linux_remote.sh` (in `ctest` on Linux) checks the `cache-reset` guard, that path handling and the quoting of `logs` arguments locally.
+
+The box needs X on the **NVIDIA driver**. Its headless desktop runs a virtual 1080p monitor with a fake EDID (`/etc/X11/xorg.conf.d/10-nvidia-virtual.conf`). With X's dummy driver and software GL, Resolve's CUDA-GL interop fails as soon as the Color page opens, and Resolve reports it as GPU out of memory (LEARNINGS 2026-10-30).
+
+Tier 1–2 after `install`:
+
+1. At the box: quit Resolve fully and relaunch it (no OFX hot reload). A changed `.ofx` is rescanned automatically; if the plugin is missing from **Effects → OpenFX → LSVR**, quit Resolve and run `linux_remote.sh cache-reset`.
+2. `linux_remote.sh cache` should show `LSVR.NDIOutput` with `status="0"`.
+3. Add **VR.NDI Sender** to a clip on the Color page (Render Cache off) and press play.
+4. From the Mac: `./build/ndi_verify --source "COMFYBOX (VR.NDI Sender)" --duration 5`. Pass the **full** source name. Receiving from a second machine makes Avahi and the firewall part of the test (next section).
 
 ### Logs on Linux
 
-`NDI_LOG` (and the CUDA module's log) goes to **syslog** with ident `NDIOutput` (spec decision 16). Follow it live, including over SSH:
+`NDI_LOG` (and the CUDA module's log) goes to **syslog**, tagged `NDIOutput` (spec decision 16). Follow it live, including over SSH:
 
 ```bash
-journalctl -f -t NDIOutput
+journalctl -f -t NDIOutput          # on the box; or scripts/linux_remote.sh logs from the Mac
 ```
 
+The plugin tags each line itself (an RFC 3164 datagram to `/dev/log`, [src/LinuxLog.h](src/LinuxLog.h)) and never calls `openlog()`. Resolve logs through `syslog()` as `resolve`, and glibc keeps one ident per process, so `openlog("NDIOutput")` re-tagged Resolve's own lines (LEARNINGS 2026-10-30).
+
 Set `NDI_OUTPUT_LOG_FILE` to a writable path in Resolve's environment and every line is appended there too, as on Windows.
+
+### Network: Avahi and the firewall
+
+NDI on Linux discovers and advertises through Avahi, so two things are needed (spec decision 10, measured in [docs/2026-10-30-linux-host-probes.md](docs/2026-10-30-linux-host-probes.md) §5):
+
+- **The Avahi client libraries** (`libavahi-client3` on Ubuntu/Debian, `avahi-libs` on Rocky/RHEL). `libndi.so.6` links them. Without them the plugin still loads and passes frames through, but Stream Status reads `NDI off — Avahi client library missing …`.
+- **A running `avahi-daemon`.** Without it the plugin loads, initialises NDI and sends, and `NDIlib_initialize`/`send_create` both succeed, but **the source is never discoverable**. A receiver that already has the address, or an NDI Discovery Server, can still connect. The plugin can't detect this case, so check `systemctl is-active avahi-daemon` when a source doesn't show up.
+- **Never stop `avahi-daemon` while Resolve runs.** Resolve's own control-panel discovery (its bundled Bonjour-compat `libdns_sd`) segfaults Resolve, plugin or not (LEARNINGS 2026-10-30). D-Bus also re-activates the daemon unless it's masked. To test without it, quit Resolve first, then `sudo systemctl mask --runtime avahi-daemon.service avahi-daemon.socket && sudo systemctl stop avahi-daemon.socket avahi-daemon.service`; restore with `unmask --runtime` + `start`.
+
+**Firewall:** allow mDNS (5353/udp) and NDI's ports (5959–5999, 6960–6999 and 7960–7999, tcp **and** udp) from the LAN **and from IPv6 link-local `fe80::/10`**. Avahi advertises the host's `fe80::` addresses and macOS receivers connect over them, so with IPv4-only rules the source appears but no video arrives (LEARNINGS 2026-10-30). With `ufw` (the Ubuntu box; Rocky uses `firewalld`, with the same ports):
+
+```bash
+for net in 192.168.1.0/24 fe80::/10; do          # your LAN subnet(s), plus IPv6 link-local
+  sudo ufw allow from "$net" to any port 5353 proto udp comment 'mDNS (NDI discovery)'
+  for ports in 5959:5999 6960:6999 7960:7999; do
+    sudo ufw allow from "$net" to any port "$ports" proto tcp comment 'NDI'
+    sudo ufw allow from "$net" to any port "$ports" proto udp comment 'NDI'
+  done
+done
+```
+
+Check that the network works without Resolve by running the SDK's sample sender on the box and `./build/ndi_verify --source "<HOST> (<name>)"` on another machine.
 
 ### CI
 
 [.github/workflows/linux.yml](.github/workflows/linux.yml) has the same triggers as `windows.yml` (pushes to `dev`, `master`, `feature/**`, PRs into `dev`, manual dispatch). The **build** job runs in `nvidia/cuda:12.9.1-devel-rockylinux8`:
 
 1. `scripts/linux_build_deps.sh`
-2. configure and build Release **including the CUDA translation units**
+2. configure with `-DNDI_ENABLE_CUDA=ON` (the Linux default is OFF until #74) and build Release **including the CUDA translation units**
 3. `ctest`, including `test_plugin_elf`, which `dlopen`s the plugin inside Rocky 8
 4. stage the install, check the bundle layout, and re-run `test_plugin_elf` on the staged `.ofx`
 5. upload the tree as **`NDIOutput-linux-x86_64-STUB`** and the checker as `test_plugin_elf-linux-x86_64`

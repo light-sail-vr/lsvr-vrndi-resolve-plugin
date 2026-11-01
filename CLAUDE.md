@@ -25,6 +25,20 @@ The Windows port lives in this tree — the long-lived `windows-port` integratio
 - **Live logs on Windows:** `NDI_LOG` routes to `OutputDebugStringA` (+ optional file sink) — watch with DebugView/WinDbg, not `monitor_ndi_logs.sh`.
 - The LEARNINGS.md standing rule (append every fixed bug / workflow gotcha) applies to Windows work unchanged, and BUILD.md stays the single source of truth for build/install on both platforms.
 
+## Linux port
+
+The Linux port lives in this tree too, on the same `CMakeLists.txt` as Windows (Rocky Linux 8 container, CMake + gcc-toolset-13 + CUDA 12.9; the Makefile stays macOS-only). Spec: [docs/linux-port-spec.md](docs/linux-port-spec.md); tickets: GitHub issues labelled `linux` (#70 is the spec issue). The test box is COMFYBOX (`ssh matt@100.80.25.1`, Ubuntu 24.04, RTX 3090 Ti, Resolve Studio 21.1); its paths are in LEARNINGS.md → "Linux environment map".
+
+- **Branching:** `feature/linux-<name>` branches off `dev`, merged into `dev` by PR once the Linux testing loop passes. No long-lived `linux-port` branch. The spec's release bar (decision 3) gates the first `dev` → `master` release with Linux artifacts, not integration into `dev`.
+- **Platform isolation:** **never modify macOS code** (Matt's rule, 2026-10-30): no edits to `*.mm`, `src/Mac*`, `src/TimelineClipWatcher.cpp`, the `__APPLE__` branches or the Makefile's behaviour, and Windows behaviour stays identical. Linux code goes in `src/Linux*` files behind seam headers with host-independent unit tests; call sites are gated on capability macros (`NDI_RUNTIME_DLOPEN`, `NDI_TIMELINE_WATCH`, …), never raw `__linux__`. A Linux change must keep `make dev`/`make test` on the Mac and both CI workflows green.
+- **NDI runtime:** the plugin never links `libndi`. It `dlopen`s `Contents/Linux-x86-64/libndi.so.6` from its own bundle (`src/LinuxNDIRuntime.h`) and calls NDI through `NDI_API(fn)`, because `libndi` NEEDs the Avahi client libraries. `test_plugin_elf` keeps `libndi` out of `NEEDED`.
+- **Testing loop**, driven from the Mac with `scripts/linux_remote.sh` (BUILD.md, Linux section): Tier 0 = `sync` + `build` (the Rocky 8 container on the box, `ctest` included; CI runs the same on every push). Tiers 1–2 = `install` (to `/usr/OFX/Plugins`, no sudo), Matt fully restarts Resolve and presses play at the box, then verify from the Mac with `./build/ndi_verify --source "COMFYBOX (VR.NDI Sender)"`, so avahi and the firewall are part of the test. You can't restart Resolve, press play or use sudo on the box: ask for those as numbered steps.
+- **Linux plugin cache:** `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml`. `linux_remote.sh cache` shows the plugin's entry; `linux_remote.sh cache-reset` deletes it and refuses while Resolve runs.
+- **Live logs on Linux:** `NDI_LOG` goes to journald tagged `NDIOutput` (`scripts/linux_remote.sh logs` = `journalctl -f -t NDIOutput`), plus the optional `NDI_OUTPUT_LOG_FILE` sink. Each line is tagged per message: never call `openlog()` in the plugin, because it would re-tag Resolve's own syslog lines.
+- **Never stop `avahi-daemon` while Resolve runs on the box**: Resolve's own Bonjour layer segfaults. NDI on Linux is only discoverable while the daemon runs (docs/2026-10-30-linux-host-probes.md §5).
+- **GPU rules on Linux:** the same as Windows (enqueue on the host's CUDA stream; never `cudaDeviceSynchronize` or `cudaDeviceReset`). Until #74 verifies CUDA on the box, dev builds are CPU-only (`linux_remote.sh build`; `--cuda` opts in), so the plugin doesn't declare CUDA rendering.
+- The LEARNINGS.md standing rule applies to Linux work unchanged, and BUILD.md stays the single source of truth for build/install.
+
 ## Key commands
 
 ```bash

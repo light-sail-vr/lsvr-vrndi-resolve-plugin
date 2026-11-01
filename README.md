@@ -17,6 +17,7 @@ A modern OpenFX plugin that sends video frames from DaVinci Resolve to NDI (Netw
 ## Requirements
 
 - macOS 13+ (Ventura or later), Apple Silicon or Intel — or 64-bit Windows 10/11 (NVIDIA GPU for the GPU-native path; the CPU path is the automatic fallback)
+- Linux (in progress, build from source; see [BUILD.md](BUILD.md)): x86-64, glibc 2.28+ (Rocky Linux 8+, Ubuntu 22.04+), Resolve Studio. Streaming needs the Avahi client libraries (`libavahi-client3` on Ubuntu, `avahi-libs` on Rocky) and a running `avahi-daemon` (without it the source isn't discoverable). Tested on Ubuntu 24.04 with Resolve Studio 21.1, CPU path only so far
 - DaVinci Resolve 17+ (tested with DaVinci Resolve 20)
 - Building from source additionally needs the NDI SDK 6.x ([download](https://ndi.video/for-developers/)) — see [BUILD.md](BUILD.md) for setup. The installers ship the NDI runtime inside the plugin, so end users need nothing else
 
@@ -32,7 +33,9 @@ Grab the installer for your platform from the [latest release](https://github.co
 
 The first NDI send raises a firewall prompt for Resolve on Windows — allow it on private networks, or the source is discoverable but its video is unreachable from other machines.
 
-**From source**: full instructions (prerequisites, build, install, verification, troubleshooting, Windows status) live in **[BUILD.md](BUILD.md)**. The short version for macOS:
+**Linux**: no release package yet (#78). Build it from source (BUILD.md, Linux section) and install the bundle under `/usr/OFX/Plugins/`. If the plugin is missing from the Effects Library, quit Resolve and delete `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml`.
+
+**From source**: full instructions (prerequisites, build, install, verification, troubleshooting, Windows and Linux status) live in **[BUILD.md](BUILD.md)**. The short version for macOS:
 
 ```bash
 make dev            # build
@@ -126,6 +129,7 @@ The project uses a modern, streamlined build system:
 1. **Check Plugin Parameters**: Ensure "Enable NDI Output" is checked
 2. **Check Stream Status** (Stereo group): "No NDI sender — name unavailable" means the source name is already advertised on this machine (another app, or a leaked registration from a crashed session — `dns-sd -B _ndi._tcp local.` shows it). Change the NDI Source Name, or quit the process holding it
 3. **Verify Network**: Ensure devices are on the same network
+   - **Linux**: Stream Status starting `NDI off — Avahi client library missing` means `libavahi-client3` (Ubuntu) / `avahi-libs` (Rocky) isn't installed; the plugin keeps passing frames through but can't stream. If the source shows up on other machines but **no video arrives**, the firewall is blocking it, usually over IPv6: allow mDNS (5353/udp) and NDI's ports (5959–5999, 6960–6999, 7960–7999, tcp+udp) from your LAN **and from `fe80::/10`**, because receivers such as macOS connect over IPv6 link-local addresses. The `ufw` commands are in BUILD.md (Linux, "Network: Avahi and the firewall"). If the source doesn't show up at all, check `systemctl is-active avahi-daemon`: NDI on Linux is only discoverable while the daemon runs. Don't stop or restart avahi-daemon while Resolve is open; Resolve itself crashes when it goes away.
 4. **Check NDI Tools**: Use NDI Video Monitor to verify source availability
 5. **Restart DaVinci Resolve**: Sometimes required after parameter changes
 

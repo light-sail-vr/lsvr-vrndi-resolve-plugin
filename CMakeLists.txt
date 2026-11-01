@@ -80,7 +80,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Architectures (spec decision 8): Pascal + Turing + Ampere as real targets
 # plus Ampere PTX so newer GPUs (Ada, Hopper, ...) JIT forward. Must be set
 # before enable_language(CUDA).
-option(NDI_ENABLE_CUDA "Build the CUDA GPU-native pipeline" ON)
+# Linux defaults to the CPU-only plugin until the CUDA path is verified on
+# hardware (ticket #74): a CUDA build declares CUDA rendering to Resolve.
+# linux.yml still passes ON to compile-prove the module. Windows stays ON.
+if(NDI_PLATFORM_LINUX)
+    set(_ndi_cuda_default OFF)
+else()
+    set(_ndi_cuda_default ON)
+endif()
+option(NDI_ENABLE_CUDA "Build the CUDA GPU-native pipeline" ${_ndi_cuda_default})
 if(NDI_ENABLE_CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES "60-real;75-real;86-real;86-virtual")
@@ -177,8 +185,9 @@ elseif(NDI_PLATFORM_LINUX)
         set(NDI_INCLUDE_DIR "${NDI_SDK_PATH}/include")
         set(NDI_USING_STUB FALSE)
         # The SDK ships libndi.so.6 as a symlink chain; bundle the real file
-        # under its SONAME, beside the .ofx (RUNPATH $ORIGIN finds it there),
-        # with the SDK's licenses file (spec decisions 8 and 11).
+        # under its SONAME, beside the .ofx, where the plugin dlopens it
+        # (src/LinuxNDIRuntime.h), with the SDK's licenses file (spec
+        # decisions 8 and 11). Nothing links it.
         file(REAL_PATH "${NDI_SDK_LIB}" NDI_RUNTIME_FILE)
         file(GLOB NDI_LICENSE_FILES "${NDI_SDK_PATH}/licenses/*.txt")
         if(NOT NDI_LICENSE_FILES)
@@ -186,11 +195,6 @@ elseif(NDI_PLATFORM_LINUX)
                 "NDI SDK at ${NDI_SDK_PATH} has no licenses/*.txt; the NDI "
                 "redistribution terms require shipping it beside libndi.so.6.")
         endif()
-        add_library(ndi_runtime SHARED IMPORTED)
-        set_target_properties(ndi_runtime PROPERTIES
-            IMPORTED_LOCATION "${NDI_SDK_LIB}"
-            IMPORTED_SONAME "libndi.so.6")
-        set(NDI_LINK_LIB ndi_runtime)
     else()
         message(STATUS "NDI: SDK for Linux not found at ${NDI_SDK_PATH} - "
                        "linking against a stub libndi.so.6 (CI mode)")
@@ -198,11 +202,12 @@ elseif(NDI_PLATFORM_LINUX)
         set(NDI_USING_STUB TRUE)
 
         # Same export list as the Windows stub, as a shared object with the
-        # real SONAME (libndi.so.6) so the plugin's NEEDED entry matches a
-        # real SDK build. Every stub returns 0: a stub-linked plugin that
-        # somehow reaches Resolve sees NDIlib_initialize() == false and runs
-        # as a pass-through, never calls into garbage. The marker symbol lets
-        # packaging refuse a stub (`nm -D libndi.so.6 | grep ndioutput_stub`).
+        # real SONAME (libndi.so.6), staged beside the .ofx like the real
+        # runtime. Nothing links it; every stub returns 0, so a stub bundle
+        # that somehow reaches Resolve gets NULL from NDIlib_v5_load() and
+        # runs as a pass-through with a Stream Status message, never calls
+        # into garbage. The marker symbol lets packaging refuse a stub
+        # (`nm -D libndi.so.6 | grep ndioutput_stub`).
         ndi_def_exports("${NDI_DEF_FILE}" NDI_EXPORT_NAMES)
         set(NDI_STUB_SOURCE
             "// Generated from Processing.NDI.Lib.x64.def - do not edit.\n"
@@ -291,6 +296,11 @@ if(WIN32)
     list(APPEND NDI_PLUGIN_SOURCES
         src/WinFileDialog.cpp
         src/WinTimelineWatch.cpp)
+elseif(NDI_PLATFORM_LINUX)
+    # libndi.so.6 is dlopened from the bundle, never linked (spec decision 8,
+    # amended by #71: libndi NEEDs the Avahi client libraries, and a
+    # link-time import would hide the plugin on machines without them).
+    list(APPEND NDI_PLUGIN_SOURCES src/LinuxNDIRuntime.cpp)
 endif()
 add_library(NDIOutput SHARED ${NDI_PLUGIN_SOURCES})
 set_target_properties(NDIOutput PROPERTIES
@@ -323,6 +333,10 @@ target_include_directories(NDIOutput PRIVATE
     src
     "${NDI_INCLUDE_DIR}")
 target_link_libraries(NDIOutput PRIVATE ZLIB::ZLIB)
+if(NDI_PLATFORM_LINUX)
+    # Gates the plugin's NDI call sites onto the dlopened API table.
+    target_compile_definitions(NDIOutput PRIVATE NDI_RUNTIME_DLOPEN)
+endif()
 if(WIN32)
     # ole32 + shell32 + user32: the browse buttons' IFileOpenDialog and its
     # GUI-thread guard (ticket #24, src/WinFileDialog.cpp). advapi32: the
@@ -333,10 +347,12 @@ if(WIN32)
     target_link_libraries(NDIOutput PRIVATE braw_reader)
 endif()
 
-if(NDI_USING_STUB)
-    target_link_libraries(NDIOutput PRIVATE ndi_stub)
-else()
-    target_link_libraries(NDIOutput PRIVATE "${NDI_LINK_LIB}")
+if(WIN32)
+    if(NDI_USING_STUB)
+        target_link_libraries(NDIOutput PRIVATE ndi_stub)
+    else()
+        target_link_libraries(NDIOutput PRIVATE "${NDI_LINK_LIB}")
+    endif()
 endif()
 
 if(WIN32)
@@ -363,9 +379,8 @@ elseif(NDI_PLATFORM_LINUX)
     #    NEEDED (the host's may be older or newer than ours)
     #  - --no-undefined / -z defs: an unresolved symbol fails the link, not
     #    the dlopen inside Resolve (where the plugin would just vanish)
-    #  - RUNPATH=$ORIGIN (new dtags): the bundled libndi.so.6 beside the .ofx
-    #    resolves without LD_LIBRARY_PATH. BUILD_WITH_INSTALL_RPATH keeps the
-    #    build tree's binary identical (no build-dir RPATH leaks in).
+    #  - no RUNPATH: NEEDED is glibc only (libndi.so.6 is dlopened by full
+    #    path), so the loader never searches beside the plugin
     #  - --as-needed: NEEDED lists only libraries actually referenced
     # test_plugin_elf proves each one on every build.
     find_package(Threads REQUIRED)
@@ -376,8 +391,6 @@ elseif(NDI_PLATFORM_LINUX)
         CXX_VISIBILITY_PRESET hidden
         CUDA_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN ON
-        BUILD_WITH_INSTALL_RPATH ON
-        INSTALL_RPATH "\$ORIGIN"
         LINK_DEPENDS "${NDI_EXPORT_MAP}")
     target_link_options(NDIOutput PRIVATE
         -static-libstdc++
@@ -385,7 +398,6 @@ elseif(NDI_PLATFORM_LINUX)
         "-Wl,--version-script=${NDI_EXPORT_MAP}"
         -Wl,--no-undefined
         -Wl,-z,defs
-        -Wl,--enable-new-dtags
         -Wl,--as-needed)
 endif()
 
@@ -401,6 +413,7 @@ set(NDI_PORTABLE_TESTS
     test_stereo_pair
     test_platform_paths
     test_ndi_loader
+    test_linux_ndi_runtime
     test_stmap
     test_brawmap)
 if(WIN32)
@@ -419,6 +432,9 @@ foreach(_t IN LISTS NDI_PORTABLE_TESTS)
 endforeach()
 target_link_libraries(test_stmap PRIVATE ZLIB::ZLIB)
 target_link_libraries(test_brawmap PRIVATE ZLIB::ZLIB)
+# The OffLatch race test starts threads (glibc 2.28 needs -pthread).
+find_package(Threads REQUIRED)
+target_link_libraries(test_linux_ndi_runtime PRIVATE Threads::Threads)
 if(WIN32)
     target_link_libraries(test_braw_reader PRIVATE braw_reader ZLIB::ZLIB)
     target_link_libraries(test_timeline_watch PRIVATE advapi32)  # registry discovery
@@ -463,8 +479,9 @@ if(WIN32)
     add_test(NAME test_plugin_delayload
              COMMAND test_plugin_delayload "$<TARGET_FILE:NDIOutput>")
 elseif(NDI_PLATFORM_LINUX)
-    # ELF-hygiene smoke test (the Linux counterpart): NEEDED allowlist, glibc
-    # ceiling, RUNPATH, export allowlist, and an isolated dlopen. Linked with a
+    # ELF-hygiene smoke test (the Linux counterpart): NEEDED allowlist (no
+    # libndi), glibc ceiling, no RUNPATH, export allowlist, and a dlopen with
+    # no libndi.so.6 beside the plugin. Linked with a
     # static C++ runtime itself, so CI can run the Rocky-built binary in the
     # Ubuntu load-check container too.
     add_executable(test_plugin_elf tests/test_plugin_elf.cpp)
@@ -472,7 +489,14 @@ elseif(NDI_PLATFORM_LINUX)
     target_link_libraries(test_plugin_elf PRIVATE ${CMAKE_DL_LIBS})
     target_link_options(test_plugin_elf PRIVATE -static-libstdc++ -static-libgcc)
     add_test(NAME test_plugin_elf
-             COMMAND test_plugin_elf "$<TARGET_FILE:NDIOutput>" "${NDI_RUNTIME_FILE}")
+             COMMAND test_plugin_elf "$<TARGET_FILE:NDIOutput>")
+    # The log sink's per-message syslog tag (ticket #73; src/LinuxLog.h).
+    add_executable(test_linux_log tests/test_linux_log.cpp)
+    target_include_directories(test_linux_log PRIVATE src)
+    add_test(NAME test_linux_log COMMAND test_linux_log)
+    # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
+    add_test(NAME test_linux_remote
+             COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
 endif()
 
 # --- Install: the OFX bundle tree --------------------------------------------
@@ -510,11 +534,11 @@ if(WIN32)
             DESTINATION "${NDI_BUNDLE_BIN_DIR}")
     endif()
 elseif(NDI_PLATFORM_LINUX)
-    # libndi.so.6 is a load-time dependency on Linux (no delay-load), so the
-    # bundle always carries one: the real runtime plus its licenses file, or —
-    # stub builds only — the stub, so the staged tree still dlopens for the
-    # CI load check. A stub tree loads but never streams; its artifacts are
-    # named -STUB (BUILD.md, Linux section).
+    # The plugin dlopens libndi.so.6 from beside itself, so the bundle always
+    # carries one: the real runtime plus its licenses file, or - stub builds
+    # only - the stub, so the staged tree has the shipping layout. A stub
+    # tree loads but never streams; its artifacts are named -STUB (BUILD.md,
+    # Linux section).
     install(FILES "${NDI_RUNTIME_FILE}"
             DESTINATION "${NDI_BUNDLE_BIN_DIR}"
             RENAME "libndi.so.6")
