@@ -7,8 +7,8 @@ playhead of the current timeline and prints it to stdout — one line per poll
 (~2/s), empty line when nothing resolvable is under the playhead. Printing
 every poll (not just changes) doubles as a liveness heartbeat.
 
-Protocol (read by src/TimelineClipWatcher.cpp on macOS and
-src/WinTimelineWatch.cpp on Windows):
+Protocol (read by src/TimelineClipWatcher.cpp on macOS,
+src/WinTimelineWatch.cpp on Windows and src/LinuxTimelineWatch.cpp on Linux):
   - a line starting with '!' is a status/error message for the plugin log;
   - a line starting with '@color' carries the timeline's colour settings
     (issue #57 Part 3, tab-separated — see src/TimelineColor.h), printed
@@ -38,6 +38,12 @@ if IS_WINDOWS:
         os.environ.get("PROGRAMDATA", r"C:\ProgramData"),
         "Blackmagic Design", "DaVinci Resolve", "Support", "Developer",
         "Scripting", "Modules")
+elif sys.platform.startswith("linux"):
+    # The plugin sets RESOLVE_SCRIPT_API (and PYTHONPATH) from the running
+    # install; /opt/resolve is the stock one.
+    MODULES = os.path.join(
+        os.environ.get("RESOLVE_SCRIPT_API", "/opt/resolve/Developer/Scripting"),
+        "Modules")
 else:
     MODULES = ("/Library/Application Support/Blackmagic Design/DaVinci Resolve/"
                "Developer/Scripting/Modules")

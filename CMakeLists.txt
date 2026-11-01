@@ -282,9 +282,9 @@ endif()
 
 # --- The plugin --------------------------------------------------------------
 # Windows adds its Browse-dialog (#24) and Timeline (Auto) watcher (#25)
-# implementations. Linux has neither yet (tickets #76, #75): their capability
-# macros stay undefined there, so the plugin compiles them out and the
-# features soft-fail.
+# implementations; Linux its Timeline (Auto) watcher (#75). Linux has no
+# Browse dialog yet (#76): its capability macro stays undefined there, so
+# the plugin compiles the buttons out.
 set(NDI_PLUGIN_SOURCES src/NDIOutputPlugin.cpp)
 if(WIN32)
     list(APPEND NDI_PLUGIN_SOURCES
@@ -295,6 +295,8 @@ elseif(NDI_PLATFORM_LINUX)
     # amended by #71: libndi NEEDs the Avahi client libraries, and a
     # link-time import would hide the plugin on machines without them).
     list(APPEND NDI_PLUGIN_SOURCES src/LinuxNDIRuntime.cpp)
+    # Timeline (Auto) + Timeline Color = Auto (#75; NDI_TIMELINE_WATCH).
+    list(APPEND NDI_PLUGIN_SOURCES src/LinuxTimelineWatch.cpp)
 endif()
 add_library(NDIOutput SHARED ${NDI_PLUGIN_SOURCES})
 set_target_properties(NDIOutput PROPERTIES

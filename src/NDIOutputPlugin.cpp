@@ -76,7 +76,7 @@ static void ndiWinLog(const char* fmt, ...);
 #include "StreamResolution.h"
 #include "TimelineColor.h"
 #include "UYVYEncode.h"
-#include "TimelineClipWatcher.h"  // self-gates (defines NDI_TIMELINE_WATCH on macOS + Windows)
+#include "TimelineClipWatcher.h"  // self-gates (defines NDI_TIMELINE_WATCH on macOS, Windows + Linux)
 
 #include "BRAWImmersiveReader.h"  // self-gates (macOS + Windows, ticket #26)
 
