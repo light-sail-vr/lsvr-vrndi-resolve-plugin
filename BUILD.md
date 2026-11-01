@@ -260,7 +260,7 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 
 ---
 
-## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73); CUDA on hardware (#74), Timeline (Auto) (#75), Browse (#76), BRAW (#77) and packaging (#78) still to come
+## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending); Timeline (Auto) (#75), Browse (#76) and BRAW (#77) still to come
 
 Plan and decisions: [docs/linux-port-spec.md](docs/linux-port-spec.md); work items: GitHub issues labelled `linux`. Findings go to [LEARNINGS.md](LEARNINGS.md). The same `CMakeLists.txt` drives Windows and Linux; the Makefile stays the macOS harness.
 
@@ -273,7 +273,7 @@ Release binaries are built **inside a Rocky Linux 8 container** (spec decision 5
 - **Docker** (or Podman) and the image `nvidia/cuda:12.9.1-devel-rockylinux8` (CUDA 12.9, pinned like Windows; the image also exists for arm64, which is how an Apple-silicon Mac builds it).
 - Inside the container, [scripts/linux_build_deps.sh](scripts/linux_build_deps.sh) installs the rest: **gcc-toolset-13** (GCC 13 with a static `libstdc++.a`), **CMake 3.26** (≥ 3.24 is required, for static zlib), and **zlib-static** (from PowerTools). CI runs the same script.
 - **NDI SDK for Linux** (Standard, royalty-free — **not** NDI Advanced). Unpack it anywhere and point `NDI_SDK_PATH` at the `NDI SDK for Linux` folder (default: `$HOME/NDI SDK for Linux`, or the `NDI_SDK_PATH` environment variable). The build compiles against its headers and bundles `lib/x86_64-linux-gnu/libndi.so.6` with `licenses/*.txt`; it does **not** link it (below). Without the SDK the build bundles a **stub** instead (below).
-- **CUDA is off by default on Linux** until the CUDA path is verified on hardware (#74): a plain configure builds the CPU-only plugin without nvcc (works in plain `rockylinux:8`), which doesn't declare CUDA rendering to Resolve. `-DNDI_ENABLE_CUDA=ON` builds the CUDA module too (needs the CUDA image); CI always passes it. Windows still defaults to ON.
+- **CUDA is on by default** (since #74, as on Windows), so configure needs nvcc: use the CUDA image. `-DNDI_ENABLE_CUDA=OFF` builds the CPU-only plugin without nvcc (works in plain `rockylinux:8`); it doesn't declare CUDA rendering to Resolve, so every frame takes the CPU path.
 
 ### Build (Tier 0), in the container
 
@@ -288,7 +288,7 @@ Then, inside the container:
 ```bash
 bash scripts/linux_build_deps.sh
 source /opt/rh/gcc-toolset-13/enable
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DNDI_SDK_PATH=... for the real SDK, -DNDI_ENABLE_CUDA=ON for CUDA
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DNDI_SDK_PATH=... for the real SDK, -DNDI_ENABLE_CUDA=OFF for CPU-only
 cmake --build build --parallel "$(nproc)"
 ctest --test-dir build --output-on-failure
 cmake --install build --prefix stage
@@ -296,7 +296,7 @@ cmake --install build --prefix stage
 
 Use `build/` as the build directory: `test_cube_lut` and `test_stmap` write scratch files to `<repo>/build/` (LEARNINGS 2026-10-30). To mount the SDK, add `-v "/path/to/NDI SDK for Linux":/ndi` to `docker run` and pass `-DNDI_SDK_PATH=/ndi`. Running `docker commit` after `linux_build_deps.sh` saves a few minutes per session.
 
-`ctest` runs the portable unit suite under GCC: the `make test` tests minus the macOS watcher, `test_platform_paths` with a non-ASCII Linux STMap path case, and `test_ndi_def_exports`, which tests the export-list parser behind both NDI stubs. With CUDA it also runs `test_cuda_downscale`, the byte-identity test, which skips without a GPU. Byte identity relies on `--fmad=false` for nvcc and `-ffp-contract=off` for GCC, both set by CMake, so that neither compiler fuses a multiply-add the MSVC-built references keep separate. Keep the x86-64 baseline: never add `-march=native` or `-mfma` (spec decision 14). The Linux counterpart of `test_plugin_delayload` is also in the suite:
+`ctest` runs the portable unit suite under GCC: the `make test` tests minus the macOS watcher, `test_platform_paths` with a non-ASCII Linux STMap path case, and `test_ndi_def_exports`, which tests the export-list parser behind both NDI stubs. With CUDA it also runs `test_cuda_downscale`, the byte-identity test, which skips without a GPU, and so always skips in the container (next section). Byte identity relies on `--fmad=false` for nvcc and `-ffp-contract=off` for GCC, both set by CMake, so that neither compiler fuses a multiply-add the MSVC-built references keep separate. Keep the x86-64 baseline: never add `-march=native` or `-mfma` (spec decision 14). The Linux counterpart of `test_plugin_delayload` is also in the suite:
 
 **`test_plugin_elf`** parses the built `.ofx` and asserts the ELF-hygiene rules of spec decision 6, then copies the `.ofx` **alone** into a temp directory, `dlopen`s it with `RTLD_NOW` and calls the entry points:
 
@@ -355,7 +355,7 @@ scripts/linux_remote.sh cache         # the plugin's entry in ~/.local/share/DaV
 scripts/linux_remote.sh cache-reset   # delete that cache; refuses while Resolve runs (it rewrites the cache on exit)
 ```
 
-- `build` runs in `nvidia/cuda:12.9.1-devel-rockylinux8` (the CI image) with `linux_build_deps.sh` committed once on the box as `ndioutput-build:rocky8`, the SDK mounted from `~/sdks/NDI SDK for Linux`. It never uses the Ubuntu toolchain: a host build picks up `GLIBC_2.38` symbols and fails `test_plugin_elf`. Until CUDA is verified on the box (#74) it builds the **CPU-only** plugin (the Linux default, `NDI_ENABLE_CUDA=OFF`, so the plugin doesn't declare CUDA rendering); `build --cuda` builds the CUDA module too.
+- `build` runs in `nvidia/cuda:12.9.1-devel-rockylinux8` (the CI image) with `linux_build_deps.sh` committed once on the box as `ndioutput-build:rocky8`, the SDK mounted from `~/sdks/NDI SDK for Linux`. It never uses the Ubuntu toolchain: a host build picks up `GLIBC_2.38` symbols and fails `test_plugin_elf`. It builds the CUDA plugin (the default since #74); `build --cpu` builds the CPU-only one (`NDI_ENABLE_CUDA=OFF`, no CUDA rendering declared). `--cuda` is still accepted and means the default.
 - Overrides: `NDI_LINUX_HOST` (default `matt@100.80.25.1`), `NDI_LINUX_DIR`, `NDI_LINUX_SDK`, `NDI_LINUX_CACHE`. The three paths are on the box and may be absolute, `~/...` or relative; the last two both mean under the box's `$HOME`, for `sync` and the box-side steps alike. `tests/test_linux_remote.sh` (in `ctest` on Linux) checks the `cache-reset` guard, that path handling and the quoting of `logs` arguments locally.
 
 The box needs X on the **NVIDIA driver**. Its headless desktop runs a virtual 1080p monitor with a fake EDID (`/etc/X11/xorg.conf.d/10-nvidia-virtual.conf`). With X's dummy driver and software GL, Resolve's CUDA-GL interop fails as soon as the Color page opens, and Resolve reports it as GPU out of memory (LEARNINGS 2026-10-30).
@@ -366,6 +366,30 @@ Tier 1–2 after `install`:
 2. `linux_remote.sh cache` should show `LSVR.NDIOutput` with `status="0"`.
 3. Add **VR.NDI Sender** to a clip on the Color page (Render Cache off) and press play.
 4. From the Mac: `./build/ndi_verify --source "COMFYBOX (VR.NDI Sender)" --duration 5`. Pass the **full** source name. Receiving from a second machine makes Avahi and the firewall part of the test (next section).
+
+### CUDA on Linux (#74)
+
+The plugin declares CUDA render + CUDA-stream support, the same contract as Windows: Resolve set to **CUDA** hands device buffers on its own stream, and the fused kernels downscale, warp and convert them before the readback. Everything is enqueued on the host's stream; the plugin never calls `cudaDeviceSynchronize` or `cudaDeviceReset`. `journalctl -t NDIOutput` shows `Render path: GPU-native (CUDA)` once, then a `GPU-native async: …` line per frame.
+
+**Byte identity on the GPU.** The Rocky container has no GPU (the box has no `nvidia-container-toolkit`), so `test_cuda_downscale` skips there. Run it with a native Ubuntu build, out of tree. Only this test may come from the host toolchain; the plugin `.ofx` always comes from the container (glibc ceiling, above). Keep the build directory outside the synced checkout: `sync` mirrors with `--delete` and wipes anything it doesn't exclude (LEARNINGS 2026-11-01).
+
+```bash
+cd ~/ndioutput-<ticket>                    # after linux_remote.sh sync
+cmake -S . -B ../ndioutput-<ticket>-native -DCMAKE_BUILD_TYPE=Release -DNDI_ENABLE_CUDA=ON \
+      -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DNDI_SDK_PATH="$HOME/sdks/NDI SDK for Linux"
+cmake --build ../ndioutput-<ticket>-native --target test_cuda_downscale --parallel 8
+../ndioutput-<ticket>-native/test_cuda_downscale   # from the repo root: "All CUDA fast-path tests passed"
+```
+
+**CPU fallbacks**, each with a Stream Status note ([src/LinuxGpuPath.h](src/LinuxGpuPath.h)) and one `Render path: …` log line when it starts:
+
+| Cause | Path | Stream Status ends with |
+|---|---|---|
+| Resolve's GPU processing set to OpenCL (or a non-NVIDIA GPU) | Resolve hands CPU frames | `CPU path: Resolve sends CPU frames (set GPU processing to CUDA)` |
+| The plugin's CUDA init fails (no device for it, driver too old) | device frames read back on Resolve's stream | `CPU path: no CUDA device for the plugin (driver too old?)` or `CPU path: CUDA init failed (see log)` |
+| **GPU Acceleration** or **Optimal Color Format** unticked | device frames read back | `CPU path: GPU Acceleration is off` / `… Optimal Color Format is off` |
+
+To simulate an init failure on a working box, launch Resolve with `NDI_OUTPUT_FORCE_CUDA_FAIL=1` in its environment (from a terminal on the box's desktop: `NDI_OUTPUT_FORCE_CUDA_FAIL=1 /opt/resolve/bin/resolve`). The note then reads `CPU path: CUDA init failure forced (NDI_OUTPUT_FORCE_CUDA_FAIL)`. Windows has neither the notes nor the switch.
 
 ### Release packaging: the tarball and `install.sh` (ticket #78)
 
@@ -447,13 +471,13 @@ Check that the network works without Resolve by running the SDK's sample sender 
 [.github/workflows/linux.yml](.github/workflows/linux.yml) has the same triggers as `windows.yml` (pushes to `dev`, `master`, `feature/**`, PRs into `dev`, manual dispatch). The **build** job runs in `nvidia/cuda:12.9.1-devel-rockylinux8`:
 
 1. `scripts/linux_build_deps.sh`
-2. configure with `-DNDI_ENABLE_CUDA=ON` (the Linux default is OFF until #74) and build Release **including the CUDA translation units**
+2. configure with `-DNDI_ENABLE_CUDA=ON` (the default, passed explicitly) and build Release **including the CUDA translation units**
 3. `ctest`, including `test_plugin_elf`, which `dlopen`s the plugin inside Rocky 8
 4. stage the install, check the bundle layout, and re-run `test_plugin_elf` on the staged `.ofx`
 5. upload the tree as **`NDIOutput-linux-x86_64-STUB`** and the checker as `test_plugin_elf-linux-x86_64`
 6. package that tree with `package_linux_release.sh --stage stage --allow-stub` and upload the tarball as **`NDIOutput-linux-x86_64-STUB-tarball`** (the pipeline proof; the real tarball comes from the box)
 
-The **load-check-ubuntu** job then runs that checker against the artifact in `ubuntu:22.04`, so the Rocky-built binary is shown to load on the distro the tier tests use. The **installer** job runs `tests/linux_installer_container_test.sh` on the `-STUB` tarball in `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries, including `test_plugin_elf` on the installed `.ofx`. CI has no GPU, no NDI SDK and no Resolve: kernel identity runs on the workstation (#74), and Tiers 1–2 stay human.
+The **load-check-ubuntu** job then runs that checker against the artifact in `ubuntu:22.04`, so the Rocky-built binary is shown to load on the distro the tier tests use. The **installer** job runs `tests/linux_installer_container_test.sh` on the `-STUB` tarball in `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries, including `test_plugin_elf` on the installed `.ofx`. CI has no GPU, no NDI SDK and no Resolve: it compiles the CUDA module, but kernel byte identity (`test_cuda_downscale`) runs natively on the box ("CUDA on Linux", above), and Tiers 1–2 stay human.
 
 Same rule as the other platforms: any Linux build change updates this section in the same PR.
 

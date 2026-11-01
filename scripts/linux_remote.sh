@@ -4,7 +4,7 @@
 # restarts Resolve and presses play there (BUILD.md, Linux section).
 #
 #   scripts/linux_remote.sh sync            rsync this worktree to the box
-#   scripts/linux_remote.sh build [--cuda]  Rocky 8 container build + ctest + stage
+#   scripts/linux_remote.sh build [--cpu]   Rocky 8 container build + ctest + stage
 #   scripts/linux_remote.sh install         staged bundle -> /usr/OFX/Plugins
 #   scripts/linux_remote.sh logs [args]     journalctl -f -t NDIOutput [args]
 #   scripts/linux_remote.sh cache           the plugin's entry in Resolve's OFX cache
@@ -23,9 +23,10 @@
 # build runs inside the Rocky Linux 8 CUDA image CI uses (spec decision 5),
 # never on the Ubuntu host toolchain: a host build pulls GLIBC_2.38 symbols
 # and fails test_plugin_elf's 2.28 ceiling. The image with the build deps is
-# committed once on the box as ndioutput-build:rocky8. The CPU-only plugin is
-# the default until the CUDA path is verified on the box (ticket #74); --cuda
-# builds the CUDA module too (and makes the plugin declare CUDA rendering).
+# committed once on the box as ndioutput-build:rocky8. The CUDA plugin is the
+# default (ticket #74); --cpu builds the CPU-only plugin, which doesn't
+# declare CUDA rendering. The container has no GPU, so ctest skips
+# test_cuda_downscale there (BUILD.md: run it natively on the box).
 #
 # /usr/OFX/Plugins is owned by matt on the box, so install needs no sudo.
 set -euo pipefail
@@ -110,10 +111,11 @@ cmd_sync() {
 }
 
 cmd_build() {
-    local cuda=OFF
+    local cuda=ON
     case "${1:-}" in
         "") ;;
-        --cuda) cuda=ON ;;
+        --cpu) cuda=OFF ;;
+        --cuda) ;;  # the default; accepted for old command lines
         *) usage ;;
     esac
     on_box "$cuda" "$BASE_IMAGE" "$BUILD_IMAGE" <<'EOF'
