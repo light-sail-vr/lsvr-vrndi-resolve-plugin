@@ -104,7 +104,7 @@ On NVIDIA hardware the pipeline is GPU-native through the existing CUDA module. 
     - `install.sh` checks for root and replaces any existing bundle in `/usr/OFX/Plugins/`.
     - It checks for `avahi-daemon` and for an NVIDIA driver (informational only).
     - It prints the Resolve-restart and cache-reset hints.
-    - Plus `SHA256SUMS.txt`. No .deb/.rpm, and no signing for v1.
+    - Plus `SHA256SUMS-Linux.txt`. No .deb/.rpm, and no signing for v1. (*amended by #78, was `SHA256SUMS.txt`: the macOS checksums file already has that name in the same `dist/v<V>/` folder and on the same GitHub release, so a Linux file of that name would overwrite it; Windows uses `SHA256SUMS-Windows.txt` for the same reason.*)
 22. **`scripts/package_linux_release.sh`** builds inside the Rocky 8 container with the real SDK and refuses to package a stub. `scripts/publish_github_release.sh` attaches the Linux artifacts. `docs/RELEASING.md` gains a Linux hand-off that is **SSH-driven from the Mac session**: build, install and logs over SSH; Matt restarts Resolve and starts playback at the box.
 
 ## Testing Decisions

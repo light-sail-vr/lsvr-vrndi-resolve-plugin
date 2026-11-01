@@ -340,7 +340,7 @@ stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/libndi.so.6        (+ the SDK's
 stage/NDIOutput.ofx.bundle/Contents/Resources/{ndi_timeline_watch.lua,ndi_timeline_watch.py,LSVR.NDIOutput.png}
 ```
 
-It installs under `/usr/OFX/Plugins/` (the end-user `install.sh` is #78). Resolve also scans `OFX_PLUGIN_PATH`.
+It installs under `/usr/OFX/Plugins/` (end users: the tarball's `install.sh`, next sections). Resolve also scans `OFX_PLUGIN_PATH`.
 
 ### Dev loop from the Mac: `scripts/linux_remote.sh` (Tiers 0–2)
 
@@ -366,6 +366,47 @@ Tier 1–2 after `install`:
 2. `linux_remote.sh cache` should show `LSVR.NDIOutput` with `status="0"`.
 3. Add **VR.NDI Sender** to a clip on the Color page (Render Cache off) and press play.
 4. From the Mac: `./build/ndi_verify --source "COMFYBOX (VR.NDI Sender)" --duration 5`. Pass the **full** source name. Receiving from a second machine makes Avahi and the firewall part of the test (next section).
+
+### Release packaging: the tarball and `install.sh` (ticket #78)
+
+End users get `NDIOutput-<V>-linux-x86_64.tar.gz` from the GitHub release (spec decisions 21–22; no .deb/.rpm and no signing for v1). It unpacks to one folder:
+
+```
+NDIOutput-<V>-linux-x86_64/
+  NDIOutput.ofx.bundle/          the staged bundle (plugin, libndi.so.6, its licenses file, Resources)
+  install.sh  uninstall.sh       installer/linux/
+  README.txt                     installer/linux/README.txt: the end-user guide
+  LICENSE.txt  libndi_licenses.txt
+```
+
+**Build it on the Linux box** (Docker plus the Standard NDI SDK for Linux; release order and hand-off in [docs/RELEASING.md](docs/RELEASING.md) step 4a):
+
+```bash
+scripts/package_linux_release.sh            # on the box, in a release-only checkout
+```
+
+[scripts/package_linux_release.sh](scripts/package_linux_release.sh) checks `VERSION` against the source `#define`, deletes `build/` and `stage/`, builds fresh in the Rocky 8 container (`ndioutput-build:rocky8`, as `linux_remote.sh build` does, failing unless CMake says `NDI: using installed SDK`), runs `ctest` and stages. A release build always passes `-DNDI_ENABLE_CUDA=ON` and fails unless CMake reports the CUDA GPU-native pipeline, whatever CMake's Linux default is. `--cpu-only` builds with `-DNDI_ENABLE_CUDA=OFF` instead and names the tarball `NDIOutput-<V>-linux-x86_64-cpu-only.tar.gz`; `publish_github_release.sh` accepts either name (never both) and says CPU-only in the notes, so a CPU-only release is never silent. Then it packages, refusing:
+
+| Refusal | Override (never for a release) |
+| --- | --- |
+| a stub `libndi.so.6` (it exports `ndioutput_stub_libndi`; the check reads the staged file, since the plugin `dlopen`s it and doesn't `NEED` it) | `--allow-stub`, which names the tarball `…-STUB.tar.gz` (CI) |
+| uncommitted changes, in a git checkout (release mode deletes `build/` and `stage/` and must build committed source; a folder synced from the Mac has no `.git`, so RELEASING step 4a checks the Mac checkout instead) | `--force` (warns) |
+| an NDI runtime more than 30 days old (spec decision 11). The date comes from the stamp in the staged `libndi.so.6` (`NDI SDK LINUX 12:51:52 Apr 13 2026 6.3.2.0`), and the SDK is checked before the build too | `--allow-old-sdk` (warns) |
+| an SDK date it can't parse, or one after today (the check fails closed) | none |
+| a real runtime without its licenses file beside it | none |
+| a staged `.ofx` that `test_plugin_elf` rejects | none |
+
+It writes `dist/v<V>/NDIOutput-<V>-linux-x86_64.tar.gz` and `dist/v<V>/SHA256SUMS-Linux.txt` (not `SHA256SUMS.txt`, which is the macOS file in the same folder and release). `--stage DIR` packages an already-staged tree without building, which is how CI makes its `-STUB` tarball; `--sdk`, `--elf-checker` and `--out` override the defaults (`~/sdks/NDI SDK for Linux` or `NDI_SDK_PATH`, `build/test_plugin_elf`, `dist/v<V>`). [scripts/publish_github_release.sh](scripts/publish_github_release.sh) attaches both files when they're in `dist/v<V>/` on the Mac.
+
+**`install.sh`** (run as `sudo ./install.sh` from the unpacked folder; `uninstall.sh` runs `install.sh --uninstall`):
+
+- refuses without root, and refuses any argument but one `--uninstall`/`--help` (`uninstall.sh` passes none on, so `sudo ./uninstall.sh --help` only prints help);
+- creates missing `/usr/OFX` and `/usr/OFX/Plugins` with `install -d -m 755` (a root umask of 077 would otherwise hide them from Resolve);
+- copies the bundle beside `/usr/OFX/Plugins/NDIOutput.ofx.bundle`, then swaps: the old bundle is moved aside, the new one moved in, then the old one removed, or put back if the move fails (a failed copy never leaves half a bundle; a running Resolve keeps its mapped copy). Root-owned, world-readable, with only `.ofx`/`.so` executable. Re-running is safe; uninstalling twice is a no-op;
+- **warns** (never fails) when `libavahi-client.so.3`/`libavahi-common.so.3` are missing (it searches the Ubuntu and Rocky library directories, then `ldconfig -p`), when `avahi-daemon` isn't running (found by process name in `/proc`, which also works without systemd) or isn't installed, and when the bundle is a STUB;
+- prints an `NVIDIA driver:` line from `/proc/driver/nvidia/version` (information only), the Resolve-restart hint (plus "Resolve is running" when it is, found by argv[0] as in `linux_remote.sh`) and the cache-reset path in the invoking user's home (`SUDO_USER`).
+
+**Tests:** `tests/test_linux_installer.sh` drives both scripts against fake roots (the test-only `NDIOUTPUT_ROOT` stands in for `/`, `NDIOUTPUT_TEST_EUID` for the uid, and a fake `ldconfig` on `PATH` for the loader cache) and `tests/test_package_linux_release.sh` checks the packaging refusals on fake staged trees (`NDIOUTPUT_TODAY` pins the date); both run in `ctest` on Linux and by hand on the Mac. `tests/linux_installer_container_test.sh <tarball> --avahi-libs yes|no [--elf-checker PATH]` runs the real install/uninstall cycle as root inside a throwaway container; linux.yml runs it on `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries. It uses no `find` or `cmp`, because Rocky 8's base image has neither and `install.sh` mustn't need them.
 
 ### Logs on Linux
 
@@ -410,8 +451,9 @@ Check that the network works without Resolve by running the SDK's sample sender 
 3. `ctest`, including `test_plugin_elf`, which `dlopen`s the plugin inside Rocky 8
 4. stage the install, check the bundle layout, and re-run `test_plugin_elf` on the staged `.ofx`
 5. upload the tree as **`NDIOutput-linux-x86_64-STUB`** and the checker as `test_plugin_elf-linux-x86_64`
+6. package that tree with `package_linux_release.sh --stage stage --allow-stub` and upload the tarball as **`NDIOutput-linux-x86_64-STUB-tarball`** (the pipeline proof; the real tarball comes from the box)
 
-The **load-check-ubuntu** job then runs that checker against the artifact in `ubuntu:22.04`, so the Rocky-built binary is shown to load on the distro the tier tests use. CI has no GPU, no NDI SDK and no Resolve: kernel identity runs on the workstation (#74), and Tiers 1–2 stay human.
+The **load-check-ubuntu** job then runs that checker against the artifact in `ubuntu:22.04`, so the Rocky-built binary is shown to load on the distro the tier tests use. The **installer** job runs `tests/linux_installer_container_test.sh` on the `-STUB` tarball in `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries, including `test_plugin_elf` on the installed `.ofx`. CI has no GPU, no NDI SDK and no Resolve: kernel identity runs on the workstation (#74), and Tiers 1–2 stay human.
 
 Same rule as the other platforms: any Linux build change updates this section in the same PR.
 

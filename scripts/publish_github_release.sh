@@ -14,6 +14,11 @@
 # have been copied into the same dist/v<VERSION>/ directory, they are attached
 # alongside the pkg and the notes grow a Windows install section. Without them
 # the release is macOS-only and says so.
+#
+# Linux (ticket #78) works the same way: copy the tarball and
+# SHA256SUMS-Linux.txt built on the Linux box by
+# scripts/package_linux_release.sh into dist/v<VERSION>/ and they are
+# attached, with a Linux install section in the notes (docs/RELEASING.md).
 
 set -euo pipefail
 
@@ -55,6 +60,26 @@ if ls "$DIST"/*-STUB.* >/dev/null 2>&1; then
     echo "STUB artifacts present in $DIST — those never ship. Remove them and package against the real NDI SDK."
     exit 1
 fi
+# Linux artifacts: optional and all-or-nothing, like Windows. The tarball is
+# the default (CUDA) build or, from package_linux_release.sh --cpu-only, the
+# -cpu-only one; never both.
+LNX_TGZ="$DIST/NDIOutput-$VERSION-linux-x86_64.tar.gz"
+LNX_CPU_TGZ="$DIST/NDIOutput-$VERSION-linux-x86_64-cpu-only.tar.gz"
+LNX_SUMS="$DIST/SHA256SUMS-Linux.txt"
+LNX_FILES=()
+lnx_present=0
+lnx_cpu_only=0
+if [ -f "$LNX_CPU_TGZ" ]; then
+    if [ -f "$LNX_TGZ" ]; then
+        echo "Both $LNX_TGZ and $LNX_CPU_TGZ are in $DIST: keep the one SHA256SUMS-Linux.txt names."
+        exit 1
+    fi
+    LNX_TGZ="$LNX_CPU_TGZ"
+    lnx_cpu_only=1
+fi
+for f in "$LNX_TGZ" "$LNX_SUMS"; do
+    [ -f "$f" ] && lnx_present=$((lnx_present + 1))
+done
 for f in "$WIN_EXE" "$WIN_ZIP" "$WIN_SUMS"; do
     [ -f "$f" ] && win_present=$((win_present + 1))
 done
@@ -62,13 +87,32 @@ if [ "$win_present" -eq 3 ]; then
     WIN_FILES=("$WIN_EXE" "$WIN_ZIP" "$WIN_SUMS")
     echo "Windows artifacts found — this will be a macOS + Windows release."
 elif [ "$win_present" -eq 0 ]; then
-    echo "No Windows artifacts in $DIST — releasing macOS only."
+    if [ "$lnx_present" -eq 0 ]; then
+        echo "No Windows artifacts in $DIST — releasing macOS only."
+    else
+        echo "No Windows artifacts in $DIST."
+    fi
 else
     echo "Only $win_present of 3 Windows artifacts present in $DIST:"
     for f in "$WIN_EXE" "$WIN_ZIP" "$WIN_SUMS"; do
         [ -f "$f" ] || echo "  missing: $f"
     done
     echo "Copy all three from the Windows machine (scripts/package_windows_release.ps1), or remove them."
+    exit 1
+fi
+
+if [ "$lnx_present" -eq 2 ]; then
+    # The box wrote the sums; a bad copy to the Mac must not ship.
+    (cd "$DIST" && shasum -a 256 -c "$(basename "$LNX_SUMS")") || {
+        echo "$LNX_SUMS does not match the Linux tarball — copy both again from the Linux box."; exit 1; }
+    LNX_FILES=("$LNX_TGZ" "$LNX_SUMS")
+    echo "Linux artifacts found — attaching $(basename "$LNX_TGZ")."
+elif [ "$lnx_present" -eq 1 ]; then
+    echo "Only 1 of 2 Linux artifacts present in $DIST:"
+    for f in "$LNX_TGZ" "$LNX_SUMS"; do
+        [ -f "$f" ] || echo "  missing: $f"
+    done
+    echo "Copy both from the Linux box (scripts/package_linux_release.sh), or remove them."
     exit 1
 fi
 
@@ -136,6 +180,46 @@ The first NDI send raises a Windows Firewall prompt for Resolve — allow it on 
 EOF
 fi
 
+if [ "$lnx_present" -eq 2 ]; then
+    # The Linux GPU status: the one line #74 flips once the CUDA path is
+    # verified on hardware (with the README platform-table cell and the NDI
+    # runtime paragraph of installer/linux/README.txt).
+    LNX_GPU="Linux runs the CPU path today, which has a lower practical resolution ceiling (stream at Half or Quarter). The GPU-native CUDA path for NVIDIA GPUs arrives with #74."
+    if [ "$lnx_cpu_only" -eq 1 ]; then
+        LNX_GPU="This Linux build is CPU-only (\`-cpu-only\` in its name): it has no GPU-native path on any GPU, and the CPU path has a lower practical resolution ceiling (stream at Half or Quarter)."
+    fi
+    lnx_name="$(basename "$LNX_TGZ" .tar.gz)"
+    cat >> "$NOTES" <<'EOF'
+
+### Install — Linux
+
+EOF
+    printf '%s\n' \
+        "Download \`$lnx_name.tar.gz\`, then:" \
+        "" \
+        '```bash' \
+        "sha256sum -c SHA256SUMS-Linux.txt          # optional: verify the download" \
+        "tar -xzf $lnx_name.tar.gz" \
+        "cd $lnx_name" \
+        "sudo ./install.sh                          # installs to /usr/OFX/Plugins; sudo ./uninstall.sh removes it" \
+        '```' >> "$NOTES"
+    cat >> "$NOTES" <<'EOF'
+
+Restart DaVinci Resolve, then find the plugin on the Color page under **OpenFX → LSVR → VR.NDI Sender**. The NDI runtime is included. `install.sh` checks the prerequisites below and warns about anything missing; `README.txt` in the tarball has the details.
+
+**Support:** tested on Ubuntu 24.04 with Resolve Studio 21.1. Built for Rocky Linux 8+ (glibc 2.28+), the platform Blackmagic certifies: the binary is checked to load there, but only Ubuntu is tested end to end. x86-64 only.
+EOF
+    printf '\n**GPU:** %s\n' "$LNX_GPU" >> "$NOTES"
+    cat >> "$NOTES" <<'EOF'
+
+**Avahi is required:** the client libraries (`libavahi-client3` on Ubuntu, `avahi-libs` on Rocky), without which the plugin can't stream, and a running `avahi-daemon`, without which the source isn't discoverable. **Never stop `avahi-daemon` while Resolve is running**: Resolve crashes.
+
+**Firewall:** allow mDNS (5353/udp) and NDI's ports (5959–5999, 6960–6999 and 7960–7999, tcp and udp) from your LAN **and from IPv6 link-local `fe80::/10`**. With IPv4-only rules the source appears on other machines but no video arrives. `README.txt` has `ufw` and `firewalld` commands.
+
+If the plugin is missing from the Effects Library, quit Resolve, delete `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml` and start Resolve again. Plugin logs: `journalctl -t NDIOutput`. On a headless machine, run X on the NVIDIA driver with a virtual monitor: with X's dummy driver Resolve's GPU path fails.
+EOF
+fi
+
 cat >> "$NOTES" <<'EOF'
 
 ---
@@ -159,7 +243,7 @@ echo "Creating GitHub release $TAG${DRAFT_FLAG:+ (draft)}..."
 gh release create "$TAG" $DRAFT_FLAG \
     --title "$TAG" \
     --notes-file "$NOTES" \
-    "$PKG" "$ZIP" "$SUMS" ${WIN_FILES[@]+"${WIN_FILES[@]}"}
+    "$PKG" "$ZIP" "$SUMS" ${WIN_FILES[@]+"${WIN_FILES[@]}"} ${LNX_FILES[@]+"${LNX_FILES[@]}"}
 
 echo ""
 if [ "$PUBLISH" -eq 1 ]; then

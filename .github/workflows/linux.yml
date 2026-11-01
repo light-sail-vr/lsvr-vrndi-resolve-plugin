@@ -84,6 +84,23 @@ jobs:
           path: stage/
           if-no-files-found: error
 
+      # The release tarball, built by the release script from the staged stub
+      # tree (#78): the pipeline proof, like the Windows silent-install cycle.
+      # --allow-stub names it -STUB; the real one comes from the box.
+      - name: Package the -STUB release tarball
+        run: |
+          scripts/package_linux_release.sh --stage stage --allow-stub \
+            --elf-checker build/test_plugin_elf --out dist
+          ls -l dist
+          tar -tzvf dist/*-STUB.tar.gz
+
+      - name: Upload -STUB release tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: NDIOutput-linux-x86_64-STUB-tarball
+          path: dist/
+          if-no-files-found: error
+
       # The checker itself (statically linked C++ runtime) for the Ubuntu job.
       - name: Upload ELF checker
         uses: actions/upload-artifact@v4
@@ -116,3 +133,52 @@ jobs:
           set -euo pipefail
           chmod +x tools/test_plugin_elf   # artifacts drop the exec bit
           tools/test_plugin_elf stage/NDIOutput.ofx.bundle/Contents/Linux-x86-64/NDIOutput.ofx
+
+  # The tarball's install.sh/uninstall.sh for real, as root, on the distro Matt
+  # tests on and the one Blackmagic certifies, each with and without the Avahi
+  # client libraries that libndi links (#78; spec decision 10). Containers run
+  # no avahi-daemon, so its warning is always expected.
+  installer:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:24.04
+            avahi: "no"
+            setup: "true"
+          - image: ubuntu:24.04
+            avahi: "yes"
+            setup: apt-get update -qq && apt-get install -y -qq libavahi-client3
+          - image: rockylinux:8
+            avahi: "no"
+            setup: "true"
+          - image: rockylinux:8
+            avahi: "yes"
+            setup: dnf install -y -q avahi-libs
+    container: ${{ matrix.image }}
+    name: installer (${{ matrix.image }}, Avahi libs ${{ matrix.avahi }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: NDIOutput-linux-x86_64-STUB-tarball
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: test_plugin_elf-linux-x86_64
+          path: tools
+
+      - name: Container setup
+        run: ${{ matrix.setup }}
+
+      - name: install.sh / uninstall.sh cycle
+        run: |
+          set -euo pipefail
+          chmod +x tools/test_plugin_elf   # artifacts drop the exec bit
+          bash tests/linux_installer_container_test.sh dist/*-STUB.tar.gz \
+            --avahi-libs "${{ matrix.avahi }}" --elf-checker tools/test_plugin_elf

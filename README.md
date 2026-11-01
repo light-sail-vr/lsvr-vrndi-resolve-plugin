@@ -17,9 +17,21 @@ A modern OpenFX plugin that sends video frames from DaVinci Resolve to NDI (Netw
 ## Requirements
 
 - macOS 13+ (Ventura or later), Apple Silicon or Intel — or 64-bit Windows 10/11 (NVIDIA GPU for the GPU-native path; the CPU path is the automatic fallback)
-- Linux (in progress, build from source; see [BUILD.md](BUILD.md)): x86-64, glibc 2.28+ (Rocky Linux 8+, Ubuntu 22.04+), Resolve Studio. Streaming needs the Avahi client libraries (`libavahi-client3` on Ubuntu, `avahi-libs` on Rocky) and a running `avahi-daemon` (without it the source isn't discoverable). Tested on Ubuntu 24.04 with Resolve Studio 21.1, CPU path only so far
+- Linux: x86-64, glibc 2.28+ (built for Rocky Linux 8+, tested on Ubuntu 24.04), Resolve Studio. Streaming needs the Avahi client libraries (`libavahi-client3` on Ubuntu, `avahi-libs` on Rocky) and a running `avahi-daemon` (without it the source isn't discoverable)
 - DaVinci Resolve 17+ (tested with DaVinci Resolve 20)
 - Building from source additionally needs the NDI SDK 6.x ([download](https://ndi.video/for-developers/)) — see [BUILD.md](BUILD.md) for setup. The installers ship the NDI runtime inside the plugin, so end users need nothing else
+
+### Platforms
+
+<!-- The first release with a Linux tarball drops the Linux row's "not yet released". #74 flips the Linux "GPU-native path" cell once CUDA is verified on hardware; the matching lines are LNX_GPU in scripts/publish_github_release.sh and the NDI runtime paragraph of installer/linux/README.txt. -->
+
+| Platform | Release artifact | Installs to | GPU-native path | Tested on |
+|---|---|---|---|---|
+| macOS 13+ (Apple Silicon, Intel) | `NDIOutput-<version>-macOS.pkg` (signed, notarized) | `/Library/OFX/Plugins` | Metal | Resolve 20 and 21.1 |
+| Windows 10/11 x64 | `NDIOutput-<version>-Windows-x64.exe` (unsigned) | `C:\Program Files\Common Files\OFX\Plugins` | CUDA (NVIDIA) | Resolve 20 |
+| Linux x86-64, glibc 2.28+ | `NDIOutput-<version>-linux-x86_64.tar.gz` + `install.sh` (**not yet released**: build from source for now) | `/usr/OFX/Plugins` | none yet: CPU path today; CUDA (NVIDIA) arrives with #74 | Ubuntu 24.04, Resolve Studio 21.1; built for Rocky Linux 8+ (load-checked in CI, not tested end to end) |
+
+Every platform ships the NDI runtime inside the plugin and falls back to the CPU path without a supported GPU (stream at Half or Quarter there). One version and one release carry all three platforms once Linux ships its first tarball; a release whose notes say a platform lags ships without that platform's artifact.
 
 ## Installation
 
@@ -33,7 +45,15 @@ Grab the installer for your platform from the [latest release](https://github.co
 
 The first NDI send raises a firewall prompt for Resolve on Windows — allow it on private networks, or the source is discoverable but its video is unreachable from other machines.
 
-**Linux**: no release package yet (#78). Build it from source (BUILD.md, Linux section) and install the bundle under `/usr/OFX/Plugins/`. If the plugin is missing from the Effects Library, quit Resolve and delete `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml`.
+**Linux** (from the first release with a Linux tarball): download `NDIOutput-<version>-linux-x86_64.tar.gz` (and `SHA256SUMS-Linux.txt` to check it with `sha256sum -c`), then:
+
+```bash
+tar -xzf NDIOutput-<version>-linux-x86_64.tar.gz
+cd NDIOutput-<version>-linux-x86_64
+sudo ./install.sh        # installs to /usr/OFX/Plugins; safe to re-run; sudo ./uninstall.sh removes it
+```
+
+`install.sh` replaces any earlier version and warns, without failing, about anything streaming needs: the **Avahi client libraries** (`libavahi-client3` on Ubuntu, `avahi-libs` on Rocky) and a **running `avahi-daemon`**. It also prints the NVIDIA driver it found and the restart and cache-reset hints. Allow mDNS (5353/udp) and NDI's ports (5959–5999, 6960–6999, 7960–7999, tcp and udp) through the firewall from your LAN **and from IPv6 link-local `fe80::/10`**; the tarball's `README.txt` has the `ufw` and `firewalld` commands. **Never stop `avahi-daemon` while Resolve is running**: Resolve crashes. If the plugin is missing from the Effects Library, quit Resolve and delete `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml`. Logs: `journalctl -t NDIOutput`. On a headless box, run X on the NVIDIA driver with a virtual monitor; Resolve's GPU path fails on X's dummy driver (LEARNINGS 2026-10-30). Until a release carries the tarball, build from source (BUILD.md, Linux section).
 
 **From source**: full instructions (prerequisites, build, install, verification, troubleshooting, Windows and Linux status) live in **[BUILD.md](BUILD.md)**. The short version for macOS:
 
