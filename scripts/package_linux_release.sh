@@ -166,7 +166,7 @@ cp "$REPO/installer/linux/install.sh" "$REPO/installer/linux/uninstall.sh" \
 cp "$REPO/LICENSE" "$top/LICENSE.txt"
 if [ -z "$suffix" ]; then cp "${licenses[@]}" "$top/"; fi
 chmod -R u=rwX,go=rX "$top"
-chmod 755 "$top/install.sh" "$top/uninstall.sh" "$top/NDIOutput.ofx.bundle/Contents/Linux-x86-64/"*
+chmod 755 "$top/install.sh" "$top/uninstall.sh" "$top/NDIOutput.ofx.bundle/Contents/Linux-x86-64/"{*.ofx,libndi.so.6}
 
 rm -f "$OUT/$name.tar.gz"
 if tar --version 2>/dev/null | grep -q GNU; then

@@ -174,7 +174,10 @@ do_install() {
     local tmp="$DEST_DIR/.NDIOutput.ofx.bundle.new.$$"
     cp -R "$SRC" "$tmp"
     chmod -R u=rwX,go=rX "$tmp"
-    chmod 755 "$tmp/Contents/Linux-x86-64/"*
+    local f
+    for f in "$tmp"/Contents/Linux-x86-64/*.ofx "$tmp"/Contents/Linux-x86-64/*.so*; do
+        [ -f "$f" ] && chmod 755 "$f"
+    done
     rm -rf "$DEST"
     mv "$tmp" "$DEST"
     echo "Installed VR.NDI Sender to $DEST"

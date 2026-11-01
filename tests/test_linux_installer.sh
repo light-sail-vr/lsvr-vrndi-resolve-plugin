@@ -70,6 +70,10 @@ expect "installs the bundled NDI runtime" \
     [ -f "$(plugins)/NDIOutput.ofx.bundle/Contents/Linux-x86-64/libndi.so.6" ]
 expect "the plugin binary is world-readable and executable" \
     [ -x "$(plugins)/NDIOutput.ofx.bundle/Contents/Linux-x86-64/NDIOutput.ofx" ]
+expect "the NDI runtime is executable" \
+    [ -x "$(plugins)/NDIOutput.ofx.bundle/Contents/Linux-x86-64/libndi.so.6" ]
+expect "other files are not made executable" \
+    [ ! -x "$(plugins)/NDIOutput.ofx.bundle/Contents/Resources/LSVR.NDIOutput.png" ]
 expect "tells the user to restart Resolve" has "restart DaVinci Resolve" "$tmp/out"
 expect "gives the cache-reset hint" has "OFXPluginCacheV2.xml" "$tmp/out"
 
