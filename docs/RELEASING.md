@@ -1,6 +1,6 @@
 # Releasing
 
-How a version goes from `dev` to a public GitHub release with **macOS and Windows parity**. There is one `VERSION`, one `CHANGELOG.md` section and one release event, and each platform's artifacts are built on its own machine. Follow this guide whenever something merges into `master` or Matt asks to strike a release. Build and install mechanics live in [BUILD.md](../BUILD.md); this guide covers the order, the hand-offs and the human gates.
+How a version goes from `dev` to a public GitHub release with **macOS, Windows and Linux parity**. There is one `VERSION`, one `CHANGELOG.md` section and one release event, and each platform's artifacts are built on its own machine. Follow this guide whenever something merges into `master` or Matt asks to strike a release. Build and install mechanics live in [BUILD.md](../BUILD.md); this guide covers the order, the hand-offs and the human gates.
 
 ## Machines and who does what
 
@@ -8,10 +8,11 @@ How a version goes from `dev` to a public GitHub release with **macOS and Window
 |---|---|---|---|
 | **Mac** | universal macOS pkg + zip | Developer ID Application + Installer certs, `NDI_NOTARY` notarytool profile, Standard NDI SDK at `/Library/NDI SDK for Apple` | Tier 1–2: install the pkg, restart Resolve, check the stream in NDI Video Monitor |
 | **Windows workstation** | Inno Setup `.exe` + zip | VS2022, CUDA 12.9, Standard NDI 6 SDK at `C:\Program Files\NDI\NDI 6 SDK` | Tier 1–2: run the `.exe`, restart Resolve, check the stream in NDI Studio Monitor (ideally from a second machine) |
+| **Linux box** (COMFYBOX, `ssh matt@100.80.25.1`) | `.tar.gz` + `SHA256SUMS-Linux.txt`, in the Rocky 8 container | Docker image `ndioutput-build:rocky8`, Standard NDI SDK for Linux at `~/sdks/NDI SDK for Linux` | `sudo ./install.sh`, restart Resolve, press play. **Driven over SSH from the Mac session**: nobody runs an agent on the box |
 
 Both machines use the **Standard (royalty-free) NDI SDK**. A Windows build without the SDK is stub-linked: it carries a `-STUB` name and must never be released.
 
-The **Mac publishes the release** (it creates the tag, the release and the notes). The **workstation then uploads** its three files to that release and adds the Windows notes section.
+The **Mac publishes the release** (it creates the tag, the release and the notes). The Mac session builds the **Linux** artifacts on the Linux box over SSH and copies them into `dist/vX.Y.Z/` before publishing, so `publish_github_release.sh` attaches them with the macOS files (step 4a). The **workstation then uploads** its three files to that release and adds the Windows notes section.
 
 ## Human gates
 
@@ -22,6 +23,7 @@ The agent stops and waits for Matt at each of these. Nothing gets past one witho
 3. **Mac Tier 1–2** on the pkg-installed plugin, before publishing.
 4. **Publish.** The agent confirms with Matt right before `publish_github_release.sh --publish`.
 5. **Windows Tier 1–2** on the installed `.exe`, before uploading.
+6. **Linux Tier 1–2** on the tarball-installed plugin, before publishing (step 4a). Matt runs `sudo ./install.sh`, restarts Resolve and presses play at the box; the agent can't use sudo there.
 
 Other human-only steps when needed: signing setup on a new Mac (BUILD.md → "One-time signing setup"; Matt creates the certs in Xcode and runs `xcrun notarytool store-credentials NDI_NOTARY --apple-id <apple-id> --team-id 647FZYVR5Q` himself), and installing either NDI SDK.
 
@@ -56,6 +58,25 @@ git checkout master && git pull && cat VERSION     # must print X.Y.Z
 ```
 It reports "releasing macOS only" when `dist/vX.Y.Z/` has no Windows files. That is the normal path; the workstation adds them in step 5. **Done when** `gh release view vX.Y.Z` shows the pkg, zip and `SHA256SUMS.txt` and the release is not a draft.
 
+### 4a. Linux build and Tier 1–2 (Mac session, over SSH, before publishing)
+
+Run this between `package_release.sh` and the publish gate in step 4, from the same `master` checkout on the Mac. Everything happens over SSH; only the install (sudo), the Resolve restart and pressing play need Matt at the box. Build and packaging details: BUILD.md → Linux → "Release packaging".
+
+1. **SDK freshness.** The NDI SDK for Linux on the box must be no more than 30 days old (spec decision 11); `package_linux_release.sh` refuses an older one and names its date. If it does, Matt downloads the current Standard SDK for Linux from [ndi.video](https://ndi.video/for-developers/) and unpacks it over `~/sdks/NDI SDK for Linux` before you go on. Never ship with `--allow-old-sdk`.
+2. **Build and package** in a release-only folder on the box, never a dev checkout:
+   ```bash
+   NDI_LINUX_DIR=ndioutput-release scripts/linux_remote.sh sync
+   ssh matt@100.80.25.1 'cd ~/ndioutput-release && cat VERSION && scripts/package_linux_release.sh --cuda'
+   scp 'matt@100.80.25.1:ndioutput-release/dist/vX.Y.Z/*' dist/vX.Y.Z/
+   (cd dist/vX.Y.Z && shasum -a 256 -c SHA256SUMS-Linux.txt)
+   ```
+   `--cuda` builds the GPU-native path the release bar requires (spec decision 3; until #74 the Linux default is CPU-only). **Done when** the script ends with `built: …/NDIOutput-X.Y.Z-linux-x86_64.tar.gz` (it has run `ctest` in the Rocky 8 container, refused a stub and run `test_plugin_elf` on the staged tree) and the checksum check passes on the Mac.
+3. **Linux Tier 1–2 gate**, as numbered steps for Matt: quit Resolve fully; on the box, `mkdir -p /tmp/ndi-rel && tar -xzf ~/ndioutput-release/dist/vX.Y.Z/NDIOutput-X.Y.Z-linux-x86_64.tar.gz -C /tmp/ndi-rel && cd /tmp/ndi-rel/NDIOutput-X.Y.Z-linux-x86_64 && sudo ./install.sh`; start Resolve; open project **NDI Testing** → timeline `NDI_LINUX_TEST`, Color page, VR.NDI Sender on the clip; press play. Then on the Mac: `./build/ndi_verify --source "COMFYBOX (VR.NDI Sender)" --duration 5`. `ldconfig -p | grep ndi` on the box must print nothing (no NDI SDK on the loader path: the bundled runtime is what's under test).
+
+**Done when** `dist/vX.Y.Z/` holds the tarball and `SHA256SUMS-Linux.txt`, and the stream verified. If Linux lags this release, leave both files out (`publish_github_release.sh` then releases without Linux) and say so in the CHANGELOG section; upload later with `gh release upload vX.Y.Z <tarball> <sums>` and insert the `### Install — Linux` section, copied verbatim from the Linux heredoc in `scripts/publish_github_release.sh`, before the notes' final `---` footer.
+
+**The first Linux release** (spec decision 3) also needs the **release-shaped test** before it goes public: run step 4's publish **without** `--publish`, so the release is a draft; download the Linux tarball from the draft (`gh release download vX.Y.Z --pattern '*linux*' --dir /tmp/rel` on the Mac, then `scp` it to the box); repeat the Tier 1–2 steps above from that file; then `sudo ./uninstall.sh` and confirm `/usr/OFX/Plugins/NDIOutput.ofx.bundle` is gone. Publish with `gh release edit vX.Y.Z --draft=false` only after that passes. Afterwards reinstall the current dev build on the box (`linux_remote.sh install`).
+
 ### 5. Windows build and upload (workstation)
 
 Build from the tag so both platforms ship the same commit:
@@ -73,7 +94,7 @@ gh release view vX.Y.Z --json body -q .body > notes.md
 ```
 In `notes.md`, insert the `### Install — Windows` section immediately before the final `---` / NDI® trademark footer. Copy it verbatim from the Windows heredoc in `scripts/publish_github_release.sh`; that script is the single source of the wording. If the CHANGELOG section says "macOS only", replace that line with the Windows status. Then run `gh release edit vX.Y.Z --notes-file notes.md`.
 
-**Done when** the release lists six assets (macOS pkg, zip and SHA256SUMS; Windows exe, zip and SHA256SUMS-Windows) and the notes have both Install sections.
+**Done when** the release lists six assets (macOS pkg, zip and SHA256SUMS; Windows exe, zip and SHA256SUMS-Windows), plus the Linux tarball and `SHA256SUMS-Linux.txt` unless Linux lags this release, and the notes have an Install section per platform shipped.
 
 ### 6. Close out (agent, either machine)
 
@@ -84,7 +105,7 @@ Check the repo homepage README (`gh api repos/light-sail-vr/lsvr-vrndi-resolve-p
 Paste these on the other machine, filling in the version. Each one is self-contained.
 
 **Mac, after Matt merges the release PR:**
-> Strike release vX.Y.Z, macOS half. Follow docs/RELEASING.md step 4 on this Mac: pull `master`, check that VERSION is X.Y.Z, run `package_release.sh`, then stop for my Tier 1–2 check of the pkg and ask me before you publish. After publishing, give me the Windows hand-off prompt from docs/RELEASING.md with the version filled in.
+> Strike release vX.Y.Z, macOS and Linux halves. Follow docs/RELEASING.md step 4 on this Mac: pull `master`, check that VERSION is X.Y.Z, run `package_release.sh`, then stop for my Tier 1–2 check of the pkg. Then step 4a: build the Linux tarball on the Linux box over SSH and give me numbered steps for its Tier 1–2 at the box. Ask me before you publish. After publishing, give me the Windows hand-off prompt from docs/RELEASING.md with the version filled in.
 
 **Windows workstation, after the Mac has published:**
 > Release vX.Y.Z is live with macOS artifacts only. Follow docs/RELEASING.md step 5 on this workstation: check out tag vX.Y.Z, build against the Standard NDI 6 SDK (stop if it stub-links), package with `package_windows_release.ps1`, stop for my Tier 1–2 check of the installer, then upload the three files and add the Windows install section to the release notes. Report the final asset list.
@@ -99,3 +120,5 @@ Paste these on the other machine, filling in the version. Each one is self-conta
 - **`make` and link flags:** after changing `LDFLAGS`/`CXXFLAGS`, force a relink. `make` doesn't track the Makefile (LEARNINGS 2026-10-01).
 - **Plugin missing in Resolve after an install:** with Resolve closed, delete `OFXPluginCacheV2.xml` (path per platform in CLAUDE.md) and relaunch.
 - **Verify a release zip with `ditto -x -k`**, never `unzip` (LEARNINGS 2026-09-01).
+- **Linux checksums are `SHA256SUMS-Linux.txt`**, not `SHA256SUMS.txt`: the macOS file of that name sits in the same `dist/vX.Y.Z/` folder and on the same release.
+- **Never package Linux on the Ubuntu host toolchain.** `package_linux_release.sh` builds in the Rocky 8 container; a host build links `GLIBC_2.38` symbols and won't load on Rocky (BUILD.md, Linux).
