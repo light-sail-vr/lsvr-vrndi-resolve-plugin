@@ -188,6 +188,24 @@ static void testRealClipIfProvided()
     expectTrue(left.width == 256 && left.height == 256 &&
                right.width == 256 && right.height == 256,
                "real clip: maps are the requested size");
+
+    // Optional cross-platform parity artifact: the generated maps as raw
+    // interleaved (u,v) floats, <prefix>_L.f32 / <prefix>_R.f32, for diffing
+    // against the same clip read on another platform (ticket #77 compared
+    // Linux against macOS this way).
+    std::string mapsPrefix;
+    if (readEnv("NDI_TEST_BRAW_MAPS_DUMP", &mapsPrefix)) {
+        const ndi_stmap::STMapImage* maps[2] = {&left, &right};
+        const char* suffix[2] = {"_L.f32", "_R.f32"};
+        for (int i = 0; i < 2; ++i) {
+            FILE* out = openForWrite(mapsPrefix + suffix[i]);
+            if (out) {
+                fwrite(maps[i]->uv.data(), sizeof(float), maps[i]->uv.size(), out);
+                fclose(out);
+            }
+        }
+        std::printf("     (maps dumped to %s_{L,R}.f32)\n", mapsPrefix.c_str());
+    }
 }
 
 int main()
