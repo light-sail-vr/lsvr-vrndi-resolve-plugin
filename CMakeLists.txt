@@ -507,6 +507,12 @@ elseif(NDI_PLATFORM_LINUX)
     add_executable(test_linux_log tests/test_linux_log.cpp)
     target_include_directories(test_linux_log PRIVATE src)
     add_test(NAME test_linux_log COMMAND test_linux_log)
+    # The Timeline (Auto) watcher's posix_spawn seam (ticket #75;
+    # src/LinuxTimelineSpawn.h): pipe, descriptor closing, signal reset.
+    add_executable(test_linux_timeline_spawn tests/test_linux_timeline_spawn.cpp)
+    target_include_directories(test_linux_timeline_spawn PRIVATE src)
+    target_link_libraries(test_linux_timeline_spawn PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME test_linux_timeline_spawn COMMAND test_linux_timeline_spawn)
     # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
     add_test(NAME test_linux_remote
              COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
