@@ -21,7 +21,17 @@
   paths that load STMap EXRs (createInstance / instanceChanged), never render.
 */
 
+// NDI_HAS_BRAW_READER gates the plugin's call sites (the CLAUDE.md
+// capability-macro rule). macOS and Windows always build the reader; Linux
+// defines it from CMake (ticket #77) on every target linking braw_reader,
+// where the runtime is Resolve's own libBlackmagicRawAPI.so
+// (src/LinuxBRAWRuntime.h). Undefined, the Camera Metadata projection
+// soft-fails with a Stream Status message.
 #if defined(__APPLE__) || defined(_WIN32)
+#define NDI_HAS_BRAW_READER 1
+#endif
+
+#ifdef NDI_HAS_BRAW_READER
 
 #include <string>
 
@@ -42,6 +52,6 @@ bool readImmersiveCalibration(const std::string& brawPath,
 
 } // namespace ndi_brawreader
 
-#endif // __APPLE__ || _WIN32
+#endif // NDI_HAS_BRAW_READER
 
 #endif

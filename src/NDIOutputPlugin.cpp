@@ -78,7 +78,7 @@ static void ndiWinLog(const char* fmt, ...);
 #include "UYVYEncode.h"
 #include "TimelineClipWatcher.h"  // self-gates (defines NDI_TIMELINE_WATCH on macOS + Windows)
 
-#include "BRAWImmersiveReader.h"  // self-gates (macOS + Windows, ticket #26)
+#include "BRAWImmersiveReader.h"  // self-gates (NDI_HAS_BRAW_READER: macOS, Windows, Linux #77)
 
 #ifdef __APPLE__
 #include "MacFileDialog.h"
@@ -686,7 +686,7 @@ static void brawAcquireLensPair(const std::string& path, int mapSize, bool apply
         kind = "ilpd";
         calType = "meiRives";
     } else {
-#if defined(__APPLE__) || defined(_WIN32)
+#ifdef NDI_HAS_BRAW_READER
         haveJson = ndi_brawreader::readImmersiveCalibration(path, &json, &kind, &calType, &error);
 #else
         error = "BRAW camera metadata is not available on this platform";
