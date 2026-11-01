@@ -390,7 +390,9 @@ scripts/package_linux_release.sh            # on the box, in a release-only chec
 | Refusal | Override (never for a release) |
 | --- | --- |
 | a stub `libndi.so.6` (it exports `ndioutput_stub_libndi`; the check reads the staged file, since the plugin `dlopen`s it and doesn't `NEED` it) | `--allow-stub`, which names the tarball `…-STUB.tar.gz` (CI) |
+| uncommitted changes, in a git checkout (release mode deletes `build/` and `stage/` and must build committed source; a folder synced from the Mac has no `.git`, so RELEASING step 4a checks the Mac checkout instead) | `--force` (warns) |
 | an NDI runtime more than 30 days old (spec decision 11). The date comes from the stamp in the staged `libndi.so.6` (`NDI SDK LINUX 12:51:52 Apr 13 2026 6.3.2.0`), and the SDK is checked before the build too | `--allow-old-sdk` (warns) |
+| an SDK date it can't parse, or one after today (the check fails closed) | none |
 | a real runtime without its licenses file beside it | none |
 | a staged `.ofx` that `test_plugin_elf` rejects | none |
 

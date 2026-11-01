@@ -6,7 +6,9 @@
 # --allow-old-sdk, refuses a tree the ELF checker rejects, and emits
 # NDIOutput-<V>-linux-x86_64.tar.gz + SHA256SUMS-Linux.txt. The ELF checker
 # is faked here; CI and the box run the real test_plugin_elf.
-# NDIOUTPUT_TODAY pins "today" for the age guard.
+# NDIOUTPUT_TODAY (test-only) pins "today" for the age guard. The last
+# section runs release mode in throwaway git repos to check the
+# uncommitted-changes guard, which fires before any build.
 # Run: bash tests/test_package_linux_release.sh  (ctest runs it on Linux)
 set -uo pipefail
 
@@ -21,6 +23,7 @@ expect() {  # expect <name> <condition...>
     if "$@"; then echo "ok   $name"; else echo "FAIL $name" >&2; failures=$((failures + 1)); fi
 }
 has() { grep -q -- "$1" "$2"; }
+absent() { ! grep -q -- "$1" "$2"; }
 
 # A staged tree as `cmake --install build --prefix stage` lays it out with
 # the real SDK: libndi.so.6 carries the SDK's build stamp.
@@ -116,6 +119,29 @@ pack; status=$?
 cp "$tmp/libndi.real" "$bin/libndi.so.6"
 expect "SDK date unreadable: refused (exit 1)" [ "$status" -eq 1 ]
 
+# Fail closed: a date that can't be parsed, or an SDK from the future, never
+# packages, not even with --allow-old-sdk.
+TODAY=2026-04-01 pack; status=$?
+expect "SDK dated after today: refused (exit 1)" [ "$status" -eq 1 ]
+expect "SDK dated after today: says so" has "after today" "$tmp/log"
+expect "SDK dated after today: no tarball" [ ! -e "$out/$tarball" ]
+TODAY=2026-04-01 pack --allow-old-sdk; status=$?
+expect "SDK dated after today + --allow-old-sdk: still refused (exit 1)" [ "$status" -eq 1 ]
+TODAY=not-a-date pack; status=$?
+expect "today unparseable: refused (exit 1)" [ "$status" -eq 1 ]
+expect "today unparseable: says so" has "can't parse today" "$tmp/log"
+TODAY=not-a-date pack --allow-old-sdk; status=$?
+expect "today unparseable + --allow-old-sdk: still refused (exit 1)" [ "$status" -eq 1 ]
+printf 'ELF\0NDI SDK LINUX 12:51:52 Xyz 13 2026 6.3.2.0\0' > "$bin/libndi.so.6"
+pack --allow-old-sdk; status=$?
+cp "$tmp/libndi.real" "$bin/libndi.so.6"
+expect "SDK stamp unparseable + --allow-old-sdk: still refused (exit 1)" [ "$status" -eq 1 ]
+# Two stamps in one binary "line": the first one counts.
+printf 'ELF\0NDI SDK LINUX 12:51:52 Apr 13 2026 6.3.2.0\0NDI SDK LINUX 01:00:00 Jan  1 2020 5.0\0' > "$bin/libndi.so.6"
+pack; status=$?
+cp "$tmp/libndi.real" "$bin/libndi.so.6"
+expect "two stamps: the first (fresh) one counts (exit 0)" [ "$status" -eq 0 ]
+
 # --- ELF checker ------------------------------------------------------------------
 CHECKER="$tmp/elf_bad" pack; status=$?
 expect "ELF checker fails: refused (exit 1)" [ "$status" -eq 1 ]
@@ -123,6 +149,49 @@ expect "ELF checker fails: its output is shown" has "libstdc++" "$tmp/log"
 expect "ELF checker fails: no tarball" [ ! -e "$out/$tarball" ]
 CHECKER="$tmp/missing" pack; status=$?
 expect "ELF checker missing: refused (exit 1)" [ "$status" -eq 1 ]
+
+# --- release mode refuses uncommitted changes (it deletes build/ and stage/) ------
+# Each run stops before any build: no NDI SDK at --sdk (or no docker, in CI).
+mkrepo() {  # mkrepo <dir>: the packager in a throwaway checkout layout
+    rm -rf "$1"
+    mkdir -p "$1/scripts" "$1/build"
+    cp "$repo/scripts/package_linux_release.sh" "$1/scripts/"
+    cp "$repo/VERSION" "$repo/.gitignore" "$1/"
+    echo "dev build" > "$1/build/keep"
+}
+stopped_before_build() {  # the run stopped at the docker or SDK check, as expected here
+    grep -q -e "no NDI SDK" -e "builds in Docker" "$tmp/log"
+}
+release() {  # release <repo dir> [args]: release mode; output in $tmp/log
+    bash "$1/scripts/package_linux_release.sh" --sdk "$tmp/no-sdk" "${@:2}" >"$tmp/log" 2>&1
+}
+if command -v git >/dev/null 2>&1; then
+    r="$tmp/gitrepo"
+    mkrepo "$r"
+    git -C "$r" init -q
+    git -C "$r" add -A
+    git -C "$r" -c user.name=t -c user.email=t@example.com commit -q -m init
+    release "$r"; status=$?
+    expect "clean checkout: passes the guard (then stops: no SDK)" absent "uncommitted" "$tmp/log"
+    expect "clean checkout: then stops at the docker/SDK check" stopped_before_build
+    echo "local edit" >> "$r/VERSION.notes"
+    release "$r"; status=$?
+    expect "uncommitted changes: refused (exit 1)" [ "$status" -eq 1 ]
+    expect "uncommitted changes: says so" has "uncommitted changes" "$tmp/log"
+    expect "uncommitted changes: names the file" has "VERSION.notes" "$tmp/log"
+    expect "uncommitted changes: build/ is untouched" [ -f "$r/build/keep" ]
+    release "$r" --force; status=$?
+    expect "uncommitted changes + --force: passes the guard, warning" has "WARNING: --force" "$tmp/log"
+    expect "uncommitted changes + --force: then stops at the docker/SDK check" stopped_before_build
+    expect "uncommitted changes + --force: build/ is untouched by the stop" [ -f "$r/build/keep" ]
+else
+    echo "skip uncommitted-changes guard tests: no git"
+fi
+r="$tmp/rsynced"
+mkrepo "$r"
+release "$r"; status=$?
+expect "not a git checkout (rsync'd): passes the guard with a note" has "not a git checkout" "$tmp/log"
+expect "not a git checkout: then stops at the docker/SDK check" stopped_before_build
 
 echo
 if [ "$failures" -ne 0 ]; then echo "$failures test(s) failed" >&2; exit 1; fi

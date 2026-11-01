@@ -65,6 +65,7 @@ Run this between `package_release.sh` and the publish gate in step 4, from the s
 1. **SDK freshness.** The NDI SDK for Linux on the box must be no more than 30 days old (spec decision 11); `package_linux_release.sh` refuses an older one and names its date. If it does, Matt downloads the current Standard SDK for Linux from [ndi.video](https://ndi.video/for-developers/) and unpacks it over `~/sdks/NDI SDK for Linux` before you go on. Never ship with `--allow-old-sdk`.
 2. **Build and package** in a release-only folder on the box, never a dev checkout:
    ```bash
+   test -z "$(git status --porcelain)" || echo "STOP: uncommitted changes"   # the synced folder has no .git, so check here
    NDI_LINUX_DIR=ndioutput-release scripts/linux_remote.sh sync
    ssh matt@100.80.25.1 'cd ~/ndioutput-release && cat VERSION && scripts/package_linux_release.sh'
    scp 'matt@100.80.25.1:ndioutput-release/dist/vX.Y.Z/*' dist/vX.Y.Z/
