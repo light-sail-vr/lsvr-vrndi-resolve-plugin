@@ -130,6 +130,34 @@ build --cpu; expect "build --cpu builds CPU-only" built $? OFF
 build --cuda; expect "build rejects the retired --cuda flag (CUDA is the default)" refused $?
 build --bogus; expect "build rejects an unknown flag (exit 2)" refused $?
 
+# sync: .git never reaches the box, as a directory (a clone) or as a file (a
+# git worktree, whose .git points at the Mac's repo and breaks the release
+# script's `git status` there). A real rsync, through a fake ssh that runs
+# the remote half here in the scratch "box home".
+if command -v rsync >/dev/null 2>&1; then
+    sbin="$tmp/syncbin"; boxhome="$tmp/boxhome"; src="$tmp/src"
+    mkdir -p "$sbin" "$boxhome" "$src/scripts" "$src/third_party/sub/.git"
+    cat > "$sbin/ssh" <<FAKE
+#!/usr/bin/env bash
+while [ "\${1#-}" != "\$1" ]; do shift; done   # rsync may pass ssh options
+shift # the host
+cd "$boxhome" && eval "\$*"
+FAKE
+    chmod +x "$sbin/ssh"
+    cp "$repo/scripts/linux_remote.sh" "$src/scripts/"
+    echo "gitdir: /Users/someone/repo/.git/worktrees/x" > "$src/.git"
+    echo kept > "$src/third_party/sub/file"
+    touch "$src/third_party/sub/.git/HEAD"
+    PATH="$sbin:$PATH" NDI_LINUX_HOST=fakebox NDI_LINUX_DIR=synced \
+        bash "$src/scripts/linux_remote.sh" sync >"$tmp/out" 2>&1; status=$?
+    expect "sync succeeds" [ "$status" -eq 0 ]
+    expect "sync copies the tree" [ -f "$boxhome/synced/third_party/sub/file" ]
+    expect "sync leaves a worktree's .git file behind" [ ! -e "$boxhome/synced/.git" ]
+    expect "sync leaves a .git directory behind" [ ! -e "$boxhome/synced/third_party/sub/.git" ]
+else
+    echo "skip sync tests: no rsync"
+fi
+
 if [ "$failures" -ne 0 ]; then
     echo "$failures failure(s)" >&2
     exit 1
