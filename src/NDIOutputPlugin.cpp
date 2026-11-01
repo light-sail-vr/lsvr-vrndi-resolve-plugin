@@ -117,6 +117,15 @@ static void ndiWinLog(const char* fmt, ...);
 #elif defined(_WIN32)
 #define NDI_HAS_BROWSE_DIALOGS 1
 #define native_open_file_dialog win_open_file_dialog
+#elif defined(NDI_LINUX_FILE_DIALOG)
+// Linux (ticket #76): a zenity/kdialog helper process. It can also fail for
+// a reason the user can fix (neither helper installed), which
+// NDI_BROWSE_DIALOG_ERRORS surfaces in Stream Status.
+#include "LinuxFileDialog.h"
+#define NDI_HAS_BROWSE_DIALOGS 1
+#define NDI_BROWSE_DIALOG_ERRORS 1
+#define native_open_file_dialog linux_open_file_dialog
+#define native_take_file_dialog_error linux_take_file_dialog_error
 #endif
 
 // NDI SDK (Standard)
@@ -3351,6 +3360,19 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
                 NDI_LOG_TEXT((std::string("Camera clip browse picked: '") + picked + "'").c_str());
             }
         }
+#ifdef NDI_BROWSE_DIALOG_ERRORS
+        // A Browse that couldn't show a picker says why (e.g. the package to
+        // install). Written to the param directly, not through
+        // statusParamValue, so the next render's unchanged stream status
+        // doesn't overwrite it; the next real status change does.
+        const std::string browseError = native_take_file_dialog_error();
+        if (!browseError.empty()) {
+            NDI_LOG_TEXT(browseError.c_str());
+            if (myData->stereoStatusParam) {
+                gParamHost->paramSetValue(myData->stereoStatusParam, browseError.c_str());
+            }
+        }
+#endif
 #endif
 
         readInstanceParams(myData);

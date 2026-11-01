@@ -282,9 +282,9 @@ endif()
 
 # --- The plugin --------------------------------------------------------------
 # Windows adds its Browse-dialog (#24) and Timeline (Auto) watcher (#25)
-# implementations. Linux has neither yet (tickets #76, #75): their capability
-# macros stay undefined there, so the plugin compiles them out and the
-# features soft-fail.
+# implementations. Linux has its Browse dialog (#76, NDI_LINUX_FILE_DIALOG
+# below) but no watcher yet (#75): that capability macro stays undefined
+# there, so the plugin compiles it out and the feature soft-fails.
 set(NDI_PLUGIN_SOURCES src/NDIOutputPlugin.cpp)
 if(WIN32)
     list(APPEND NDI_PLUGIN_SOURCES
@@ -295,6 +295,8 @@ elseif(NDI_PLATFORM_LINUX)
     # amended by #71: libndi NEEDs the Avahi client libraries, and a
     # link-time import would hide the plugin on machines without them).
     list(APPEND NDI_PLUGIN_SOURCES src/LinuxNDIRuntime.cpp)
+    # Browse buttons spawn zenity, else kdialog (spec decision 18).
+    list(APPEND NDI_PLUGIN_SOURCES src/LinuxFileDialog.cpp)
 endif()
 add_library(NDIOutput SHARED ${NDI_PLUGIN_SOURCES})
 set_target_properties(NDIOutput PROPERTIES
@@ -335,6 +337,8 @@ target_link_libraries(NDIOutput PRIVATE ZLIB::ZLIB)
 if(NDI_PLATFORM_LINUX)
     # Gates the plugin's NDI call sites onto the dlopened API table.
     target_compile_definitions(NDIOutput PRIVATE NDI_RUNTIME_DLOPEN)
+    # The browse buttons' zenity/kdialog picker (src/LinuxFileDialog.h).
+    target_compile_definitions(NDIOutput PRIVATE NDI_LINUX_FILE_DIALOG)
 endif()
 if(WIN32)
     # ole32 + shell32 + user32: the browse buttons' IFileOpenDialog and its
@@ -414,6 +418,7 @@ set(NDI_PORTABLE_TESTS
     test_ndi_loader
     test_linux_ndi_runtime
     test_linux_gpu_path
+    test_linux_file_dialog
     test_stmap
     test_brawmap)
 if(WIN32)
@@ -506,6 +511,13 @@ elseif(NDI_PLATFORM_LINUX)
     add_executable(test_linux_log tests/test_linux_log.cpp)
     target_include_directories(test_linux_log PRIVATE src)
     add_test(NAME test_linux_log COMMAND test_linux_log)
+    # The browse dialog's real spawn against fake zenity/kdialog scripts
+    # (ticket #76; src/LinuxFileDialog.cpp). No GUI.
+    add_executable(test_linux_file_dialog_spawn
+        tests/test_linux_file_dialog_spawn.cpp
+        src/LinuxFileDialog.cpp)
+    target_include_directories(test_linux_file_dialog_spawn PRIVATE src)
+    add_test(NAME test_linux_file_dialog_spawn COMMAND test_linux_file_dialog_spawn)
     # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
     add_test(NAME test_linux_remote
              COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
