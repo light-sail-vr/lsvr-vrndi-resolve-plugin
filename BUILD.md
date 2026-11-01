@@ -389,7 +389,7 @@ cmake --build ../ndioutput-<ticket>-native --target test_cuda_downscale --parall
 | The plugin's CUDA init fails (no device for it, driver too old) | device frames read back on Resolve's stream | `CPU path: no CUDA device for the plugin (driver too old?)` or `CPU path: CUDA init failed (see log)` |
 | **GPU Acceleration** or **Optimal Color Format** unticked | device frames read back | `CPU path: GPU Acceleration is off` / `… Optimal Color Format is off` |
 
-To simulate an init failure on a working box, launch Resolve with `NDI_OUTPUT_FORCE_CUDA_FAIL=1` in its environment (from a terminal on the box's desktop: `NDI_OUTPUT_FORCE_CUDA_FAIL=1 /opt/resolve/bin/resolve`). The note then reads `CPU path: CUDA init failure forced (NDI_OUTPUT_FORCE_CUDA_FAIL)`. Windows has neither the notes nor the switch.
+To simulate an init failure on a working box, launch Resolve with `NDI_OUTPUT_FORCE_CUDA_FAIL=1` in its environment (from a terminal on the box's desktop: `NDI_OUTPUT_FORCE_CUDA_FAIL=1 sg resolve /opt/resolve/bin/resolve`, the way the box launches it). The note then reads `CPU path: CUDA init failure forced (NDI_OUTPUT_FORCE_CUDA_FAIL)`. Windows has neither the notes nor the switch.
 
 ### Release packaging: the tarball and `install.sh` (ticket #78)
 
