@@ -398,12 +398,13 @@ It writes `dist/v<V>/NDIOutput-<V>-linux-x86_64.tar.gz` and `dist/v<V>/SHA256SUM
 
 **`install.sh`** (run as `sudo ./install.sh` from the unpacked folder; `uninstall.sh` runs `install.sh --uninstall`):
 
-- refuses without root;
-- copies the bundle beside `/usr/OFX/Plugins/NDIOutput.ofx.bundle`, then swaps it in (a failed copy never leaves half a bundle; a running Resolve keeps its mapped copy), root-owned, world-readable, with only `.ofx`/`.so` executable. Re-running is safe; uninstalling twice is a no-op;
+- refuses without root, and refuses any argument but one `--uninstall`/`--help` (`uninstall.sh` passes none on, so `sudo ./uninstall.sh --help` only prints help);
+- creates missing `/usr/OFX` and `/usr/OFX/Plugins` with `install -d -m 755` (a root umask of 077 would otherwise hide them from Resolve);
+- copies the bundle beside `/usr/OFX/Plugins/NDIOutput.ofx.bundle`, then swaps: the old bundle is moved aside, the new one moved in, then the old one removed, or put back if the move fails (a failed copy never leaves half a bundle; a running Resolve keeps its mapped copy). Root-owned, world-readable, with only `.ofx`/`.so` executable. Re-running is safe; uninstalling twice is a no-op;
 - **warns** (never fails) when `libavahi-client.so.3`/`libavahi-common.so.3` are missing (it searches the Ubuntu and Rocky library directories, then `ldconfig -p`), when `avahi-daemon` isn't running (found by process name in `/proc`, which also works without systemd) or isn't installed, and when the bundle is a STUB;
 - prints an `NVIDIA driver:` line from `/proc/driver/nvidia/version` (information only), the Resolve-restart hint (plus "Resolve is running" when it is, found by argv[0] as in `linux_remote.sh`) and the cache-reset path in the invoking user's home (`SUDO_USER`).
 
-**Tests:** `tests/test_linux_installer.sh` drives both scripts against fake roots (`NDIOUTPUT_ROOT` stands in for `/`, `NDIOUTPUT_TEST_EUID` for the uid) and `tests/test_package_linux_release.sh` checks the packaging refusals on fake staged trees (`NDIOUTPUT_TODAY` pins the date); both run in `ctest` on Linux and by hand on the Mac. `tests/linux_installer_container_test.sh <tarball> --avahi-libs yes|no [--elf-checker PATH]` runs the real install/uninstall cycle as root inside a throwaway container; linux.yml runs it on `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries. It uses no `find` or `cmp`, because Rocky 8's base image has neither and `install.sh` mustn't need them.
+**Tests:** `tests/test_linux_installer.sh` drives both scripts against fake roots (the test-only `NDIOUTPUT_ROOT` stands in for `/`, `NDIOUTPUT_TEST_EUID` for the uid, and a fake `ldconfig` on `PATH` for the loader cache) and `tests/test_package_linux_release.sh` checks the packaging refusals on fake staged trees (`NDIOUTPUT_TODAY` pins the date); both run in `ctest` on Linux and by hand on the Mac. `tests/linux_installer_container_test.sh <tarball> --avahi-libs yes|no [--elf-checker PATH]` runs the real install/uninstall cycle as root inside a throwaway container; linux.yml runs it on `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries. It uses no `find` or `cmp`, because Rocky 8's base image has neither and `install.sh` mustn't need them.
 
 ### Logs on Linux
 

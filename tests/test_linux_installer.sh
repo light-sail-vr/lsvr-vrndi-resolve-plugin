@@ -2,7 +2,9 @@
 # Tests for installer/linux/install.sh and uninstall.sh (ticket #78), run
 # against fake roots: NDIOUTPUT_ROOT stands in for "/" (the plugin directory,
 # library directories, /proc and the avahi-daemon binary all live under it),
-# and NDIOUTPUT_TEST_EUID stands in for the caller's uid. The container test
+# and NDIOUTPUT_TEST_EUID stands in for the caller's uid; a fake ldconfig
+# first on PATH stands in for the loader cache (it prints $LDCONFIG_OUT, a
+# file, or nothing), so the host's own libraries never leak in. The container test
 # (tests/linux_installer_container_test.sh, linux.yml) runs the same scripts
 # for real, as root, on Ubuntu 24.04 and Rocky 8.
 # Run: bash tests/test_linux_installer.sh  (ctest runs it on Linux)
@@ -44,11 +46,16 @@ avahi_libs() {  # avahi_libs <libdir>: both client libraries, as Ubuntu or Rocky
     mkdir -p "$root/$1"
     touch "$root/$1/libavahi-client.so.3" "$root/$1/libavahi-common.so.3"
 }
+mkdir -p "$tmp/bin"
+# exec: like the real ldconfig, it dies of SIGPIPE if its reader quits early.
+printf '#!/bin/sh\n[ -n "${LDCONFIG_OUT:-}" ] || exit 0\nexec cat "$LDCONFIG_OUT"\n' > "$tmp/bin/ldconfig"
+chmod +x "$tmp/bin/ldconfig"
 run() {  # run <script> [args]: as root (uid 0) unless EUID_AS is set; output in $tmp/out
     local script="$1"; shift
-    NDIOUTPUT_ROOT="$root" NDIOUTPUT_TEST_EUID="${EUID_AS:-0}" \
+    PATH="$tmp/bin:$PATH" NDIOUTPUT_ROOT="$root" NDIOUTPUT_TEST_EUID="${EUID_AS:-0}" \
         bash "$pkg/$script" "$@" >"$tmp/out" 2>&1
 }
+mode_of() { ls -ld "$1" | cut -c1-10; }  # drwxr-xr-x
 plugins() { echo "$root/usr/OFX/Plugins"; }
 
 # --- root check ---------------------------------------------------------------
@@ -103,6 +110,44 @@ run uninstall.sh; status=$?
 expect "uninstall again is a no-op (exit 0)" [ "$status" -eq 0 ]
 expect "uninstall again says nothing was installed" has "not installed" "$tmp/out"
 
+# A root umask of 077 must not make the plugin directory unreadable to Resolve.
+newroot umask
+(umask 077 && run install.sh); status=$?
+expect "umask 077: install succeeds (exit 0)" [ "$status" -eq 0 ]
+expect "umask 077: /usr/OFX is created 755" [ "$(mode_of "$root/usr/OFX")" = drwxr-xr-x ]
+expect "umask 077: /usr/OFX/Plugins is created 755" [ "$(mode_of "$(plugins)")" = drwxr-xr-x ]
+expect "umask 077: the bundle is world-readable" \
+    [ "$(mode_of "$(plugins)/NDIOutput.ofx.bundle/Contents")" = drwxr-xr-x ]
+
+# The swap clears an interrupted run's moved-aside old bundle too.
+mkdir -p "$(plugins)/.NDIOutput.ofx.bundle.old.77"
+run install.sh
+expect "re-install clears a leftover moved-aside bundle" \
+    [ "$(ls -A "$(plugins)")" = "NDIOutput.ofx.bundle" ]
+
+# --- arguments: only one optional flag, and help never removes anything ---------
+newroot args
+run install.sh
+run uninstall.sh --help; status=$?
+expect "uninstall.sh --help: exit 0" [ "$status" -eq 0 ]
+expect "uninstall.sh --help: prints its usage" has "uninstall.sh" "$tmp/out"
+expect "uninstall.sh --help: removes nothing" [ -d "$(plugins)/NDIOutput.ofx.bundle" ]
+run uninstall.sh -h; status=$?
+expect "uninstall.sh -h: exit 0" [ "$status" -eq 0 ]
+expect "uninstall.sh -h: removes nothing" [ -d "$(plugins)/NDIOutput.ofx.bundle" ]
+run uninstall.sh --bogus; status=$?
+expect "uninstall.sh with an unknown argument: refused (exit 2)" [ "$status" -eq 2 ]
+expect "uninstall.sh with an unknown argument: removes nothing" [ -d "$(plugins)/NDIOutput.ofx.bundle" ]
+run install.sh --uninstall --help; status=$?
+expect "install.sh --uninstall with an extra argument: refused (exit 2)" [ "$status" -eq 2 ]
+expect "install.sh --uninstall with an extra argument: removes nothing" [ -d "$(plugins)/NDIOutput.ofx.bundle" ]
+run install.sh --bogus; status=$?
+expect "install.sh with an unknown argument: refused (exit 2)" [ "$status" -eq 2 ]
+newroot helponly
+run install.sh --help; status=$?
+expect "install.sh --help: exit 0" [ "$status" -eq 0 ]
+expect "install.sh --help: installs nothing" [ ! -e "$(plugins)" ]
+
 # A missing bundle beside the script is an error, not an empty install.
 newroot nobundle
 mv "$pkg/NDIOutput.ofx.bundle" "$tmp/bundle.away"
@@ -150,6 +195,27 @@ expect "rocky: warns avahi-daemon is not running" has "WARNING: avahi-daemon is 
 expect "rocky: says how to start it" has "systemctl enable --now avahi-daemon" "$tmp/out"
 expect "rocky: never suggests stopping or restarting avahi under Resolve" absent "restart avahi" "$tmp/out"
 expect "rocky: says Resolve is running and needs a full restart" has "Resolve is running" "$tmp/out"
+
+# Libraries only in the loader cache (ldconfig -p), behind a long cache: grep
+# finds them early and exits, which must not read as "missing" (a pipe into
+# grep -q under pipefail would see ldconfig die of SIGPIPE).
+newroot ldcache
+{
+    printf '\t%s (libc6,x86-64) => /opt/avahi/%s\n' \
+        libavahi-client.so.3 libavahi-client.so.3 libavahi-common.so.3 libavahi-common.so.3
+    i=0
+    while [ "$i" -lt 20000 ]; do
+        printf '\tlibfiller%d.so.1 (libc6,x86-64) => /usr/lib/libfiller%d.so.1\n' "$i" "$i"
+        i=$((i + 1))
+    done
+} > "$tmp/ldcache.txt"
+LDCONFIG_OUT="$tmp/ldcache.txt" run install.sh
+expect "Avahi libraries only in a long ldconfig cache: no warning" \
+    absent "WARNING: the Avahi client libraries" "$tmp/out"
+expect "Avahi libraries only in the ldconfig cache: reported ok" has "\[ok\] Avahi client libraries" "$tmp/out"
+printf '\tlibavahi-client.so.3.2.9 (libc6,x86-64) => /x\n' > "$tmp/ldcache.near"
+LDCONFIG_OUT="$tmp/ldcache.near" run install.sh
+expect "a near-miss name in the ldconfig cache still warns" has "WARNING: the Avahi client libraries" "$tmp/out"
 
 # Only one of the two client libraries is there: still a warning.
 newroot halfavahi

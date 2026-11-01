@@ -5,17 +5,23 @@
 #   sudo ./install.sh --uninstall  remove it (what uninstall.sh runs)
 set -euo pipefail
 
-# Test hooks (tests/test_linux_installer.sh): NDIOUTPUT_ROOT is a fake "/",
-# NDIOUTPUT_TEST_EUID a fake uid. Neither is for end users.
+# TEST-ONLY hooks, for tests/test_linux_installer.sh and nothing else: never
+# set them for a real install. NDIOUTPUT_ROOT is a fake "/" (the plugin
+# directory, library directories and /proc all live under it) and
+# NDIOUTPUT_TEST_EUID a fake uid. (The tests also put a fake ldconfig first on
+# PATH.)
 ROOT="${NDIOUTPUT_ROOT:-}"
 EUID_NOW="${NDIOUTPUT_TEST_EUID:-$(id -u)}"
 
+usage() { echo "usage: sudo $0 [--uninstall]" >&2; exit 2; }
 mode=install
+# One optional argument; anything else is refused before anything is touched.
+[ $# -le 1 ] || usage
 case "${1:-}" in
     "") ;;
     --uninstall) mode=uninstall ;;
     -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "usage: sudo $0 [--uninstall]" >&2; exit 2 ;;
+    *) usage ;;
 esac
 
 if [ "$EUID_NOW" -ne 0 ]; then
@@ -68,12 +74,16 @@ restart_hints() {
 # them the plugin passes frames through with "NDI off - Avahi client library
 # missing" in Stream Status.
 lib_present() {
-    local d
+    local d cache
     for d in usr/lib/x86_64-linux-gnu lib/x86_64-linux-gnu usr/lib64 lib64 usr/lib lib; do
         [ -e "$ROOT/$d/$1" ] && return 0
     done
-    [ -z "$ROOT" ] && command -v ldconfig >/dev/null 2>&1 &&
-        ldconfig -p 2>/dev/null | grep -q "^[[:space:]]*$1 "
+    command -v ldconfig >/dev/null 2>&1 || return 1
+    # Capture, then match: `ldconfig -p | grep -q` under pipefail reports a
+    # present library as missing when grep exits early and ldconfig dies of
+    # SIGPIPE.
+    cache="$(ldconfig -p 2>/dev/null)" || return 1
+    grep -q "^[[:space:]]*$1 " <<<"$cache"
 }
 
 check_avahi_libs() {
@@ -143,7 +153,14 @@ check_stub() {
     fi
 }
 
+# Leftovers of an interrupted install: the new copy, or the old bundle moved
+# aside for the swap.
+clear_leftovers() {
+    rm -rf "$DEST_DIR"/.NDIOutput.ofx.bundle.new.* "$DEST_DIR"/.NDIOutput.ofx.bundle.old.*
+}
+
 do_uninstall() {
+    [ -d "$DEST_DIR" ] && clear_leftovers
     if [ ! -e "$DEST" ]; then
         echo "VR.NDI Sender is not installed ($DEST is absent); nothing to remove."
         exit 0
@@ -166,20 +183,39 @@ do_install() {
     check_avahi_daemon
     check_nvidia
     echo
-    mkdir -p "$DEST_DIR"
+    # Explicit 755: under a root umask of 077, mkdir -p would leave
+    # /usr/OFX/Plugins unreadable to Resolve. Existing directories are left as
+    # they are.
+    local d
+    for d in "$ROOT/usr/OFX" "$DEST_DIR"; do
+        [ -d "$d" ] || install -d -m 755 "$d"
+    done
+    clear_leftovers
     # Copy beside the target, then swap: a failed copy never leaves a
     # half-installed bundle, and a running Resolve keeps its mapped old copy
-    # (new inodes). Leftovers of an interrupted run are cleared first.
-    rm -rf "$DEST_DIR"/.NDIOutput.ofx.bundle.new.*
+    # (new inodes).
     local tmp="$DEST_DIR/.NDIOutput.ofx.bundle.new.$$"
+    local old="$DEST_DIR/.NDIOutput.ofx.bundle.old.$$"
     cp -R "$SRC" "$tmp"
     chmod -R u=rwX,go=rX "$tmp"
     local f
     for f in "$tmp"/Contents/Linux-x86-64/*.ofx "$tmp"/Contents/Linux-x86-64/*.so*; do
         [ -f "$f" ] && chmod 755 "$f"
     done
-    rm -rf "$DEST"
-    mv "$tmp" "$DEST"
+    # The swap: old bundle aside, new one in, then the old one removed. If the
+    # new one can't go in, the old one goes back.
+    local had_old=0
+    if [ -e "$DEST" ]; then
+        mv "$DEST" "$old"
+        had_old=1
+    fi
+    if ! mv "$tmp" "$DEST"; then
+        [ "$had_old" -eq 0 ] || mv "$old" "$DEST"
+        rm -rf "$tmp"
+        echo "Could not move the new bundle into $DEST; the previous install is unchanged." >&2
+        exit 1
+    fi
+    [ "$had_old" -eq 0 ] || rm -rf "$old"
     echo "Installed VR.NDI Sender to $DEST"
     restart_hints
 }
