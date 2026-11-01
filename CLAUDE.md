@@ -36,7 +36,7 @@ The Linux port lives in this tree too, on the same `CMakeLists.txt` as Windows (
 - **Linux plugin cache:** `~/.local/share/DaVinciResolve/configs/OFXPluginCacheV2.xml`. `linux_remote.sh cache` shows the plugin's entry; `linux_remote.sh cache-reset` deletes it and refuses while Resolve runs.
 - **Live logs on Linux:** `NDI_LOG` goes to journald tagged `NDIOutput` (`scripts/linux_remote.sh logs` = `journalctl -f -t NDIOutput`), plus the optional `NDI_OUTPUT_LOG_FILE` sink. Each line is tagged per message: never call `openlog()` in the plugin, because it would re-tag Resolve's own syslog lines.
 - **Never stop `avahi-daemon` while Resolve runs on the box**: Resolve's own Bonjour layer segfaults. NDI on Linux is only discoverable while the daemon runs (docs/2026-10-30-linux-host-probes.md §5).
-- **GPU rules on Linux:** the same as Windows (enqueue on the host's CUDA stream; never `cudaDeviceSynchronize` or `cudaDeviceReset`). Until #74 verifies CUDA on the box, dev builds are CPU-only (`linux_remote.sh build`; `--cuda` opts in), so the plugin doesn't declare CUDA rendering.
+- **GPU rules on Linux:** the same as Windows (enqueue on the host's CUDA stream; never `cudaDeviceSynchronize` or `cudaDeviceReset`). Since #74 the plugin declares CUDA rendering and `linux_remote.sh build` builds CUDA (`--cpu` opts out). `test_cuda_downscale` only runs natively on the box (the container has no GPU; BUILD.md, "CUDA on Linux").
 - The LEARNINGS.md standing rule applies to Linux work unchanged, and BUILD.md stays the single source of truth for build/install.
 
 ## Key commands

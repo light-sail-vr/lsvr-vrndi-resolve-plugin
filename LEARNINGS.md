@@ -747,6 +747,41 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** new cases in `tests/test_linux_installer.sh` and `tests/test_package_linux_release.sh` that fail on the previous scripts (the SIGPIPE one through a fake `ldconfig` that `exec`s `cat` on a 1 MB cache, so it dies of SIGPIPE as the real one does).
 **Rule:** never pipe into `grep -q` (or `head`) under `pipefail` when the writer's exit status matters; capture first. A guard that compares parsed values must fail when parsing fails.
 
+### 2026-11-01 — `linux_remote.sh sync` wipes a native build directory inside the box checkout (#74)
+**Symptom:** a native Ubuntu build of `test_cuda_downscale` in `~/ndioutput-74/build-native` lost almost every file at the next `sync`; rsync printed `cannot delete non-empty directory: build-native/…` for what was left.
+**Root cause:** `sync` mirrors the Mac worktree with `rsync --delete` and excludes only `/build/`, `/stage/`, `/dist/` and the macOS bundle, so any other directory on the box side is deleted as "extraneous".
+**Fix:** build natively out of tree (`cmake -S . -B ../ndioutput-<ticket>-native`); BUILD.md "CUDA on Linux" says so.
+**Validated by:** the out-of-tree build survived later syncs and `test_cuda_downscale` passed from it.
+**Rule:** on the box, keep everything that isn't the Mac's worktree outside `NDI_LINUX_DIR`, except `build/` and `stage/`.
+
+### 2026-11-01 — Resolve's "GPU memory full" on the box was ComfyUI holding the VRAM (#74)
+**Symptom:** with the CUDA build on an 8160×7200 stereo timeline, Resolve showed several "GPU memory full" dialogs; ResolveDebug.txt has `cudaErrorMemoryAllocation` and "Flushing GPU memory" from `DeviceResourceTypeCUDA.cpp`.
+**Root cause:** not the plugin. ComfyUI (`~/comfyui-easy-install`, plus `~/comfyui-flux3`) shares the 3090 Ti and held up to 18.6 GB of its 24 GB, at up to 100% utilisation. Resolve was left about 4 GB, and one 8160×7200 float eye is about 940 MB. The plugin's own allocations are a slot ring of small UYVY buffers, and its kernels took about 1.3 ms per 8K eye.
+**Fix:** none in code. Run 8K and real-time Tier 2 on the box only while ComfyUI is unloaded or idle.
+**Validated by:** `nvidia-smi --query-compute-apps` during the dialogs, and the plugin journal (`Render path: GPU-native (CUDA)`, `wtimer gpu=1.27`).
+**Rule:** before any GPU or real-time measurement on COMFYBOX, check `nvidia-smi` for other processes; a Resolve GPU error there is a shared-GPU problem until shown otherwise.
+
+### 2026-11-01 — The Mac sees no NDI sources from the box when it's off the box's LAN (#74)
+**Symptom:** `ndi_verify --list` showed zero sources, while the plugin was attached and the box listened on 5960/5961; `ping 192.168.1.127` returned "No route to host".
+**Root cause:** the MacBook was on a different 192.168.1.x network (Wi-Fi elsewhere) and reached the box only over Tailscale. mDNS doesn't cross Tailscale, so NDI discovery found nothing.
+**Fix:** point the NDI SDK at the box directly, without touching `~/.ndi`. Write `{"ndi":{"networks":{"ips":"100.80.25.1","discovery":""}}}` to `<dir>/ndi-config.v1.json` and run `NDI_CONFIG_DIR=<dir> ./build/ndi_verify …`. Video then flows over Tailscale. That tests neither Avahi nor the LAN firewall, and the link's bandwidth caps the measured fps (3840×1080 arrived at 14.4 fps while the box sent 21.8).
+**Validated by:** `--list` found `COMFYBOX (VR.NDI Sender)` with the config and nothing without it; 1080p receives worked over Tailscale.
+**Rule:** if `ndi_verify --list` is empty, first check that the Mac can route to the box's LAN address; a Tailscale-only receive is fine for content checks, but not for discovery, firewall or full-rate cadence results.
+
+### 2026-11-01 — `Project:SetCurrentTimeline` from fuscript didn't switch the timeline (#74)
+**Symptom:** a script on the box created `NDI_LINUX_8K_STEREO` and made it current, then `SetCurrentTimeline(GetTimelineByIndex(1))` returned nothing and the current timeline stayed the 8K one. Matt then applied the node to the wrong timeline.
+**Root cause:** unknown (Resolve 21.1, Color page open, playback stopped); the call returns false/nil with no log line.
+**Fix:** none; Matt switches timelines in the Media Pool, and step lists say which timeline he should see.
+**Validated by:** re-reading `GetCurrentTimeline()` right after the call.
+**Rule:** after any scripted Resolve state change, read the state back before telling a human what's on screen.
+
+### 2026-11-01 — Review of #74: Stream Status named a path the render didn't take, one render late, and "CPU path" when no path existed (#74)
+**Symptom:** code review, not a field failure. (1) Stream Status could say GPU-native while `renderGPUFrame` had read the frame back: a `kNativeSubmitInvalid` submit, a failed Output Color or STMap upload, or a context shut down while the module still read Ready. (2) The note was set after `renderGPUFrame` returned, but the readback path's submit had already recomposed Stream Status, so it described the previous render. (3) With the plugin's own CUDA runtime unable to reach the GPU while Resolve's could, Stream Status said `CPU path: no CUDA device …` although the passthrough copy and the readback both failed and no frame was sent. (4) `gpuModule` was an `atomic<int>` behind casts, and the log-once field a plain `int` under `kOfxImageEffectRenderFullySafe`.
+**Root cause:** (1) `ndi_gpu_path::decide()` re-derived the path from the render's inputs instead of recording what the render did, a second copy of the fast-path condition that ignored every failure after the gate. (2) Note-after-submit ordering. (3) Resolve hands CUDA frames whenever its CUDA works; the plugin's statically linked cudart can't touch them when it can't initialize, so the "readback on the host stream" fallback assumed a runtime that wasn't there.
+**Fix:** `renderGPUFrame` records an `Outcome` (`fastPathGate()` is the only Linux copy of the condition; the upload and submit failures overwrite it) and stores the note before the frame is submitted. A failed passthrough copy probes `cuda_gpu_runtime_error()`; a runtime that can't reach a device latches `NDI off — the plugin's CUDA runtime can't use the GPU (<reason>) …` once per process (`OffLatch`, like `gNDIOff`), and later CUDA-frame renders fail fast. Typed `atomic<Module>`, atomic `exchange` for the log-once latch.
+**Validated by:** `test_linux_gpu_path` (gate, outcomes, distinct notes, the copy-failure verdict) and `test_cuda_runtime_unavailable`, which hides the GPU with `CUDA_VISIBLE_DEVICES=-1` and passed natively on the box's 3090 Ti: probe `no CUDA-capable device is detected`, init refused, copy and readback failed. Not yet seen in Resolve (box round 2 covers OpenCL and the forced failure).
+**Rule:** a status that names a path must be written by the code that took the path, at the point it commits, before the frame is submitted; never re-derive it from inputs afterwards. A fallback that reads device memory needs a working runtime of its own, so check that the fallback exists before calling it one.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 

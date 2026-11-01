@@ -89,6 +89,10 @@ static void ndiWinLog(const char* fmt, ...);
 #include "CudaGPUAcceleration.h"
 #endif
 
+#ifdef NDI_GPU_PATH_STATUS // Linux CUDA plugin: Stream Status says why a render took the CPU path (#74)
+#include "LinuxGpuPath.h"
+#endif
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -1004,6 +1008,17 @@ struct NDIInstanceData {
     bool asyncSending;
     bool optimalFormat;
     std::unique_ptr<GPUContext> gpuContext;
+#ifdef NDI_GPU_PATH_STATUS
+    // Render path (#74, src/LinuxGpuPath.h). All three are atomic: the plugin
+    // is kOfxImageEffectRenderFullySafe, so the host may run renders of one
+    // instance concurrently (and thumbnails among them). gpuModule is written by the GPU init and
+    // shutdown; renderPathNote by each render, read by the pump worker's
+    // status composer (a string literal, so the pointer alone is the value);
+    // lastRenderOutcome makes a change of outcome log once (-1: none yet).
+    std::atomic<ndi_gpu_path::Module> gpuModule{ndi_gpu_path::Module::NotTried};
+    std::atomic<const char*> renderPathNote{""};
+    std::atomic<int> lastRenderOutcome{-1};
+#endif
     
     // Stream resolution (issue #5): divisor 1/2/4, read fresh each render
     int resolutionDivisor;
@@ -1402,6 +1417,14 @@ static std::string hubComposeStatusLocked(SenderHub* hub, NDIInstanceData* data)
             status += ", " + data->colorStatus;
         }
     }
+#ifdef NDI_GPU_PATH_STATUS
+    // Why this render took the CPU path, if it did (#74).
+    const char* pathNote = data->renderPathNote.load(std::memory_order_relaxed);
+    if (pathNote[0] != '\0') {
+        status += ", ";
+        status += pathNote;
+    }
+#endif
     return status;
 }
 
@@ -1793,19 +1816,38 @@ static bool initializeGPUContext(NDIInstanceData* data)
     data->gpuContext->initialized = false;
 
 #ifdef NDI_GPU_NATIVE
-    // Metal on macOS, CUDA on Windows — same seam. Unavailable (e.g. a
-    // non-NVIDIA Windows machine) is not an error: the caller falls back to
+    // Metal on macOS, CUDA on Windows and Linux — same seam. Unavailable
+    // (e.g. a non-NVIDIA machine) is not an error: the caller falls back to
     // the CPU conversion path (spec decision 4's documented ceiling).
+#ifdef NDI_GPU_PATH_STATUS
+    // Simulated init failure, to test the fallback on a working box. Read on
+    // every init (each instance, each re-init), from Resolve's environment.
+    if (ndi_gpu_path::forcedFailure(std::getenv("NDI_OUTPUT_FORCE_CUDA_FAIL"))) {
+        data->gpuContext->nativeContext = nullptr;
+        data->gpuModule.store(ndi_gpu_path::Module::ForcedFailure);
+        NDI_LOG("NDI_OUTPUT_FORCE_CUDA_FAIL is set - skipping CUDA init, using the CPU path");
+        return false;
+    }
+#endif
     if (!nativeGpuAvailable()) {
         NDI_LOG(NDI_GPU_BACKEND_NAME " is not available on this system - using the CPU path");
+#ifdef NDI_GPU_PATH_STATUS
+        data->gpuModule.store(ndi_gpu_path::Module::NoDevice);
+#endif
         return false;
     }
 
     data->gpuContext->nativeContext = nativeGpuInit();
     if (!data->gpuContext->nativeContext) {
         NDI_LOG("Failed to initialize " NDI_GPU_BACKEND_NAME " GPU acceleration");
+#ifdef NDI_GPU_PATH_STATUS
+        data->gpuModule.store(ndi_gpu_path::Module::InitFailed);
+#endif
         return false;
     }
+#ifdef NDI_GPU_PATH_STATUS
+    data->gpuModule.store(ndi_gpu_path::Module::Ready);
+#endif
 
     NDI_LOG(NDI_GPU_BACKEND_NAME " GPU acceleration initialized successfully");
 
@@ -1832,6 +1874,9 @@ static void shutdownGPUContext(NDIInstanceData* data)
         nativeGpuShutdown(data->gpuContext->nativeContext);
         data->gpuContext->nativeContext = nullptr;
     }
+#endif
+#ifdef NDI_GPU_PATH_STATUS
+    data->gpuModule.store(ndi_gpu_path::Module::NotTried);
 #endif
 
     data->gpuContext->initialized = false;
@@ -2200,6 +2245,28 @@ static void showNDIOffStatus(NDIInstanceData* data)
 }
 #endif
 
+#ifdef NDI_GPU_PATH_STATUS
+// The plugin's own CUDA runtime can't use the GPU while Resolve hands it CUDA
+// frames (src/LinuxGpuPath.h): no output copy, no readback, no frame. A
+// runtime that failed to initialize stays failed, so the reason is latched
+// once per process (OffLatch, like gNDIOff) and later CUDA-frame renders
+// fail fast without touching CUDA or logging. CPU-frame renders still
+// stream; their submit recomposes Stream Status over this text.
+static ndi_linux_runtime::OffLatch gCudaOff;
+
+static void showCudaOffStatus(NDIInstanceData* data)
+{
+    if (!gCudaOff.off()) {
+        return;  // another render is mid-latch; its own call shows the reason
+    }
+    std::lock_guard<std::mutex> statusLock(data->statusMutex);
+    if (gCudaOff.reason() != data->statusParamValue) {
+        data->statusParamValue = gCudaOff.reason();
+        data->statusParamDirty = true;
+    }
+}
+#endif
+
 static bool ensureNDIReady(NDIInstanceData* data)
 {
     if (!data->enabled) {
@@ -2271,6 +2338,32 @@ static void flushStatusParam(NDIInstanceData* data)
         gParamHost->paramSetValue(data->stereoStatusParam, statusCopy.c_str());
     }
 }
+
+#ifdef NDI_GPU_PATH_STATUS
+// Record the path this render actually took (#74, src/LinuxGpuPath.h), for
+// Stream Status, and log a change of outcome once. Called where the render
+// commits to a path, BEFORE it submits the frame: the submit recomposes
+// Stream Status, which must already describe this frame.
+static void storeRenderPathNote(NDIInstanceData* data, ndi_gpu_path::Outcome outcome)
+{
+    if (!data->renderIsThumbnail) {  // a host may render thumbnails on another path; the stream's path is what counts
+        data->renderPathNote.store(ndi_gpu_path::statusNote(outcome), std::memory_order_relaxed);
+    }
+}
+
+static void noteRenderPath(NDIInstanceData* data, ndi_gpu_path::Outcome outcome)
+{
+    if (data->renderIsThumbnail) {
+        return;
+    }
+    storeRenderPathNote(data, outcome);
+    if (data->lastRenderOutcome.exchange(static_cast<int>(outcome)) != static_cast<int>(outcome)) {
+        NDI_LOG("Render path: %s",
+                outcome == ndi_gpu_path::Outcome::GpuNative ? "GPU-native (" NDI_GPU_BACKEND_NAME ")"
+                                                            : ndi_gpu_path::statusNote(outcome));
+    }
+}
+#endif
 
 // Frame arrived in CPU memory: apply the Resolution downscale (box filter) —
 // or, in Equirect mode, the STMap warp — before the conversion+send path.
@@ -2344,6 +2437,12 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
         NDI_LOG("GPU render: missing device buffer, skipping frame");
         return kOfxStatOK; // matches the CPU path's leniency for absent images
     }
+#ifdef NDI_GPU_PATH_STATUS
+    // The param as the render read it: a failed GPU init inside
+    // ensureNDIReady below clears data->gpuAcceleration, and that is a module
+    // failure, not the user switching the param off.
+    const bool gpuParam = data->gpuAcceleration;
+#endif
 
     // GPU Acceleration may have been enabled after NDI init skipped the context.
     if (data->gpuAcceleration && !data->gpuContext) {
@@ -2351,6 +2450,13 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
     }
     NativeGPUContextRef nativeContext =
         (data->gpuContext && data->gpuContext->initialized) ? data->gpuContext->nativeContext : nullptr;
+
+#ifdef NDI_GPU_PATH_STATUS
+    if (gCudaOff.off()) {
+        showCudaOffStatus(data);
+        return kOfxStatFailed;  // what the passthrough copy would return
+    }
+#endif
 
     // Host output first: the effect is a passthrough. No wait — the host
     // orders its downstream reads on the same queue (cf. the Resolve
@@ -2361,6 +2467,17 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
     data->timerBlitMs = msSince(blitT0);
     if (!blitOk) {
         NDI_LOG("GPU render: passthrough copy failed");
+#ifdef NDI_GPU_PATH_STATUS
+        // Ours or the moment's? Only a runtime that can't reach a device is
+        // latched; any other failure retries next frame.
+        const char* runtimeError = cuda_gpu_runtime_error();
+        if (ndi_gpu_path::classifyCopyFailure(runtimeError) == ndi_gpu_path::CopyFailure::RuntimeUnusable) {
+            if (gCudaOff.latch(ndi_gpu_path::cudaOffStatus(runtimeError))) {
+                NDI_LOG_TEXT(gCudaOff.reason().c_str());
+            }
+            showCudaOffStatus(data);
+        }
+#endif
         return kOfxStatFailed;
     }
 
@@ -2380,8 +2497,17 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
     const int rowFloats = srcRowBytes / static_cast<int>(sizeof(float));
 
     bool handledByFastPath = false;
-    if (data->gpuAcceleration && nativeContext &&
-        data->optimalFormat) {
+#ifdef NDI_GPU_PATH_STATUS
+    // The one gate (src/LinuxGpuPath.h); outcome then tracks what really
+    // happened and drives Stream Status.
+    ndi_gpu_path::Outcome outcome = ndi_gpu_path::fastPathGate(
+        gpuParam, data->optimalFormat, nativeContext != nullptr,
+        data->gpuModule.load());
+    const bool tryFastPath = (outcome == ndi_gpu_path::Outcome::GpuNative);
+#else
+    const bool tryFastPath = data->gpuAcceleration && nativeContext && data->optimalFormat;
+#endif
+    if (tryFastPath) {
         // Non-blocking fast path (v1.6.0): ENQUEUE the fused kernel and
         // return. No GPU wait here — that wait (plus the CPU-side NDI work
         // that followed it) was ~90ms of render-thread blocking per eye and
@@ -2417,6 +2543,16 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
             // stays INVALID and falls through to the readback + CPU warp, so
             // the stream keeps its corrected geometry (slowly) either way.
             void* mapBuffer = stmapNativeBufferForQueue(data->renderStmap, nativeContext, gpuQueue);
+#ifdef NDI_GPU_PATH_STATUS
+            if (!mapBuffer) {
+                outcome = ndi_gpu_path::Outcome::StmapUploadFailed;
+            } else {
+                // Before the submit: the pump worker recomposes Stream Status
+                // when this frame's kernel completes. Note only; the log
+                // line waits for the submit's verdict (below).
+                storeRenderPathNote(data, outcome);
+            }
+#endif
             if (mapBuffer) {
                 st = nativeGpuWarpSubmit(nativeContext, gpuQueue, srcBuffer,
                                          width, height, rowFloats,
@@ -2425,12 +2561,25 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
                                          pumpOnConvertDone, ctx);
             }
         } else if (colorOk) {
+#ifdef NDI_GPU_PATH_STATUS
+            storeRenderPathNote(data, outcome);  // before the submit, as above
+#endif
             st = nativeGpuDownscaleSubmit(nativeContext, gpuQueue, srcBuffer,
                                           width, height, rowFloats, divisor,
                                           outWidth, outHeight, color,
                                           pumpOnConvertDone, ctx);
         }
         data->timerConvMs = msSince(convT0);
+#ifdef NDI_GPU_PATH_STATUS
+        if (!colorOk) {
+            outcome = ndi_gpu_path::Outcome::ColorUploadFailed;
+        } else if (st == kNativeSubmitInvalid && outcome == ndi_gpu_path::Outcome::GpuNative) {
+            outcome = ndi_gpu_path::Outcome::SubmitInvalid;
+        }
+        if (outcome == ndi_gpu_path::Outcome::GpuNative) {
+            noteRenderPath(data, outcome);  // enqueued, or dropped on a full ring: logs a change once
+        }
+#endif
         if (st == kNativeSubmitOK) {
             handledByFastPath = true;
             NDI_LOG("GPU-native async: %dx%d device frame -> %dx%d UYVY enqueued (divisor %d, warp %d, color %d)",
@@ -2464,6 +2613,9 @@ static OfxStatus renderGPUFrame(NDIInstanceData* data, void* srcBuffer, void* ds
         if (readOk) {
             NDI_LOG("Device frame full readback -> CPU fallback path (%dx%d, gpu=%d)",
                     width, height, data->gpuAcceleration ? 1 : 0);
+#ifdef NDI_GPU_PATH_STATUS
+            noteRenderPath(data, outcome);  // before the send recomposes Stream Status
+#endif
             sendCPUFrameToNDI(data, data->readbackBuffer.data(), width, height, srcRowBytes);
         } else {
             NDI_LOG("Device frame readback failed — NDI frame skipped");
@@ -3465,6 +3617,7 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     }
 #endif
     if (gpuEnabled) {
+        // renderGPUFrame notes the path it takes (NDI_GPU_PATH_STATUS).
         OfxStatus gpuStatus = renderGPUFrame(myData, srcData, dstData, width, height,
                                              srcRowBytes, dstRowBytes, gpuQueue);
         gEffectHost->clipReleaseImage(sourceImg);
@@ -3483,6 +3636,9 @@ static OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle inAr
     }
 #endif
 
+#ifdef NDI_GPU_PATH_STATUS
+    noteRenderPath(myData, ndi_gpu_path::Outcome::HostCpuFrames);  // before the send below
+#endif
     if (srcData && dstData) {
         // Simple copy for float RGBA
         memcpy(dstData, srcData, height * dstRowBytes);
@@ -3543,11 +3699,12 @@ static OfxStatus describe(OfxImageEffectHandle effect)
     // supported — the host chooses per render via kOfxImageEffectPropMetalEnabled.
     gPropHost->propSetString(props, kOfxImageEffectPropMetalRenderSupported, 0, "true");
 #elif defined(NDI_HAS_CUDA)
-    // CUDA render + CUDA-stream support, Windows only (ticket #22, spec
-    // decision 4): accept frames as CUDA device buffers, with the host's
-    // stream handed per render via kOfxImageEffectPropCudaStream. CPU
-    // rendering stays supported — non-NVIDIA machines keep receiving CPU
-    // buffers and the existing CPU path.
+    // CUDA render + CUDA-stream support, on Windows (ticket #22, spec
+    // decision 4) and Linux (ticket #74, Linux spec decision 12): accept
+    // frames as CUDA device buffers, with the host's stream handed per
+    // render via kOfxImageEffectPropCudaStream. CPU rendering stays
+    // supported — non-NVIDIA machines, and Resolve set to OpenCL, keep
+    // receiving CPU buffers and the existing CPU path.
     gPropHost->propSetString(props, kOfxImageEffectPropCudaRenderSupported, 0, "true");
     gPropHost->propSetString(props, kOfxImageEffectPropCudaStreamSupported, 0, "true");
 #endif
