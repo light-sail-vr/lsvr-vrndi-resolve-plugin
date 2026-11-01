@@ -414,6 +414,7 @@ set(NDI_PORTABLE_TESTS
     test_ndi_loader
     test_linux_ndi_runtime
     test_linux_gpu_path
+    test_linux_timeline_watch
     test_stmap
     test_brawmap)
 if(WIN32)
