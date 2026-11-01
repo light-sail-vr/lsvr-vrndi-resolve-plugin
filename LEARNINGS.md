@@ -782,6 +782,20 @@ The `50eacc1` scaffold (host-memory CUDA sketch, D3D11 "fallback" that converted
 **Validated by:** `test_linux_gpu_path` (gate, outcomes, distinct notes, the copy-failure verdict) and `test_cuda_runtime_unavailable`, which hides the GPU with `CUDA_VISIBLE_DEVICES=-1` and passed natively on the box's 3090 Ti: probe `no CUDA-capable device is detected`, init refused, copy and readback failed. Not yet seen in Resolve (box round 2 covers OpenCL and the forced failure).
 **Rule:** a status that names a path must be written by the code that took the path, at the point it commits, before the frame is submitted; never re-derive it from inputs afterwards. A fallback that reads device memory needs a working runtime of its own, so check that the fallback exists before calling it one.
 
+### 2026-11-01 — zenity exits 1 without a display, the same code as Cancel (Linux) (#76)
+**Symptom:** found while designing the Linux Browse dialog: `env -u DISPLAY zenity --file-selection` on the box printed `Gtk-WARNING: Failed to open display` to stderr and exited **1**, the same status as Cancel or closing the window. A Browse click from a Resolve without a display would have looked like the user cancelled. Separately, the first spawn test let the box's real `/usr/bin/zenity` answer in place of the fake `kdialog` it was testing, because `/usr/bin` was on the test's `PATH`.
+**Root cause:** zenity (4.0.1) has no distinct exit status for "couldn't start GTK"; only stderr says so. Any test that puts system directories on `PATH` sees the machine's real helpers.
+**Fix:** `runDialog` (src/LinuxFileDialog.h) fails with a Stream Status message when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set, before spawning anything. `test_linux_file_dialog_spawn` puts only the fake helpers' directory on `PATH`, and its scripts call coreutils by absolute path.
+**Validated by:** the box (`exit=1` plus the warning); `test_linux_file_dialog` and `test_linux_file_dialog_spawn` green in the Rocky 8 container and on the Ubuntu host.
+**Rule:** never treat a helper's exit 1 as Cancel unless the environment could have shown a window; tests that fake a program own the whole `PATH`.
+
+### 2026-11-01 — `NDI_LINUX_DIR=~/x` unquoted is expanded on the Mac, not the box (#76)
+**Symptom:** `export NDI_LINUX_DIR=~/ndioutput-76 && scripts/linux_remote.sh sync` failed with `rsync: mkdir "/Users/matthewcelia/ndioutput-76" failed`.
+**Root cause:** the Mac's shell expands an unquoted `~/` in an assignment before `linux_remote.sh` runs, so the script got the Mac's home path. The script's own `~/x` handling (`box_path`, 2026-10-30 review entry) only sees a literal `~`.
+**Fix:** none needed in the script; quote it: `NDI_LINUX_DIR='~/ndioutput-76'`, or use a relative path (`NDI_LINUX_DIR=ndioutput-76`, which also means under the box's `$HOME`).
+**Validated by:** the quoted form synced and built in `~/ndioutput-76` on the box.
+**Rule:** pass box paths to `linux_remote.sh` quoted or relative, never as a bare `~/`.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
