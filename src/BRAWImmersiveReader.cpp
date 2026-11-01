@@ -1,8 +1,8 @@
 // Implementation of src/BRAWImmersiveReader.h — see that header for the
 // contract. Compiles the vendored BRAW dispatch shim into this one TU; the
 // shim locates the BRAW runtime at runtime relative to the host (bundle on
-// macOS, exe on Windows — inside Resolve either way it binds Resolve's own
-// copy).
+// macOS, exe on Windows, exe's ../libs on Linux — inside Resolve every way
+// it binds Resolve's own copy).
 #ifdef __APPLE__
 
 #include "BRAWImmersiveReader.h"
@@ -332,4 +332,137 @@ bool readImmersiveCalibration(const std::string& brawPath,
 
 } // namespace ndi_brawreader
 
-#endif // __APPLE__ / _WIN32
+#elif defined(__linux__)
+
+// Linux half (ticket #77, spec decision 19), mirroring the blocks above. The
+// header is the Linux SDK's (third_party/braw/Linux/, Boost-style license):
+// the same interfaces as macOS with UTF-8 `const char*` strings in place of
+// CFStringRef. Instead of the SDK's dispatch shim the plugin binds the
+// runtime through its own dlopen seam (src/LinuxBRAWRuntime.h) — inside
+// Resolve that is /opt/resolve/libs/libBlackmagicRawAPI.so, Resolve's own
+// copy, found relative to /proc/self/exe; nothing Blackmagic is bundled.
+
+#include "BRAWImmersiveReader.h"
+
+#include "BlackmagicRawAPI.h"
+#include "LinuxBRAWRuntime.h"
+
+#include <cstdio>
+#include <cstring>
+#include <string>
+
+namespace ndi_brawreader {
+
+namespace {
+
+typedef IBlackmagicRawFactory* (*CreateFactoryFn)(void);
+typedef HRESULT (*VariantFn)(Variant*);
+
+std::string hresultHex(HRESULT hr)
+{
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%08x", static_cast<unsigned>(hr));
+    return std::string(buf);
+}
+
+// Fetch one string-typed immersive attribute; false only for genuinely
+// absent/mistyped values. VariantClear (the runtime's) frees the string.
+bool getStringAttribute(const ndi_linux_braw::Api& api,
+                        IBlackmagicRawClipImmersiveVideo* immersive,
+                        BlackmagicRawImmersiveAttribute attribute,
+                        std::string* out)
+{
+    const VariantFn variantInit = reinterpret_cast<VariantFn>(api.variantInit);
+    const VariantFn variantClear = reinterpret_cast<VariantFn>(api.variantClear);
+    Variant value;
+    std::memset(&value, 0, sizeof(value));
+    variantInit(&value);
+    if (immersive->GetImmersiveAttribute(attribute, &value) != S_OK) {
+        return false;
+    }
+    bool ok = false;
+    if (value.vt == blackmagicRawVariantTypeString && value.bstrVal != nullptr) {
+        *out = value.bstrVal;
+        ok = !out->empty();
+    }
+    variantClear(&value);
+    return ok;
+}
+
+} // namespace
+
+bool readImmersiveCalibration(const std::string& brawPath,
+                              std::string* jsonOut,
+                              std::string* projectionKindOut,
+                              std::string* calibrationTypeOut,
+                              std::string* error)
+{
+    const auto fail = [&](const std::string& msg) {
+        if (error) *error = msg;
+        return false;
+    };
+
+    std::string loadError;
+    const ndi_linux_braw::Api* api = ndi_linux_braw::runtime(&loadError);
+    if (api == nullptr) {
+        return fail(loadError);
+    }
+    IBlackmagicRawFactory* factory =
+        reinterpret_cast<CreateFactoryFn>(api->createFactory)();
+    if (factory == nullptr) {
+        return fail("BRAW factory creation failed (" + api->libraryPath + ")");
+    }
+
+    IBlackmagicRaw* codec = nullptr;
+    IBlackmagicRawClip* clip = nullptr;
+    IBlackmagicRawClipImmersiveVideo* immersive = nullptr;
+    bool ok = false;
+
+    do {
+        HRESULT hr = factory->CreateCodec(&codec);
+        if (hr != S_OK || codec == nullptr) {
+            fail("BRAW codec creation failed (" + hresultHex(hr) + ")");
+            break;
+        }
+        hr = codec->OpenClip(brawPath.c_str(), &clip);
+        if (hr != S_OK || clip == nullptr) {
+            fail("cannot open '" + brawPath + "' as BRAW (" + hresultHex(hr) + ")");
+            break;
+        }
+        if (clip->QueryInterface(IID_IBlackmagicRawClipImmersiveVideo,
+                                 reinterpret_cast<void**>(&immersive)) != S_OK ||
+            immersive == nullptr) {
+            immersive = nullptr;
+            fail("clip has no immersive calibration (URSA Cine Immersive BRAW required)");
+            break;
+        }
+        std::string json;
+        if (!getStringAttribute(*api, immersive,
+                                blackmagicRawImmersiveAttributeOpticalProjectionData, &json)) {
+            fail("clip carries no OpticalProjectionData calibration blob");
+            break;
+        }
+        if (jsonOut) *jsonOut = json;
+        if (projectionKindOut) {
+            getStringAttribute(*api, immersive,
+                               blackmagicRawImmersiveAttributeOpticalProjectionKind,
+                               projectionKindOut);
+        }
+        if (calibrationTypeOut) {
+            getStringAttribute(*api, immersive,
+                               blackmagicRawImmersiveAttributeOpticalCalibrationType,
+                               calibrationTypeOut);
+        }
+        ok = true;
+    } while (false);
+
+    if (immersive) immersive->Release();
+    if (clip) clip->Release();
+    if (codec) codec->Release();
+    factory->Release();
+    return ok;
+}
+
+} // namespace ndi_brawreader
+
+#endif // __APPLE__ / _WIN32 / __linux__
