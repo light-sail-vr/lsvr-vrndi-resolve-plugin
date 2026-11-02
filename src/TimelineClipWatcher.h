@@ -29,7 +29,11 @@
   posix_spawn/pipe in src/TimelineClipWatcher.cpp, Windows CreateProcessW/
   anonymous pipe in src/WinTimelineWatch.cpp (spawn + discovery seam in
   src/WinTimelineWatch.h; the macOS seam is src/MacTimelineWatch.h). NDI_TIMELINE_WATCH gates the plugin's call sites,
-  replacing the __APPLE__ checks from the macOS-only era.
+  replacing the __APPLE__ checks from the macOS-only era. Linux (ticket #75):
+  src/LinuxTimelineWatch.cpp, a port of the macOS posix_spawn watcher, with
+  its discovery seam in src/LinuxTimelineWatch.h and spawn seam in
+  src/LinuxTimelineSpawn.h (fuscript at <resolve>/libs/Fusion/fuscript,
+  found from /proc/self/exe; /usr/bin/python3 as the fallback).
 
   Threading: the change callback fires on the watcher's reader thread —
   callees synchronize their own state (the plugin swaps maps under the same
@@ -38,7 +42,7 @@
   the first callback it is given.
 */
 
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
 #define NDI_TIMELINE_WATCH 1
 #endif
 
