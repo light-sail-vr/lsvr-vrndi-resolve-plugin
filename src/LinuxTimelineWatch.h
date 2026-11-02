@@ -146,7 +146,8 @@ inline std::vector<std::string> pythonHelperEnvironment(const std::vector<std::s
             continue;
         }
         if (keyIs(entry, "PYTHONPATH")) {
-            const std::string inherited = entry.substr(sizeof("PYTHONPATH"));
+            static const std::string kPrefix = "PYTHONPATH=";
+            const std::string inherited = entry.substr(kPrefix.size());
             if (!inherited.empty()) {
                 pythonPath += ":" + inherited;
             }
