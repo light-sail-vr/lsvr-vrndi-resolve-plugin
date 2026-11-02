@@ -304,9 +304,9 @@ endif()
 
 # --- The plugin --------------------------------------------------------------
 # Windows adds its Browse-dialog (#24) and Timeline (Auto) watcher (#25)
-# implementations. Linux has neither yet (tickets #76, #75): their capability
-# macros stay undefined there, so the plugin compiles them out and the
-# features soft-fail.
+# implementations; Linux its Timeline (Auto) watcher (#75). Linux has no
+# Browse dialog yet (#76): its capability macro stays undefined there, so
+# the plugin compiles the buttons out.
 set(NDI_PLUGIN_SOURCES src/NDIOutputPlugin.cpp)
 if(WIN32)
     list(APPEND NDI_PLUGIN_SOURCES
@@ -317,6 +317,8 @@ elseif(NDI_PLATFORM_LINUX)
     # amended by #71: libndi NEEDs the Avahi client libraries, and a
     # link-time import would hide the plugin on machines without them).
     list(APPEND NDI_PLUGIN_SOURCES src/LinuxNDIRuntime.cpp)
+    # Timeline (Auto) + Timeline Color = Auto (#75; NDI_TIMELINE_WATCH).
+    list(APPEND NDI_PLUGIN_SOURCES src/LinuxTimelineWatch.cpp)
 endif()
 add_library(NDIOutput SHARED ${NDI_PLUGIN_SOURCES})
 set_target_properties(NDIOutput PROPERTIES
@@ -438,6 +440,7 @@ set(NDI_PORTABLE_TESTS
     test_ndi_loader
     test_linux_ndi_runtime
     test_linux_gpu_path
+    test_linux_timeline_watch
     test_linux_braw_runtime
     test_stmap
     test_brawmap)
@@ -537,6 +540,12 @@ elseif(NDI_PLATFORM_LINUX)
     add_executable(test_linux_log tests/test_linux_log.cpp)
     target_include_directories(test_linux_log PRIVATE src)
     add_test(NAME test_linux_log COMMAND test_linux_log)
+    # The Timeline (Auto) watcher's posix_spawn seam (ticket #75;
+    # src/LinuxTimelineSpawn.h): pipe, descriptor closing, signal reset.
+    add_executable(test_linux_timeline_spawn tests/test_linux_timeline_spawn.cpp)
+    target_include_directories(test_linux_timeline_spawn PRIVATE src)
+    target_link_libraries(test_linux_timeline_spawn PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME test_linux_timeline_spawn COMMAND test_linux_timeline_spawn)
     # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
     add_test(NAME test_linux_remote
              COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
