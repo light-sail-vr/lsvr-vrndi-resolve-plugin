@@ -17,6 +17,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -223,6 +224,38 @@ static void testAbort()
     std::printf("     (TERM-proof helper closed in %.1f s)\n", secs);
 }
 
+// linux_close_file_dialog (the plugin's unload path) closes the running
+// helper from any thread, and the dialog returns as a cancel. A second
+// Browse while the first is open is refused, not stacked.
+static void testCloseAndSecondDialog()
+{
+    removeHelpers();
+    writeHelper("zenity", "/usr/bin/sleep 30\nprintf '/maps/late.exr\\n'\n");
+    char buf[64] = "sentinel";
+    bool picked = true;
+    const auto start = std::chrono::steady_clock::now();
+    std::thread dialog([&] { picked = browse(buf, sizeof(buf)); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    char other[64] = "other";
+    expectTrue(!browse(other, sizeof(other)), "a second Browse while one is open is refused");
+    expectStr(other, "other", "and leaves its buffer alone");
+    expectStr(linux_take_file_dialog_error(), "Browse: a file dialog is already open",
+              "with a reason");
+
+    linux_close_file_dialog();
+    dialog.join();
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    expectTrue(!picked, "the closed dialog returns false");
+    expectStr(buf, "sentinel", "with its buffer untouched");
+    expectTrue(secs < 1.5, "promptly after the close");
+    expectStr(linux_take_file_dialog_error(), "", "and it is a cancel, not an error");
+
+    writeHelper("zenity", "printf '/maps/next.exr\\n'\n");
+    expectTrue(browse(buf, sizeof(buf)), "the next Browse opens normally after a close");
+}
+
 int main()
 {
     char tmpl[] = "/tmp/ndi_lfd_XXXXXX";
@@ -249,6 +282,7 @@ int main()
     testNoDisplay();
     testIdleWhileWaiting();
     testAbort();
+    testCloseAndSecondDialog();
 
     removeHelpers();
     unlink((gDir + "/argv").c_str());

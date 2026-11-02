@@ -517,7 +517,8 @@ elseif(NDI_PLATFORM_LINUX)
         tests/test_linux_file_dialog_spawn.cpp
         src/LinuxFileDialog.cpp)
     target_include_directories(test_linux_file_dialog_spawn PRIVATE src)
-    target_link_libraries(test_linux_file_dialog_spawn PRIVATE ${CMAKE_DL_LIBS}) # dlsym (the pump)
+    # dlsym (the pump); threads (the close-from-another-thread test).
+    target_link_libraries(test_linux_file_dialog_spawn PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
     add_test(NAME test_linux_file_dialog_spawn COMMAND test_linux_file_dialog_spawn)
     # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
     add_test(NAME test_linux_remote

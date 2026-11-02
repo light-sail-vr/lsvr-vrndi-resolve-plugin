@@ -21,6 +21,7 @@
 #ifndef LINUX_BROWSE_GUARD_H
 #define LINUX_BROWSE_GUARD_H
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
@@ -73,6 +74,41 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<const void*, std::uint64_t> live_;
     std::uint64_t nextGeneration_ = 1;
+};
+
+// One dialog at a time. The pump never delivers a click, so a second Browse
+// can't normally arrive while one is open; if one does (another thread, a
+// host that delivers input anyway), it is refused rather than stacked.
+class DialogGate {
+public:
+    bool tryOpen()
+    {
+        bool expected = false;
+        return open_.compare_exchange_strong(expected, true);
+    }
+    void close() { open_.store(false); }
+    bool isOpen() const { return open_.load(); }
+
+private:
+    std::atomic<bool> open_{false};
+};
+
+// Holds the gate for one dialog and releases it on every way out, an
+// exception included, so nothing can lock Browse out for the session.
+class DialogSlot {
+public:
+    explicit DialogSlot(DialogGate& gate) : gate_(gate), held_(gate.tryOpen()) {}
+    ~DialogSlot()
+    {
+        if (held_) gate_.close();
+    }
+    DialogSlot(const DialogSlot&) = delete;
+    DialogSlot& operator=(const DialogSlot&) = delete;
+    bool held() const { return held_; }
+
+private:
+    DialogGate& gate_;
+    const bool held_;
 };
 
 } // namespace ndi_linuxdlg

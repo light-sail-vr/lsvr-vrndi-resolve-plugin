@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -437,6 +438,12 @@ static void testEventPump()
     expectTrue(ndi_linux_host::resolveEventPump(lookupWith(false, &gFakeApp)).tick(true, true),
                "no processEvents symbol: the helper is kept");
     expectTrue(gPumpCalls == 0, "no pump in a host without Qt (plain blocking wait)");
+
+    gPumpCalls = 0;
+    expectTrue(!pump.tick(true, true, true), "the plugin unloading closes the helper");
+    expectTrue(gPumpCalls == 0, "without running another round of events");
+    expectTrue(!ndi_linux_host::resolveEventPump(lookupWith(false, nullptr)).tick(true, false, true),
+               "even in a host with no pump at all");
 }
 
 // Resolve quitting while the dialog is up: ~QCoreApplication clears self,
@@ -486,6 +493,26 @@ static void testAbortedIsCancel()
                "even one that printed a path first");
 }
 
+// One dialog at a time, released on every way out (LinuxBrowseGuard.h).
+static void testDialogGate()
+{
+    ndi_linuxdlg::DialogGate gate;
+    {
+        const ndi_linuxdlg::DialogSlot first(gate);
+        expectTrue(first.held(), "the first dialog gets the gate");
+        const ndi_linuxdlg::DialogSlot second(gate);
+        expectTrue(!second.held(), "a second one while it is open is refused");
+    }
+    expectTrue(!gate.isOpen(), "the gate is free once the dialog returns");
+    try {
+        const ndi_linuxdlg::DialogSlot slot(gate);
+        throw std::runtime_error("bad_alloc in the argv");
+    } catch (const std::exception&) {
+    }
+    expectTrue(!gate.isOpen(), "an exception inside the dialog doesn't lock Browse out");
+    expectTrue(ndi_linuxdlg::DialogSlot(gate).held(), "and the next Browse opens");
+}
+
 // Re-validating the instance after a dialog (LinuxBrowseGuard.h).
 static void testLiveInstances()
 {
@@ -529,6 +556,7 @@ int main()
     testEventPumpAppGone();
     testAbortedIsCancel();
     testLiveInstances();
+    testDialogGate();
 
     if (failures) {
         std::fprintf(stderr, "%d test(s) failed\n", failures);

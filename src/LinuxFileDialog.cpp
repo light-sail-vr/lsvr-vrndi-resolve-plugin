@@ -9,11 +9,13 @@
 #include "LinuxFileDialog.h"
 #include "LinuxHostEvents.h"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
 #include <poll.h>
 #include <dlfcn.h>
 #include <spawn.h>
@@ -51,6 +53,28 @@ std::vector<char*> cStrings(std::vector<std::string>& strings)
     out.push_back(nullptr);
     return out;
 }
+
+// The running helper, if any (0 when none): closeRunningHelper signals its
+// process group from the unload path, the exit path or any other thread.
+std::mutex gHelperMutex;
+pid_t gHelperPid = 0;
+// Set by closeRunningHelper, cleared when the next dialog opens: the running
+// dialog's idle tick sees it and closes its helper too.
+std::atomic<bool> gCloseRequested{false};
+
+void closeRunningHelper()
+{
+    gCloseRequested.store(true);
+    std::lock_guard<std::mutex> lock(gHelperMutex);
+    if (gHelperPid > 0) kill(-gHelperPid, SIGTERM);
+}
+
+// Resolve exiting (exit() runs this .so's static destructors, including
+// from inside the dialog's event pump) closes a helper that is still up,
+// rather than leaving an orphaned picker on screen. A crash doesn't run it.
+struct CloseHelperAtExit {
+    ~CloseHelperAtExit() { closeRunningHelper(); }
+} gCloseHelperAtExit;
 
 // After idle asks for the helper to close: SIGTERM, then SIGKILL if it is
 // still holding its pipes this long after, and after as long again (a
@@ -129,32 +153,46 @@ ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::stri
         return result;
     }
 
+    // Every posix_spawn_file_actions_* / posix_spawnattr_* call can fail
+    // (ENOMEM, EBADF); a helper started with half its setup would write its
+    // answer to Resolve's stdout, so any failure is a spawn failure.
+    int setupError = 0;
+    auto check = [&setupError](int rc) {
+        if (rc != 0 && setupError == 0) setupError = rc;
+    };
+
     posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, errPipe[1], STDERR_FILENO);
+    const int actionsInit = posix_spawn_file_actions_init(&actions);
+    check(actionsInit);
+    if (actionsInit == 0) {
+        check(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0));
+        check(posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO));
+        check(posix_spawn_file_actions_adddup2(&actions, errPipe[1], STDERR_FILENO));
+    }
 
     // The helper starts with no signals blocked and the usual dispositions
     // for the ones a host commonly ignores: an inherited SIG_IGN on SIGPIPE
     // or SIGCHLD, or the calling thread's blocked mask, would otherwise
     // survive exec into zenity.
     posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-    sigset_t none;
-    sigemptyset(&none);
-    posix_spawnattr_setsigmask(&attr, &none);
-    sigset_t defaults;
-    sigemptyset(&defaults);
-    for (int sig : {SIGPIPE, SIGCHLD, SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGALRM}) {
-        sigaddset(&defaults, sig);
+    const int attrInit = posix_spawnattr_init(&attr);
+    check(attrInit);
+    if (attrInit == 0) {
+        sigset_t none;
+        sigemptyset(&none);
+        check(posix_spawnattr_setsigmask(&attr, &none));
+        sigset_t defaults;
+        sigemptyset(&defaults);
+        for (int sig : {SIGPIPE, SIGCHLD, SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGALRM}) {
+            sigaddset(&defaults, sig);
+        }
+        check(posix_spawnattr_setsigdefault(&attr, &defaults));
+        // Its own process group (pgid = its pid), so closing it reaches
+        // whatever a wrapper script on PATH started, and nothing of Resolve's.
+        check(posix_spawnattr_setpgroup(&attr, 0));
+        check(posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF |
+                                                  POSIX_SPAWN_SETPGROUP));
     }
-    posix_spawnattr_setsigdefault(&attr, &defaults);
-    // Its own process group (pgid = its pid), so closing it reaches whatever
-    // a wrapper script on PATH started, and nothing of Resolve's.
-    posix_spawnattr_setpgroup(&attr, 0);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF |
-                                        POSIX_SPAWN_SETPGROUP);
 
     std::vector<std::string> argvStrings = argvIn;
     std::vector<std::string> envStrings = ndi_linuxdlg::childEnvironment(currentEnvironment());
@@ -162,12 +200,27 @@ ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::stri
     std::vector<char*> envp = cStrings(envStrings);
 
     pid_t pid = -1;
-    const int rc = posix_spawnp(&pid, argv[0], &actions, &attr, argv.data(), envp.data());
-    posix_spawn_file_actions_destroy(&actions);
-    posix_spawnattr_destroy(&attr);
+    int rc = setupError;
+    if (rc == 0) {
+        // Under the helper lock, so closeRunningHelper never misses a helper
+        // that has started but isn't recorded yet.
+        std::lock_guard<std::mutex> lock(gHelperMutex);
+        rc = posix_spawnp(&pid, argv[0], &actions, &attr, argv.data(), envp.data());
+        if (rc == 0) gHelperPid = pid;
+    }
+    if (actionsInit == 0) posix_spawn_file_actions_destroy(&actions);
+    if (attrInit == 0) posix_spawnattr_destroy(&attr);
     close(outPipe[1]);
     close(errPipe[1]);
 
+    if (setupError != 0) {
+        close(outPipe[0]);
+        close(errPipe[0]);
+        result.status = SpawnResult::kFailed;
+        result.err = std::string("couldn't set up the helper's stdio and signals: ") +
+                     std::strerror(setupError);
+        return result;
+    }
     if (rc != 0) {
         close(outPipe[0]);
         close(errPipe[0]);
@@ -180,6 +233,19 @@ ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::stri
     close(outPipe[0]);
     close(errPipe[0]);
 
+    // Wait for the exit without reaping (WNOWAIT), so the pid can't be
+    // reused while closeRunningHelper may still signal it; forget it under
+    // the lock, then reap. (A host that ignores SIGCHLD has the kernel reap
+    // it, so waitid fails with ECHILD and we just forget it.)
+    siginfo_t info;
+    int waitedNoReap;
+    do {
+        waitedNoReap = waitid(P_PID, static_cast<id_t>(pid), &info, WEXITED | WNOWAIT);
+    } while (waitedNoReap < 0 && errno == EINTR);
+    {
+        std::lock_guard<std::mutex> lock(gHelperMutex);
+        gHelperPid = 0;
+    }
     int status = 0;
     pid_t waited;
     do {
@@ -203,9 +269,11 @@ ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::stri
 
 namespace {
 
-// Main thread only (Resolve delivers browse clicks there), so plain statics.
+// Browse clicks arrive on Resolve's main thread, but the gate is atomic and
+// released by RAII anyway, so neither a thread nor an exception (bad_alloc
+// in the argv) can leave Browse locked for the session.
 ndi_linuxdlg::DialogState gState;
-bool gDialogOpen = false;
+ndi_linuxdlg::DialogGate gDialogGate;
 
 bool onMainThread()
 {
@@ -228,22 +296,33 @@ bool linux_open_file_dialog(const char* message, const char* extension,
     // The pump runs Resolve's non-input events while the helper is up; none
     // of them should reach another Browse, but a second dialog stacked on the
     // first is refused rather than nested.
-    if (gDialogOpen) {
+    const ndi_linuxdlg::DialogSlot slot(gDialogGate);
+    if (!slot.held()) {
         gState.error = "Browse: a file dialog is already open";
         return false;
     }
-    gDialogOpen = true;
+    gCloseRequested.store(false);
     const bool mainThread = onMainThread();
     const ndi_linux_host::EventPump& pump = hostEventPump();
     const bool appAtStart = pump.appExists();
     const bool picked = ndi_linuxdlg::openFileDialog(
         message, extension, initialPath, outPath, outPathSize, currentEnvironment(),
         [&](const std::vector<std::string>& argv) {
-            return ndi_linuxdlg::spawnProcess(argv, [&] { return pump.tick(mainThread, appAtStart); });
+            ndi_linuxdlg::SpawnResult run = ndi_linuxdlg::spawnProcess(argv, [&] {
+                return pump.tick(mainThread, appAtStart, gCloseRequested.load());
+            });
+            // A close can kill the helper before the next tick sees the
+            // request; it is still the plugin's close, not a helper failure.
+            if (gCloseRequested.load()) run.aborted = true;
+            return run;
         },
         &gState);
-    gDialogOpen = false;
     return picked;
+}
+
+void linux_close_file_dialog()
+{
+    closeRunningHelper();
 }
 
 ndi_linuxdlg::LiveInstances& linux_browse_live_instances()

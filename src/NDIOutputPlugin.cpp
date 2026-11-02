@@ -2650,6 +2650,9 @@ static OfxStatus onUnLoad(void)
 #ifdef NDI_TIMELINE_WATCH
     ndi_timelinewatch::shutdown();
 #endif
+#ifdef NDI_BROWSE_REENTRANT
+    linux_close_file_dialog(); // a picker left open must not outlive the plugin
+#endif
     return kOfxStatOK;
 }
 

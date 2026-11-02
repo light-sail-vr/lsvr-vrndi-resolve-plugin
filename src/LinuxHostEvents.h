@@ -47,16 +47,18 @@ struct EventPump {
 
     // One idle tick while a helper runs. onMainThread: the caller is the
     // process's main thread, which owns Qt's GUI event loop. appAtStart:
-    // a QCoreApplication existed when the dialog opened.
+    // a QCoreApplication existed when the dialog opened. closeRequested: the
+    // plugin is unloading (linux_close_file_dialog).
     //
     // Returns false when the host is going away and the helper should be
-    // closed: the QCoreApplication that was there at the start is gone
-    // (~QCoreApplication clears self in Resolve's quit flow), checked before
-    // and after the round. Otherwise runs one round of the host's non-input
+    // closed: closeRequested, or the QCoreApplication that was there at the
+    // start is gone (~QCoreApplication clears self in Resolve's quit flow),
+    // checked before and after the round. Otherwise runs one round of the host's non-input
     // events, but only on the main thread with a QCoreApplication, and
     // returns true.
-    bool tick(bool onMainThread, bool appAtStart) const
+    bool tick(bool onMainThread, bool appAtStart, bool closeRequested = false) const
     {
+        if (closeRequested) return false;
         if (appAtStart && !appExists()) return false;
         if (processEvents && appExists() && onMainThread) {
             processEvents(kExcludeUserInputEvents);

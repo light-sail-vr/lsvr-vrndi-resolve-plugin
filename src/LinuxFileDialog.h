@@ -369,6 +369,11 @@ bool linux_open_file_dialog(const char* message, const char* extension,
 // Status, e.g. the package to install when neither helper exists.
 std::string linux_take_file_dialog_error();
 
+// Closes the running helper, if any (SIGTERM to its process group), and has
+// the open dialog return as a cancel. The plugin's unload action calls it;
+// Resolve exiting runs it from a static destructor.
+void linux_close_file_dialog();
+
 // The plugin's live instances (LinuxBrowseGuard.h): createInstance adds,
 // destroyInstance removes, and instanceChanged re-checks its token after a
 // dialog before touching the instance, because the events the dialog runs
