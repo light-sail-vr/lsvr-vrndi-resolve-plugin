@@ -825,6 +825,13 @@ A Tier 2 automation that waited for `pgrep -x resolve` never saw the running Res
 **Validated by:** Tier 0. `test_linux_braw_runtime`'s `testRetrySkipsRejectedLibrary` (fake loader) checks that the retry opens only the never-opened path, still reports the rejected library's reason, and binds a runtime that becomes loadable later.
 **Rule:** when a loader deliberately keeps a rejected handle open, it must remember that handle, so a retry loop can't open it again.
 
+### 2026-11-01 — `linux_remote.sh sync` from a git worktree breaks `package_linux_release.sh` on the box (#78)
+**Symptom:** the #78 box test synced an Orca worktree to `~/ndioutput-78t2` and ran the RELEASING step 4a command, `scripts/package_linux_release.sh`. It failed at once: `git status failed in /home/matt/ndioutput-78t2: fatal: not a git repository: /Users/…/.git/worktrees/linux-78-boxtest`.
+**Root cause:** sync's rsync excluded `.git/`, and the trailing slash matches only a directory. In a worktree `.git` is a one-line file (`gitdir: <Mac path>`), so it reached the box. The packager then took the box folder for a git checkout and couldn't run `git status` in it. A re-sync with the fix doesn't remove the stale file, because rsync's `--delete` never deletes excluded files.
+**Fix:** exclude `.git` with no slash (a file or a directory, at any depth), on branch `feature/linux-packaging-fix`. `test_linux_remote` runs a real rsync through a fake ssh and checks that neither form reaches the box.
+**Validated by:** the new test fails on the old script and passes on the fix, with both the Mac's openrsync and the box's rsync 3.2.7. A fresh `~/ndioutput-78t2` sync then packaged without `--force` (`[info] … is not a git checkout`).
+**Rule:** an rsync exclude meant for `.git` must not end in a slash; worktrees and submodules use a `.git` file. After you fix an exclude, delete the stale copy on the box yourself.
+
 ### 2026-11-01 — zenity exits 1 without a display, the same code as Cancel (Linux) (#76)
 **Symptom:** found while designing the Linux Browse dialog: `env -u DISPLAY zenity --file-selection` on the box printed `Gtk-WARNING: Failed to open display` to stderr and exited **1**, the same status as Cancel or closing the window. A Browse click from a Resolve without a display would have looked like the user cancelled. Separately, the first spawn test let the box's real `/usr/bin/zenity` answer in place of the fake `kdialog` it was testing, because `/usr/bin` was on the test's `PATH`.
 **Root cause:** zenity (4.0.1) has no distinct exit status for "couldn't start GTK"; only stderr says so. Any test that puts system directories on `PATH` sees the machine's real helpers.

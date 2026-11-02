@@ -102,8 +102,11 @@ cmd_sync() {
         "~/"*) dir="${dir#"~/"}" ;;
     esac
     # build/ and stage/ on the box are excluded, so --delete never touches them.
+    # '.git' with no slash: in a git worktree .git is a file pointing at the
+    # Mac's repo, and on the box it makes package_linux_release.sh's
+    # uncommitted-changes check fail (`git status`: not a git repository).
     rsync -az --delete \
-        --exclude '.git/' --exclude '/build/' --exclude '/stage/' --exclude '/dist/' \
+        --exclude '.git' --exclude '/build/' --exclude '/stage/' --exclude '/dist/' \
         --exclude '/NDIOutput.ofx.bundle/' --exclude '*.o' --exclude 'src/*.d' \
         --exclude '.DS_Store' --exclude '__pycache__/' \
         "$REPO_ROOT/" "$HOST:$dir/"
