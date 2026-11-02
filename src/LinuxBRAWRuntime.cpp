@@ -67,11 +67,12 @@ const Api* runtime(std::string* error)
     static std::mutex mutex;
     static Api api;
     static bool bound = false;
+    static Rejected rejected;  // opened, lacked an entry point: never reopened
 
     std::lock_guard<std::mutex> lock(mutex);
     if (!bound) {
         const LoaderOps ops = {&exePath, &openLibrary, &findSymbol, &lastError};
-        bound = load(ops, &api, error);
+        bound = load(ops, &api, error, &rejected);
         if (bound) {
             // Once per process: names the copy actually bound, so the
             // journal shows Resolve's own runtime was used (ticket #77).

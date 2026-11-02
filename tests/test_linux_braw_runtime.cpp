@@ -179,6 +179,46 @@ static void testIncompleteRuntime()
     std::printf("     (error: %s)\n", error.c_str());
 }
 
+// runtime() retries a failed bind on every Camera Metadata read. A library
+// that opened but was rejected for a missing entry point stays open (no
+// dlclose inside Resolve), so a retry must not dlopen it again: each open
+// would stack another reference. The rejection is remembered, with its
+// reason, and only paths that never opened are retried.
+static void testRetrySkipsRejectedLibrary()
+{
+    const std::string stray = "/home/matt/libs/libBlackmagicRawAPI.so";
+    fake::reset("/home/matt/build/test_braw_reader", {stray});
+    fake::missing = {stray + ":VariantInit"};
+    ndi_linux_braw::Rejected rejected;
+    ndi_linux_braw::Api api;
+
+    std::string first;
+    expectTrue(!ndi_linux_braw::load(fake::ops, &api, &first, &rejected),
+               "incomplete library and absent fallback fail the first bind");
+    expectTrue(fake::opened.size() == 2, "first bind tries both candidates");
+
+    std::string second;
+    fake::opened.clear();
+    fake::error.clear();
+    expectTrue(!ndi_linux_braw::load(fake::ops, &api, &second, &rejected),
+               "retry still fails");
+    expectTrue(fake::opened.size() == 1 && fake::opened[0] == "/opt/resolve/libs/libBlackmagicRawAPI.so",
+               "retry does not reopen the rejected library");
+    expectTrue(second.find(stray + ": undefined symbol: VariantInit") != std::string::npos,
+               "retry error still names the rejected library's reason");
+    std::printf("     (retry error: %s)\n", second.c_str());
+
+    // Resolve's copy appears later (installed after the plugin first ran):
+    // the retry binds it, still without touching the rejected library.
+    fake::loadable.push_back("/opt/resolve/libs/libBlackmagicRawAPI.so");
+    fake::opened.clear();
+    std::string third;
+    expectTrue(ndi_linux_braw::load(fake::ops, &api, &third, &rejected) &&
+                   api.libraryPath == "/opt/resolve/libs/libBlackmagicRawAPI.so",
+               "retry binds a runtime that became loadable");
+    expectTrue(fake::opened.size() == 1, "...opening only that runtime");
+}
+
 int main()
 {
     testResolveLayout();
@@ -186,6 +226,7 @@ int main()
     testLoadsResolveCopy();
     testNotFound();
     testIncompleteRuntime();
+    testRetrySkipsRejectedLibrary();
 
     if (failures == 0) {
         std::printf("all linux-braw-runtime tests passed\n");

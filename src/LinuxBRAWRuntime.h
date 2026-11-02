@@ -23,6 +23,7 @@
 #define LINUX_BRAW_RUNTIME_H
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ndi_linux_braw {
@@ -67,15 +68,39 @@ struct Api {
     std::string libraryPath;
 };
 
+// Libraries that opened but lacked an entry point. They stay open (never
+// dlclose inside Resolve's process: a stray library's destructors would run
+// in the host), so a retry must not dlopen them again, which would stack one
+// more reference per Camera Metadata read. load() records each with its
+// reason and skips it from then on.
+struct Rejected {
+    std::vector<std::pair<std::string, std::string>> libraries;  // path, reason
+
+    const std::string* reason(const std::string& path) const
+    {
+        for (const auto& entry : libraries) {
+            if (entry.first == path) return &entry.second;
+        }
+        return nullptr;
+    }
+};
+
 // Binds the first candidate that opens AND exports every entry point. On
 // failure returns false, leaves *out untouched and sets *error to the
-// loader's reason for each path tried. A rejected library stays open (never
-// dlclose inside Resolve's process).
-inline bool load(const LoaderOps& ops, Api* out, std::string* error)
+// loader's reason for each path tried. A library rejected for a missing
+// entry point stays open and, with `rejected`, is recorded there and never
+// reopened by a later call; paths that failed to open hold no reference and
+// are retried.
+inline bool load(const LoaderOps& ops, Api* out, std::string* error,
+                 Rejected* rejected = nullptr)
 {
     std::string tried;
     for (const std::string& dir : runtimeDirectories(ops.exePath())) {
         const std::string path = dir + "/" + kLibraryName;
+        if (const std::string* known = rejected ? rejected->reason(path) : nullptr) {
+            tried += (tried.empty() ? "" : "; ") + *known;
+            continue;
+        }
         void* handle = ops.open(path.c_str());
         if (handle == nullptr) {
             tried += (tried.empty() ? "" : "; ") + ops.lastError();
@@ -95,6 +120,7 @@ inline bool load(const LoaderOps& ops, Api* out, std::string* error)
         api.variantInit = bind("VariantInit");
         api.variantClear = bind("VariantClear");
         if (!missing.empty()) {
+            if (rejected) rejected->libraries.emplace_back(path, missing);
             tried += (tried.empty() ? "" : "; ") + missing;
             continue;
         }
@@ -108,7 +134,8 @@ inline bool load(const LoaderOps& ops, Api* out, std::string* error)
 
 // The process-wide runtime: binds on the first call that succeeds and stays
 // bound; a failed bind is retried on the next call (the reader only runs on
-// parameter changes, so the retry is cheap). nullptr + *error on failure.
+// parameter changes, so the retry is cheap), skipping libraries already
+// rejected for a missing entry point. nullptr + *error on failure.
 // Defined in src/LinuxBRAWRuntime.cpp (Linux only). Thread-safe.
 const Api* runtime(std::string* error);
 
