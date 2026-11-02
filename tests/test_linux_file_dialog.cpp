@@ -380,6 +380,27 @@ static void testChildEnvironment()
               "child environment drops the loader and Qt plugin paths only");
 }
 
+// kdialog under a C locale mangles a non-ASCII path, so the helper gets
+// LC_ALL=C.UTF-8 when Resolve's locale isn't UTF-8 and the system has it.
+static void testUtf8Locale()
+{
+    const std::vector<std::string> cLocale = {"HOME=/home/matt", "LANG=C"};
+    expectStr(joined(ndi_linuxdlg::withUtf8Locale(cLocale, true)),
+              "[HOME=/home/matt][LANG=C][LC_ALL=C.UTF-8]", "LANG=C gets LC_ALL=C.UTF-8");
+    expectStr(joined(ndi_linuxdlg::withUtf8Locale({"HOME=/h"}, true)), "[HOME=/h][LC_ALL=C.UTF-8]",
+              "no locale at all is C, and gets it too");
+    expectStr(joined(ndi_linuxdlg::withUtf8Locale({"LC_ALL=POSIX", "LANG=de_DE.UTF-8"}, true)),
+              "[LANG=de_DE.UTF-8][LC_ALL=C.UTF-8]", "a non-UTF-8 LC_ALL is replaced (it wins over LANG)");
+    expectStr(joined(ndi_linuxdlg::withUtf8Locale({"LANG=de_DE.UTF-8"}, true)), "[LANG=de_DE.UTF-8]",
+              "a UTF-8 LANG is left alone (the dialog keeps the user's language)");
+    expectStr(joined(ndi_linuxdlg::withUtf8Locale({"LC_CTYPE=C.utf8", "LANG=C"}, true)),
+              "[LC_CTYPE=C.utf8][LANG=C]", "a UTF-8 LC_CTYPE (glibc's 'utf8' spelling) is enough");
+    expectStr(joined(ndi_linuxdlg::withUtf8Locale({"LC_ALL=", "LANG=en_US.UTF-8"}, true)),
+              "[LC_ALL=][LANG=en_US.UTF-8]", "an empty LC_ALL doesn't count");
+    expectStr(joined(ndi_linuxdlg::withUtf8Locale(cLocale, false)), "[HOME=/home/matt][LANG=C]",
+              "without a C.UTF-8 on the system nothing changes");
+}
+
 // The host event pump (src/LinuxHostEvents.h): while the helper runs, the
 // plugin lets Resolve's Qt event loop handle everything but user input, so
 // Resolve repaints and answers the window manager's ping instead of going
@@ -598,6 +619,7 @@ int main()
     testContract();
     testDisplayDetection();
     testChildEnvironment();
+    testUtf8Locale();
     testEventPump();
     testEventPumpAppGone();
     testAbortedIsCancel();

@@ -273,6 +273,42 @@ inline bool hasDisplay(const std::vector<std::string>& env)
     return !envValue(env, "DISPLAY").empty() || !envValue(env, "WAYLAND_DISPLAY").empty();
 }
 
+// The locale category that decides how a program decodes bytes: LC_ALL,
+// else LC_CTYPE, else LANG (the first that is set and non-empty), else "C".
+inline std::string effectiveCtypeLocale(const std::vector<std::string>& env)
+{
+    for (const char* name : {"LC_ALL", "LC_CTYPE", "LANG"}) {
+        const std::string value = envValue(env, name);
+        if (!value.empty()) return value;
+    }
+    return "C";
+}
+
+inline bool isUtf8Locale(const std::string& locale)
+{
+    std::string lower;
+    for (char c : locale) {
+        lower += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    }
+    return lower.find("utf-8") != std::string::npos || lower.find("utf8") != std::string::npos;
+}
+
+// Under a C or other non-UTF-8 locale, kdialog (Qt) decodes file names as
+// Latin-1 or ASCII and mangles a non-ASCII path on the way out. When
+// Resolve's own locale isn't UTF-8, the helper gets LC_ALL=C.UTF-8 (when
+// the system has it: utf8Available), replacing any LC_ALL. A UTF-8 locale
+// is left alone, so the dialog keeps the user's language.
+inline std::vector<std::string> withUtf8Locale(const std::vector<std::string>& env, bool utf8Available)
+{
+    if (!utf8Available || isUtf8Locale(effectiveCtypeLocale(env))) return env;
+    std::vector<std::string> out;
+    for (const std::string& kv : env) {
+        if (kv.compare(0, 7, "LC_ALL=") != 0) out.push_back(kv);
+    }
+    out.push_back("LC_ALL=C.UTF-8");
+    return out;
+}
+
 // Resolve's environment for the helper, minus what would point a GTK or Qt
 // program at libraries that aren't its own: the loader overrides and Qt's
 // plugin/QML paths (a Qt kdialog loading Resolve's Qt plugins is the
@@ -345,10 +381,12 @@ inline bool openFileDialog(const char* message, const char* extension, const cha
 namespace ndi_linuxdlg {
 
 // The real Spawner (LinuxFileDialog.cpp): posix_spawnp with stdout/stderr
-// captured, the child environment above, and idle (when set) run about
-// every 30 ms until the helper exits. idle returning false closes the
+// captured, env as the helper's whole environment (the caller builds it
+// once per Browse: childEnvironment + withUtf8Locale), and idle (when set)
+// run about every 30 ms until the helper exits. idle returning false closes the
 // helper (SIGTERM, then SIGKILL after 2 s) and marks the result aborted.
-SpawnResult spawnProcess(const std::vector<std::string>& argv, const std::function<bool()>& idle);
+SpawnResult spawnProcess(const std::vector<std::string>& argv, const std::vector<std::string>& env,
+                         const std::function<bool()>& idle);
 
 } // namespace ndi_linuxdlg
 

@@ -106,6 +106,10 @@ static void ndiWinLog(const char* fmt, ...);
 #include "WinFileDialog.h"
 #endif
 
+#ifdef NDI_LINUX_FILE_DIALOG // defined by CMake on Linux (ticket #76)
+#include "LinuxFileDialog.h"
+#endif
+
 // Native browse-dialog seam (ticket #24): both desktop platforms pop a
 // native open dialog from the browse push-buttons, behind one contract
 // (UTF-8 in/out; cancel and every failure return false with the buffer
@@ -121,7 +125,6 @@ static void ndiWinLog(const char* fmt, ...);
 // Linux (ticket #76): a zenity/kdialog helper process. It can also fail for
 // a reason the user can fix (neither helper installed), which
 // NDI_BROWSE_DIALOG_ERRORS surfaces in Stream Status.
-#include "LinuxFileDialog.h"
 #define NDI_HAS_BROWSE_DIALOGS 1
 #define NDI_BROWSE_DIALOG_ERRORS 1
 // The dialog runs Resolve's event loop while it waits (LinuxHostEvents.h),

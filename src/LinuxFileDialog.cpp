@@ -18,6 +18,7 @@
 #include <mutex>
 #include <poll.h>
 #include <dlfcn.h>
+#include <locale.h>
 #include <spawn.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -135,6 +136,7 @@ void drain(int outFd, int errFd, std::string* out, std::string* err,
 } // namespace
 
 ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::string>& argvIn,
+                                                     const std::vector<std::string>& envIn,
                                                      const std::function<bool()>& idle)
 {
     using ndi_linuxdlg::SpawnResult;
@@ -195,7 +197,7 @@ ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::stri
     }
 
     std::vector<std::string> argvStrings = argvIn;
-    std::vector<std::string> envStrings = ndi_linuxdlg::childEnvironment(currentEnvironment());
+    std::vector<std::string> envStrings = envIn;
     std::vector<char*> argv = cStrings(argvStrings);
     std::vector<char*> envp = cStrings(envStrings);
 
@@ -272,8 +274,17 @@ namespace {
 // Browse clicks arrive on Resolve's main thread, but the gate is atomic and
 // released by RAII anyway, so neither a thread nor an exception (bad_alloc
 // in the argv) can leave Browse locked for the session.
-ndi_linuxdlg::DialogState gState;
+ndi_linuxdlg::DialogState gBrowseState; // last pick + last failure's reason
 ndi_linuxdlg::DialogGate gDialogGate;
+
+// Whether the system has a C.UTF-8 locale to give the helper.
+bool utf8LocaleAvailable()
+{
+    locale_t utf8 = newlocale(LC_CTYPE_MASK, "C.UTF-8", static_cast<locale_t>(0));
+    if (!utf8) return false;
+    freelocale(utf8);
+    return true;
+}
 
 std::int64_t monotonicMs()
 {
@@ -306,21 +317,27 @@ bool linux_open_file_dialog(const char* message, const char* extension,
     const ndi_linuxdlg::DialogSlot slot(gDialogGate, monotonicMs);
     if (slot.admission() == ndi_linuxdlg::Admission::kDebounced) {
         // A click replayed from while the last dialog was up (DialogGate).
-        gState.error.clear();
+        gBrowseState.error.clear();
         return false;
     }
     if (!slot.held()) {
-        gState.error = "Browse: a file dialog is already open";
+        gBrowseState.error = "Browse: a file dialog is already open";
         return false;
     }
     gCloseRequested.store(false);
     const bool mainThread = onMainThread();
     const ndi_linux_host::EventPump& pump = hostEventPump();
     const bool appAtStart = pump.appExists();
+    // Resolve's environment, read once per Browse: HOME and the display for
+    // the dialog's logic, and the helper's own environment for each spawn.
+    const std::vector<std::string> env = currentEnvironment();
+    static const bool utf8Available = utf8LocaleAvailable();
+    const std::vector<std::string> helperEnv =
+        ndi_linuxdlg::withUtf8Locale(ndi_linuxdlg::childEnvironment(env), utf8Available);
     const bool picked = ndi_linuxdlg::openFileDialog(
-        message, extension, initialPath, outPath, outPathSize, currentEnvironment(),
+        message, extension, initialPath, outPath, outPathSize, env,
         [&](const std::vector<std::string>& argv) {
-            ndi_linuxdlg::SpawnResult run = ndi_linuxdlg::spawnProcess(argv, [&] {
+            ndi_linuxdlg::SpawnResult run = ndi_linuxdlg::spawnProcess(argv, helperEnv, [&] {
                 return pump.tick(mainThread, appAtStart, gCloseRequested.load());
             });
             // A close can kill the helper before the next tick sees the
@@ -328,7 +345,7 @@ bool linux_open_file_dialog(const char* message, const char* extension,
             if (gCloseRequested.load()) run.aborted = true;
             return run;
         },
-        &gState);
+        &gBrowseState);
     return picked;
 }
 
@@ -356,7 +373,7 @@ ndi_linuxdlg::LiveInstances& linux_browse_live_instances()
 std::string linux_take_file_dialog_error()
 {
     std::string error;
-    error.swap(gState.error);
+    error.swap(gBrowseState.error);
     return error;
 }
 

@@ -67,6 +67,17 @@ static std::string slurp(const std::string& path)
     return ss.str();
 }
 
+extern char** environ;
+
+// What linux_open_file_dialog hands spawnProcess: this process's
+// environment, filtered.
+static std::vector<std::string> helperEnv()
+{
+    std::vector<std::string> env;
+    for (char** e = environ; *e; ++e) env.push_back(*e);
+    return ndi_linuxdlg::childEnvironment(env);
+}
+
 static bool browse(char* buf, size_t size, const char* initial = "/maps/Bühne 2/old.exr")
 {
     return linux_open_file_dialog("Pick the left eye", "exr", initial, buf, size);
@@ -90,6 +101,9 @@ static void testPickAndArgv()
     expectTrue(env.find("DISPLAY=:99") != std::string::npos, "the helper inherits DISPLAY");
     expectTrue(env.find("LD_LIBRARY_PATH=") == std::string::npos,
                "the helper doesn't inherit LD_LIBRARY_PATH");
+    // main() sets LANG=C; the container and the box both have C.UTF-8.
+    expectTrue(env.find("LC_ALL=C.UTF-8") != std::string::npos,
+               "under a C locale the helper gets LC_ALL=C.UTF-8");
     expectStr(linux_take_file_dialog_error(), "", "a pick leaves no error");
 }
 
@@ -182,7 +196,7 @@ static void testIdleWhileWaiting()
     writeHelper("zenity", "/usr/bin/sleep 0.5\nprintf '/maps/slow.exr\\n'\n");
     int idles = 0;
     const ndi_linuxdlg::SpawnResult r = ndi_linuxdlg::spawnProcess(
-        {"zenity", "--file-selection"}, [&] { ++idles; return true; });
+        {"zenity", "--file-selection"}, helperEnv(), [&] { ++idles; return true; });
     expectTrue(r.status == ndi_linuxdlg::SpawnResult::kExited && r.exitCode == 0,
                "a slow helper still exits 0");
     expectStr(r.out, "/maps/slow.exr\n", "and its stdout arrives whole");
@@ -190,7 +204,7 @@ static void testIdleWhileWaiting()
     std::printf("     (%d idle calls in 0.5 s)\n", idles);
 
     idles = 0;
-    ndi_linuxdlg::spawnProcess({"no-such-helper"}, [&] { ++idles; return true; });
+    ndi_linuxdlg::spawnProcess({"no-such-helper"}, helperEnv(), [&] { ++idles; return true; });
     expectTrue(idles == 0, "no idle calls when nothing was spawned");
 }
 
@@ -204,7 +218,7 @@ static void testAbort()
     int idles = 0;
     auto start = std::chrono::steady_clock::now();
     ndi_linuxdlg::SpawnResult r = ndi_linuxdlg::spawnProcess(
-        {"zenity", "--file-selection"}, [&] { return ++idles < 3; });
+        {"zenity", "--file-selection"}, helperEnv(), [&] { return ++idles < 3; });
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     expectTrue(r.aborted, "idle returning false aborts the helper");
     expectTrue(r.out.empty(), "before it printed anything");
@@ -217,7 +231,7 @@ static void testAbort()
     removeHelpers();
     writeHelper("zenity", "trap '' TERM\n/usr/bin/sleep 30 & wait $!; /usr/bin/sleep 30\n");
     start = std::chrono::steady_clock::now();
-    r = ndi_linuxdlg::spawnProcess({"zenity"}, [] { return false; });
+    r = ndi_linuxdlg::spawnProcess({"zenity"}, helperEnv(), [] { return false; });
     secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     expectTrue(r.aborted, "a TERM-proof helper is aborted too");
     expectTrue(secs >= 1.9 && secs < 6.0, "SIGKILL after the grace (and the pipes given up on)");
@@ -299,6 +313,9 @@ int main()
     unsetenv("WAYLAND_DISPLAY");
     setenv("LD_LIBRARY_PATH", "/opt/resolve/libs", 1);
     setenv("HOME", "/home/test", 1);
+    unsetenv("LC_ALL");
+    unsetenv("LC_CTYPE");
+    setenv("LANG", "C", 1);
 
     // The replayed-click debounce gets its own test; the rest browse back
     // to back.
