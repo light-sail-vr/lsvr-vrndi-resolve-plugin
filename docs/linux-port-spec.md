@@ -98,7 +98,13 @@ On NVIDIA hardware the pipeline is GPU-native through the existing CUDA module. 
         - One dialog at a time, behind an atomic RAII gate.
         - A Browse within 300 ms of the previous dialog's action is ignored as a replayed click.
     - **Verification status:** unit tests cover the argv, the output parsing, the fallback, the pump's guards and the re-entrancy guards. The dialog is verified on X11 with zenity only; Wayland and kdialog are untested. The pump awaits Tier 2 round 2.
-19. **BRAW Camera Metadata:** add a Linux branch to `src/BRAWImmersiveReader.cpp`. The Linux BRAW SDK uses the same C++ (non-COM-IDL) header as macOS. Vendor the Linux dispatch shim under `third_party/braw/Linux/` and bind Resolve's own `libBlackmagicRawAPI.so`, located from `/proc/self/exe` (path to verify), so nothing Blackmagic is bundled. Introduce an `NDI_HAS_BRAW_READER` capability macro to replace the raw `__APPLE__ || _WIN32` checks in `BRAWImmersiveReader.h` and `NDIOutputPlugin.cpp`, per the CLAUDE.md platform-isolation rule.
+19. **BRAW Camera Metadata** (*amended by #77*): add a Linux branch to `src/BRAWImmersiveReader.cpp`, with the BRAW runtime bound from Resolve's own copy so nothing Blackmagic is bundled.
+    - **Header:** per-platform. The macOS header is CoreFoundation-typed (`CFStringRef` strings), so Linux can't share it, and the Linux SDK isn't available to vendor. `third_party/braw/Linux/BlackmagicRawAPI.h` is derived from the Boost-licensed macOS 5.1 header, with the CoreFoundation includes replaced by `LinuxCOM.h` and `CFStringRef` changed to `const char*`; notices intact.
+    - **COM base:** Blackmagic's `LinuxCOM.h`, vendored verbatim beside it (the DeckLink-SDK copy, Boost licence).
+    - **Dispatch:** the plugin's own `dlopen`/`dlsym` dispatch in `src/LinuxBRAWRuntime.h/.cpp`, not an SDK shim. It derives the library path from `/proc/self/exe` (`<exe dir>/../libs`), falls back to a default-location Resolve, and reports each path's `dlerror`; a missing runtime soft-fails to passthrough with a Stream Status message.
+    - **Verified path:** inside Resolve `/proc/self/exe` is `/opt/resolve/bin/resolve`, so the plugin binds `/opt/resolve/libs/libBlackmagicRawAPI.so`.
+    - Provenance and what has been checked against the real library are in `third_party/braw/Linux/README.md`.
+    - Introduce an `NDI_HAS_BRAW_READER` capability macro to replace the raw `__APPLE__ || _WIN32` checks in `BRAWImmersiveReader.h` and `NDIOutputPlugin.cpp`, per the CLAUDE.md platform-isolation rule.
 20. **Paths:** OFX hands the plugin UTF-8 and Linux file APIs are UTF-8, so `PlatformPaths.h` stays a passthrough. Add a test for a non-ASCII STMap path anyway.
 
 **Packaging & release**

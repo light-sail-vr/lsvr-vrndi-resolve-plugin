@@ -12,8 +12,10 @@
 -- never the process that loaded it - so a bundled/embedded Python can never
 -- work (LEARNINGS 2026-09-01, the fusionscript registry findings).
 --
--- Protocol (read by src/TimelineClipWatcher.cpp on macOS and
--- src/WinTimelineWatch.cpp on Windows), identical to the Python helper: one
+-- Protocol (read by src/TimelineClipWatcher.cpp on macOS,
+-- src/WinTimelineWatch.cpp on Windows and src/LinuxTimelineWatch.cpp on
+-- Linux, where fuscript is <resolve>/libs/Fusion/fuscript), identical to the
+-- Python helper: one
 -- line per poll (~2/s); a line starting with '!' is a status message for the
 -- plugin log; a line starting with '@color' carries the timeline's colour
 -- settings (issue #57 Part 3, tab-separated, see src/TimelineColor.h), sent

@@ -250,7 +250,7 @@ if(NDI_PLATFORM_LINUX)
 endif()
 set(NDI_CUDA_EXACT_MATH "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
 
-# --- BRAW immersive-metadata reader (ticket #26; Windows only so far) -------
+# --- BRAW immersive-metadata reader (tickets #26 Windows, #77 Linux) -------
 # The Camera Metadata projection's SDK-facing half. The Windows Blackmagic
 # RAW SDK ships no C++ header — it is generated from the vendored IDL
 # (third_party/braw/Win/, Boost-style license, same provenance as the macOS
@@ -261,8 +261,7 @@ set(NDI_CUDA_EXACT_MATH "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
 # Nothing Blackmagic is linked or bundled: the dispatch shim (compiled into
 # BRAWImmersiveReader.cpp) resolves BlackmagicRawAPI.dll at runtime —
 # exe-relative, so inside Resolve it binds Resolve's own shipped copy.
-# Linux: ticket #77 (until then the capability is compiled out and the
-# Camera Metadata projection soft-fails with a Stream Status message).
+# Linux (ticket #77): see the elseif branch below.
 if(WIN32)
     set(NDI_BRAW_GEN_DIR "${CMAKE_BINARY_DIR}/braw_gen")
     file(MAKE_DIRECTORY "${NDI_BRAW_GEN_DIR}")
@@ -278,13 +277,35 @@ if(WIN32)
     # oleaut32: BSTR/VARIANT plumbing the Windows BRAW API speaks; ole32: the
     # CoInitializeEx courtesy call. System DLLs, no loader-trap concern.
     target_link_libraries(braw_reader PUBLIC oleaut32 ole32)
+elseif(NDI_PLATFORM_LINUX)
+    # The Linux SDK header (third_party/braw/Linux/, Boost-style license)
+    # speaks plain C++ with UTF-8 strings, so nothing is generated. The
+    # runtime is bound through the plugin's own dlopen seam
+    # (src/LinuxBRAWRuntime.h): Resolve's libBlackmagicRawAPI.so, located
+    # from /proc/self/exe; nothing Blackmagic is linked or bundled, and
+    # test_plugin_elf keeps it out of NEEDED. PIC + hidden visibility: it is
+    # linked into the .ofx under the same ELF hygiene as the plugin.
+    # NDI_HAS_BRAW_READER (PUBLIC) gates the call sites of everything that
+    # links it (spec decision 19).
+    find_package(Threads REQUIRED)
+    add_library(braw_reader STATIC
+        src/BRAWImmersiveReader.cpp
+        src/LinuxBRAWRuntime.cpp)
+    set_target_properties(braw_reader PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    target_include_directories(braw_reader PRIVATE
+        third_party/braw/Linux
+        src)
+    target_compile_definitions(braw_reader PUBLIC NDI_HAS_BRAW_READER)
+    target_link_libraries(braw_reader PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 
 # --- The plugin --------------------------------------------------------------
 # Windows adds its Browse-dialog (#24) and Timeline (Auto) watcher (#25)
-# implementations. Linux has its Browse dialog (#76, NDI_LINUX_FILE_DIALOG
-# below) but no watcher yet (#75): that capability macro stays undefined
-# there, so the plugin compiles it out and the feature soft-fails.
+# implementations; Linux its Timeline (Auto) watcher (#75) and its Browse
+# dialog (#76, NDI_LINUX_FILE_DIALOG below).
 set(NDI_PLUGIN_SOURCES src/NDIOutputPlugin.cpp)
 if(WIN32)
     list(APPEND NDI_PLUGIN_SOURCES
@@ -297,6 +318,8 @@ elseif(NDI_PLATFORM_LINUX)
     list(APPEND NDI_PLUGIN_SOURCES src/LinuxNDIRuntime.cpp)
     # Browse buttons spawn zenity, else kdialog (spec decision 18).
     list(APPEND NDI_PLUGIN_SOURCES src/LinuxFileDialog.cpp)
+    # Timeline (Auto) + Timeline Color = Auto (#75; NDI_TIMELINE_WATCH).
+    list(APPEND NDI_PLUGIN_SOURCES src/LinuxTimelineWatch.cpp)
 endif()
 add_library(NDIOutput SHARED ${NDI_PLUGIN_SOURCES})
 set_target_properties(NDIOutput PROPERTIES
@@ -339,6 +362,8 @@ if(NDI_PLATFORM_LINUX)
     target_compile_definitions(NDIOutput PRIVATE NDI_RUNTIME_DLOPEN)
     # The browse buttons' zenity/kdialog picker (src/LinuxFileDialog.h).
     target_compile_definitions(NDIOutput PRIVATE NDI_LINUX_FILE_DIALOG)
+    # The BRAW immersive-metadata reader (ticket #77; braw_reader above).
+    target_link_libraries(NDIOutput PRIVATE braw_reader)
 endif()
 if(WIN32)
     # ole32 + shell32 + user32: the browse buttons' IFileOpenDialog and its
@@ -419,6 +444,8 @@ set(NDI_PORTABLE_TESTS
     test_linux_ndi_runtime
     test_linux_gpu_path
     test_linux_file_dialog
+    test_linux_timeline_watch
+    test_linux_braw_runtime
     test_stmap
     test_brawmap)
 if(WIN32)
@@ -427,6 +454,10 @@ if(WIN32)
         test_braw_reader
         test_win_file_dialog
         test_timeline_watch)
+elseif(NDI_PLATFORM_LINUX)
+    # The BRAW reader against the real runtime (#77): skips the real-clip
+    # chain without NDI_TEST_BRAW_CLIP; soft-fails cleanly without a runtime.
+    list(APPEND NDI_PORTABLE_TESTS test_braw_reader)
 endif()
 foreach(_t IN LISTS NDI_PORTABLE_TESTS)
     add_executable(${_t} tests/${_t}.cpp)
@@ -443,6 +474,8 @@ target_link_libraries(test_linux_ndi_runtime PRIVATE Threads::Threads)
 if(WIN32)
     target_link_libraries(test_braw_reader PRIVATE braw_reader ZLIB::ZLIB)
     target_link_libraries(test_timeline_watch PRIVATE advapi32)  # registry discovery
+elseif(NDI_PLATFORM_LINUX)
+    target_link_libraries(test_braw_reader PRIVATE braw_reader ZLIB::ZLIB)
 endif()
 
 # The export-list parser both NDI stubs are generated from (CMake script).
@@ -520,6 +553,12 @@ elseif(NDI_PLATFORM_LINUX)
     # dlsym (the pump); threads (the close-from-another-thread test).
     target_link_libraries(test_linux_file_dialog_spawn PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
     add_test(NAME test_linux_file_dialog_spawn COMMAND test_linux_file_dialog_spawn)
+    # The Timeline (Auto) watcher's posix_spawn seam (ticket #75;
+    # src/LinuxTimelineSpawn.h): pipe, descriptor closing, signal reset.
+    add_executable(test_linux_timeline_spawn tests/test_linux_timeline_spawn.cpp)
+    target_include_directories(test_linux_timeline_spawn PRIVATE src)
+    target_link_libraries(test_linux_timeline_spawn PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME test_linux_timeline_spawn COMMAND test_linux_timeline_spawn)
     # scripts/linux_remote.sh's cache-reset guard (ticket #73), run locally.
     add_test(NAME test_linux_remote
              COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_linux_remote.sh")
