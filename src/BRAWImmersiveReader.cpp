@@ -1,8 +1,10 @@
 // Implementation of src/BRAWImmersiveReader.h — see that header for the
-// contract. Compiles the vendored BRAW dispatch shim into this one TU; the
-// shim locates the BRAW runtime at runtime relative to the host (bundle on
-// macOS, exe on Windows, exe's ../libs on Linux — inside Resolve every way
-// it binds Resolve's own copy).
+// contract. On macOS and Windows this TU compiles the vendored BRAW dispatch
+// shim, which locates the BRAW runtime relative to the host (the host bundle
+// on macOS, the exe's folder on Windows). Linux has no vendored shim: its
+// branch binds the runtime through the plugin's own dlopen dispatch
+// (src/LinuxBRAWRuntime.h), from the exe's ../libs. Inside Resolve every
+// platform binds Resolve's own copy.
 #ifdef __APPLE__
 
 #include "BRAWImmersiveReader.h"
@@ -335,12 +337,14 @@ bool readImmersiveCalibration(const std::string& brawPath,
 #elif defined(__linux__)
 
 // Linux half (ticket #77, spec decision 19), mirroring the blocks above. The
-// header is the Linux SDK's (third_party/braw/Linux/, Boost-style license):
-// the same interfaces as macOS with UTF-8 `const char*` strings in place of
-// CFStringRef. Instead of the SDK's dispatch shim the plugin binds the
-// runtime through its own dlopen seam (src/LinuxBRAWRuntime.h) — inside
-// Resolve that is /opt/resolve/libs/libBlackmagicRawAPI.so, Resolve's own
-// copy, found relative to /proc/self/exe; nothing Blackmagic is bundled.
+// header (third_party/braw/Linux/, Boost-style license) is derived from the
+// vendored macOS 5.1 header: the same interfaces with UTF-8 `const char*`
+// strings in place of CFStringRef, over Blackmagic's LinuxCOM.h (see the
+// README there for what is verified). Instead of a dispatch shim the
+// plugin binds the runtime through its own dlopen seam
+// (src/LinuxBRAWRuntime.h) — inside Resolve that is
+// /opt/resolve/libs/libBlackmagicRawAPI.so, Resolve's own copy, found
+// relative to /proc/self/exe; nothing Blackmagic is bundled.
 
 #include "BRAWImmersiveReader.h"
 

@@ -260,11 +260,11 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 
 ---
 
-## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending); Timeline (Auto) (#75), Browse (#76) and BRAW (#77) still to come
+## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending), Camera Metadata (BRAW) projection (#77, Tier 2 in Resolve pending); Timeline (Auto) (#75) and Browse (#76) still to come
 
 Plan and decisions: [docs/linux-port-spec.md](docs/linux-port-spec.md); work items: GitHub issues labelled `linux`. Findings go to [LEARNINGS.md](LEARNINGS.md). The same `CMakeLists.txt` drives Windows and Linux; the Makefile stays the macOS harness.
 
-**Not yet on Linux:** Browse buttons, Timeline (Auto) and BRAW Camera Metadata. Their capability macros (`NDI_HAS_BROWSE_DIALOGS`, `NDI_TIMELINE_WATCH`, the BRAW reader) are not defined on Linux, so the plugin compiles them out: Browse buttons are absent, Timeline (Auto) and Camera Metadata fall back to passthrough with a Stream Status message, and Manual Path works. Tickets #75–#77 add them.
+**Not yet on Linux:** Browse buttons and Timeline (Auto). Their capability macros (`NDI_HAS_BROWSE_DIALOGS`, `NDI_TIMELINE_WATCH`) are not defined on Linux, so the plugin compiles them out: Browse buttons are absent, Timeline (Auto) falls back to passthrough with a Stream Status message, and Manual Path works. Tickets #75–#76 add them. Camera Metadata (BRAW) projection is built on Linux (`NDI_HAS_BRAW_READER`, ticket #77): see [Camera Metadata (BRAW) projection](#camera-metadata-braw-projection-ticket-77) below; until #75 lands it reads the clip from Manual Path only.
 
 ### Prerequisites
 
