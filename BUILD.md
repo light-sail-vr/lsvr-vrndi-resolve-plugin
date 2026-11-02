@@ -260,11 +260,11 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 
 ---
 
-## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending), Timeline (Auto) + Timeline Color = Auto (#75); Browse (#76) and BRAW (#77) still to come
+## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending), Timeline (Auto) + Timeline Color = Auto (#75) and Camera Metadata (BRAW) projection (#77) (both: Tier 2 in Resolve pending); Browse (#76) still to come
 
 Plan and decisions: [docs/linux-port-spec.md](docs/linux-port-spec.md); work items: GitHub issues labelled `linux`. Findings go to [LEARNINGS.md](LEARNINGS.md). The same `CMakeLists.txt` drives Windows and Linux; the Makefile stays the macOS harness.
 
-**Not yet on Linux:** Browse buttons and BRAW Camera Metadata. Their capability macros (`NDI_HAS_BROWSE_DIALOGS`, the BRAW reader) are not defined on Linux, so the plugin compiles them out: Browse buttons are absent, Camera Metadata falls back to passthrough with a Stream Status message, and Manual Path works. Tickets #76–#77 add them. Timeline (Auto) and Timeline Color = Auto are in (#75, below).
+**Not yet on Linux:** Browse buttons. Their capability macro (`NDI_HAS_BROWSE_DIALOGS`) is not defined on Linux, so the plugin compiles them out; the path fields still accept a typed or pasted path (Manual Path works). Ticket #76 adds them. Timeline (Auto) + Timeline Color = Auto (`NDI_TIMELINE_WATCH`, #75) and Camera Metadata (BRAW) projection (`NDI_HAS_BRAW_READER`, #77) are built on Linux: see their sections below.
 
 ### Prerequisites
 
@@ -449,6 +449,23 @@ The Linux counterpart of the macOS and Windows playhead watcher, with the same h
 - **Logs:** watcher lines go to the journal with the rest of `NDI_LOG`, prefixed `NDI Plugin: TimelineWatch:`. They name the chain that spawned and the playhead clip whenever it changes, and a dead helper's exit status (`helper exited (signal 9) — retrying in 30 s`). The helper respawns after 30 s.
 - **Finding the helper:** fuscript names its process `ScriptState` (and Resolve itself shows as `GUI Thread`), so `pgrep -x fuscript` and `pgrep -x resolve` find nothing. Use `pgrep -af 'libs/Fusion/fuscrip[t] -q -l lua'`, or `pgrep -P <resolve pid>` with the pid from `pgrep -f '^/opt/resolve/bin/resolv[e]'`. To check its descriptors, `ls -l /proc/<pid>/fd` should list 0–2 plus its own connection to Resolve's scripting port.
 - **Standalone check** (Resolve open, no install needed): `/opt/resolve/libs/Fusion/fuscript -q -l lua src/ndi_timeline_watch.lua` prints the playhead clip twice a second, or a `!` status line explaining why not, plus an `@color` line whenever the timeline's colour settings change.
+
+### Camera Metadata (BRAW) projection (ticket #77)
+
+The Linux counterpart of the macOS and Windows camera-metadata readers: the Linux branch of `src/BRAWImmersiveReader.cpp` reads the Apple Immersive calibration out of URSA Cine Immersive clips and feeds the same platform-neutral map generator (`src/BRAWLensMap.h`), so the projection matches the other platforms. CMake builds it as `braw_reader` (Linux branch) and defines `NDI_HAS_BRAW_READER` for everything that links it, which gates the plugin's call site.
+
+**Headers:** [third_party/braw/Linux/](third_party/braw/Linux/) holds Blackmagic's `LinuxCOM.h` (verbatim) and a `BlackmagicRawAPI.h` derived from the vendored macOS 5.1 header (CoreFoundation swapped for `LinuxCOM.h`, `CFStringRef` → `const char*`), both under Blackmagic's Boost-style license with notices intact. The README there records provenance and how to swap in the Linux SDK's own copies. Building needs **no Blackmagic install**.
+
+**How the BRAW runtime resolves:** nothing Blackmagic is linked or bundled (`test_plugin_elf`'s NEEDED allowlist enforces it). On the first Camera Metadata read (a parameter-edit path, never render) the plugin's own dispatch (`src/LinuxBRAWRuntime.h/.cpp`) `dlopen`s `libBlackmagicRawAPI.so` from the host exe's `../libs`. **Inside Resolve `/proc/self/exe` is `/opt/resolve/bin/resolve`, so this binds `/opt/resolve/libs/libBlackmagicRawAPI.so`, Resolve's own copy.** The fallback is a default-location Resolve (`/opt/resolve/libs`), for standalone processes such as the unit test. The first successful bind logs once, e.g. `NDI Plugin: BRAW runtime bound: /opt/resolve/libs/libBlackmagicRawAPI.so (already loaded by the host)` (`loaded by the plugin` when Resolve hadn't mapped it yet). A missing runtime soft-fails: passthrough, a Stream Status message, and the log names every path tried with its `dlerror`.
+
+**Testing:**
+- `test_linux_braw_runtime` (portable, every platform) covers the path derivation and the dispatch's failure handling.
+- `test_braw_reader` runs the soft-fail contract in the container and in CI, where there's no runtime, and passes there.
+- On the box, run it natively, outside the container, so it binds `/opt/resolve/libs`. Point `NDI_TEST_BRAW_CLIP` at an URSA Cine Immersive clip for the full chain, and optionally `NDI_TEST_BRAW_DUMP` at a path to write the raw calibration blob for diffing against `tests/fixtures/ursa_immersive_calibration.json`:
+
+```bash
+ssh matt@100.80.25.1 'cd ~/ndioutput-dev && NDI_TEST_BRAW_CLIP=/var/tmp/ndi-test-media/<clip>.braw ./build/test_braw_reader'
+```
 
 ### Logs on Linux
 
