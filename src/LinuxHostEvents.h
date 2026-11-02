@@ -12,8 +12,10 @@
 // queued until the dialog closes (so the user can't edit the node mid-pick).
 // It is looked up by symbol in the already-loaded process (dlsym
 // RTLD_DEFAULT), never linked: spec decision 18 rejects linking Resolve's
-// private Qt, and a host without the symbol, without a QCoreApplication, or a
-// call off the main thread simply gets no pump, i.e. the plain blocking wait.
+// private Qt and accepts this one runtime ABI dependency, and a host without
+// the symbol, without a QCoreApplication, or a call off the main thread
+// simply gets no pump, i.e. the plain blocking wait. The events it runs can
+// destroy the instance waiting in the dialog: LinuxBrowseGuard.h.
 //
 // Pure logic with the lookup injected, so tests/test_linux_file_dialog.cpp
 // runs it on any platform.
@@ -41,13 +43,26 @@ struct EventPump {
     void (*processEvents)(int) = nullptr;
     void* const* appSelf = nullptr; // &QCoreApplication::self
 
-    // Run one round of the host's non-input events. onMainThread: the caller
-    // is the process's main thread, which owns Qt's GUI event loop.
-    void pump(bool onMainThread) const
+    bool appExists() const { return appSelf && *appSelf; }
+
+    // One idle tick while a helper runs. onMainThread: the caller is the
+    // process's main thread, which owns Qt's GUI event loop. appAtStart:
+    // a QCoreApplication existed when the dialog opened.
+    //
+    // Returns false when the host is going away and the helper should be
+    // closed: the QCoreApplication that was there at the start is gone
+    // (~QCoreApplication clears self in Resolve's quit flow), checked before
+    // and after the round. Otherwise runs one round of the host's non-input
+    // events, but only on the main thread with a QCoreApplication, and
+    // returns true.
+    bool tick(bool onMainThread, bool appAtStart) const
     {
-        if (processEvents && appSelf && *appSelf && onMainThread) {
+        if (appAtStart && !appExists()) return false;
+        if (processEvents && appExists() && onMainThread) {
             processEvents(kExcludeUserInputEvents);
+            if (appAtStart && !appExists()) return false;
         }
+        return true;
     }
 };
 

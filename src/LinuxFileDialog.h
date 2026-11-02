@@ -15,6 +15,8 @@
 #ifndef LINUX_FILE_DIALOG_H
 #define LINUX_FILE_DIALOG_H
 
+#include "LinuxBrowseGuard.h"
+
 #include <cstddef>
 #include <cstring>
 #include <functional>
@@ -162,6 +164,7 @@ struct SpawnResult {
     int exitCode = -1;
     std::string out; // stdout
     std::string err; // stderr, or the spawn failure's reason
+    bool aborted = false; // the plugin closed the helper (the host is going away)
 };
 
 // Runs argv (argv[0] looked up on PATH) to completion. Injected so the tests
@@ -187,6 +190,12 @@ inline std::string firstLine(const std::string& s)
 inline Result interpret(const char* helper, const SpawnResult& run)
 {
     Result r;
+    if (run.aborted) {
+        // Closed by the plugin, not the user: whatever the helper printed
+        // or returned, nothing is picked and nothing is reported.
+        r.outcome = Outcome::kCancelled;
+        return r;
+    }
     if (run.status == SpawnResult::kFailed) {
         r.error = std::string("Browse: couldn't run ") + helper + ": " + firstLine(run.err);
         return r;
@@ -337,8 +346,9 @@ namespace ndi_linuxdlg {
 
 // The real Spawner (LinuxFileDialog.cpp): posix_spawnp with stdout/stderr
 // captured, the child environment above, and idle (when set) run about
-// every 30 ms until the helper exits.
-SpawnResult spawnProcess(const std::vector<std::string>& argv, const std::function<void()>& idle);
+// every 30 ms until the helper exits. idle returning false closes the
+// helper (SIGTERM, then SIGKILL after 2 s) and marks the result aborted.
+SpawnResult spawnProcess(const std::vector<std::string>& argv, const std::function<bool()>& idle);
 
 } // namespace ndi_linuxdlg
 
@@ -358,6 +368,12 @@ bool linux_open_file_dialog(const char* message, const char* extension,
 // cancel), cleared by the read: the one line the plugin puts in Stream
 // Status, e.g. the package to install when neither helper exists.
 std::string linux_take_file_dialog_error();
+
+// The plugin's live instances (LinuxBrowseGuard.h): createInstance adds,
+// destroyInstance removes, and instanceChanged re-checks its token after a
+// dialog before touching the instance, because the events the dialog runs
+// can destroy it.
+ndi_linuxdlg::LiveInstances& linux_browse_live_instances();
 
 #endif // __linux__
 

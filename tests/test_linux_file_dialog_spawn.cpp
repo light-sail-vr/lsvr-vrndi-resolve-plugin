@@ -9,6 +9,7 @@
 
 #include "LinuxFileDialog.h"
 
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -180,7 +181,7 @@ static void testIdleWhileWaiting()
     writeHelper("zenity", "/usr/bin/sleep 0.5\nprintf '/maps/slow.exr\\n'\n");
     int idles = 0;
     const ndi_linuxdlg::SpawnResult r = ndi_linuxdlg::spawnProcess(
-        {"zenity", "--file-selection"}, [&] { ++idles; });
+        {"zenity", "--file-selection"}, [&] { ++idles; return true; });
     expectTrue(r.status == ndi_linuxdlg::SpawnResult::kExited && r.exitCode == 0,
                "a slow helper still exits 0");
     expectStr(r.out, "/maps/slow.exr\n", "and its stdout arrives whole");
@@ -188,8 +189,38 @@ static void testIdleWhileWaiting()
     std::printf("     (%d idle calls in 0.5 s)\n", idles);
 
     idles = 0;
-    ndi_linuxdlg::spawnProcess({"no-such-helper"}, [&] { ++idles; });
+    ndi_linuxdlg::spawnProcess({"no-such-helper"}, [&] { ++idles; return true; });
     expectTrue(idles == 0, "no idle calls when nothing was spawned");
+}
+
+// idle returning false (the host is going away) closes the helper: SIGTERM,
+// and SIGKILL for one that ignores it. The result is marked aborted, so the
+// dialog reads it as a cancel.
+static void testAbort()
+{
+    removeHelpers();
+    writeHelper("zenity", "/usr/bin/sleep 30\nprintf '/maps/late.exr\\n'\n");
+    int idles = 0;
+    auto start = std::chrono::steady_clock::now();
+    ndi_linuxdlg::SpawnResult r = ndi_linuxdlg::spawnProcess(
+        {"zenity", "--file-selection"}, [&] { return ++idles < 3; });
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    expectTrue(r.aborted, "idle returning false aborts the helper");
+    expectTrue(r.out.empty(), "before it printed anything");
+    expectTrue(secs < 1.5, "and SIGTERM closes it promptly");
+    expectTrue(idles == 3, "idle isn't called again after it said stop");
+    expectTrue(ndi_linuxdlg::interpret("zenity", r).outcome == ndi_linuxdlg::Outcome::kCancelled,
+               "an aborted helper is a cancel");
+
+    // A helper that ignores SIGTERM: killed after the 2 s grace.
+    removeHelpers();
+    writeHelper("zenity", "trap '' TERM\n/usr/bin/sleep 30 & wait $!; /usr/bin/sleep 30\n");
+    start = std::chrono::steady_clock::now();
+    r = ndi_linuxdlg::spawnProcess({"zenity"}, [] { return false; });
+    secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    expectTrue(r.aborted, "a TERM-proof helper is aborted too");
+    expectTrue(secs >= 1.9 && secs < 6.0, "SIGKILL after the grace (and the pipes given up on)");
+    std::printf("     (TERM-proof helper closed in %.1f s)\n", secs);
 }
 
 int main()
@@ -217,6 +248,7 @@ int main()
     testSigchldIgnored();
     testNoDisplay();
     testIdleWhileWaiting();
+    testAbort();
 
     removeHelpers();
     unlink((gDir + "/argv").c_str());

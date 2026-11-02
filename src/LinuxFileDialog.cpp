@@ -52,11 +52,17 @@ std::vector<char*> cStrings(std::vector<std::string>& strings)
     return out;
 }
 
+// After idle asks for the helper to close: SIGTERM, then SIGKILL if it is
+// still holding its pipes this long after, and after as long again (a
+// grandchild holding the pipes) stop reading.
+const int kAbortGraceMs = 2000;
+
 // Read both pipes to EOF. poll, not two blocking reads: a helper filling
 // the stderr pipe while we wait on stdout would deadlock both of us. With an
-// idle hook, poll wakes every kIdleIntervalMs to run it.
+// idle hook, poll wakes every kIdleIntervalMs to run it; the first false it
+// returns closes the helper (pid) and sets *aborted.
 void drain(int outFd, int errFd, std::string* out, std::string* err,
-           const std::function<void()>& idle)
+           const std::function<bool()>& idle, pid_t pid, bool* aborted)
 {
     using Clock = std::chrono::steady_clock;
     struct pollfd fds[2] = {{outFd, POLLIN, 0}, {errFd, POLLIN, 0}};
@@ -64,11 +70,23 @@ void drain(int outFd, int errFd, std::string* out, std::string* err,
     int open = 2;
     char buf[4096];
     Clock::time_point lastIdle = Clock::now();
+    Clock::time_point abortedAt;
+    bool killed = false;
     while (open > 0) {
-        const int ready = poll(fds, 2, idle ? kIdleIntervalMs : -1);
-        if (idle && Clock::now() - lastIdle >= std::chrono::milliseconds(kIdleIntervalMs)) {
-            idle();
+        const bool ticking = idle && !*aborted;
+        const int ready = poll(fds, 2, (ticking || *aborted) ? kIdleIntervalMs : -1);
+        const Clock::time_point now = Clock::now();
+        if (ticking && now - lastIdle >= std::chrono::milliseconds(kIdleIntervalMs)) {
+            if (!idle()) {
+                *aborted = true;
+                abortedAt = Clock::now();
+                kill(-pid, SIGTERM); // its process group: a wrapper script's children too
+            }
             lastIdle = Clock::now();
+        } else if (*aborted && now - abortedAt >= std::chrono::milliseconds(kAbortGraceMs)) {
+            if (killed && now - abortedAt >= std::chrono::milliseconds(2 * kAbortGraceMs)) break;
+            if (!killed) kill(-pid, SIGKILL);
+            killed = true;
         }
         if (ready < 0) {
             if (errno == EINTR) continue;
@@ -93,7 +111,7 @@ void drain(int outFd, int errFd, std::string* out, std::string* err,
 } // namespace
 
 ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::string>& argvIn,
-                                                     const std::function<void()>& idle)
+                                                     const std::function<bool()>& idle)
 {
     using ndi_linuxdlg::SpawnResult;
     SpawnResult result;
@@ -132,7 +150,11 @@ ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::stri
         sigaddset(&defaults, sig);
     }
     posix_spawnattr_setsigdefault(&attr, &defaults);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    // Its own process group (pgid = its pid), so closing it reaches whatever
+    // a wrapper script on PATH started, and nothing of Resolve's.
+    posix_spawnattr_setpgroup(&attr, 0);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF |
+                                        POSIX_SPAWN_SETPGROUP);
 
     std::vector<std::string> argvStrings = argvIn;
     std::vector<std::string> envStrings = ndi_linuxdlg::childEnvironment(currentEnvironment());
@@ -154,7 +176,7 @@ ndi_linuxdlg::SpawnResult ndi_linuxdlg::spawnProcess(const std::vector<std::stri
         return result;
     }
 
-    drain(outPipe[0], errPipe[0], &result.out, &result.err, idle);
+    drain(outPipe[0], errPipe[0], &result.out, &result.err, idle, pid, &result.aborted);
     close(outPipe[0]);
     close(errPipe[0]);
 
@@ -213,14 +235,21 @@ bool linux_open_file_dialog(const char* message, const char* extension,
     gDialogOpen = true;
     const bool mainThread = onMainThread();
     const ndi_linux_host::EventPump& pump = hostEventPump();
+    const bool appAtStart = pump.appExists();
     const bool picked = ndi_linuxdlg::openFileDialog(
         message, extension, initialPath, outPath, outPathSize, currentEnvironment(),
         [&](const std::vector<std::string>& argv) {
-            return ndi_linuxdlg::spawnProcess(argv, [&] { pump.pump(mainThread); });
+            return ndi_linuxdlg::spawnProcess(argv, [&] { return pump.tick(mainThread, appAtStart); });
         },
         &gState);
     gDialogOpen = false;
     return picked;
+}
+
+ndi_linuxdlg::LiveInstances& linux_browse_live_instances()
+{
+    static ndi_linuxdlg::LiveInstances live;
+    return live;
 }
 
 std::string linux_take_file_dialog_error()

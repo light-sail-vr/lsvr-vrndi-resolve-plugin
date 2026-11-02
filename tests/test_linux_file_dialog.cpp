@@ -414,25 +414,101 @@ static void testEventPump()
 
     gPumpCalls = 0;
     ndi_linux_host::EventPump pump = ndi_linux_host::resolveEventPump(lookupWith(true, &gFakeApp));
-    pump.pump(true);
+    expectTrue(pump.appExists(), "a QCoreApplication is seen through self");
+    expectTrue(pump.tick(true, true), "a tick with the app still there keeps the helper");
     expectTrue(gPumpCalls == 1, "the pump runs Qt's processEvents on the main thread");
     expectTrue(gPumpFlags == 1, "with ExcludeUserInputEvents (0x01) only");
 
     gPumpCalls = 0;
-    pump.pump(false);
-    expectTrue(gPumpCalls == 0, "never off the main thread (Qt's loop belongs to it)");
+    expectTrue(pump.tick(false, true), "off the main thread the helper is kept");
+    expectTrue(gPumpCalls == 0, "but never pumped there (Qt's loop belongs to the main thread)");
 
     gPumpCalls = 0;
-    ndi_linux_host::resolveEventPump(lookupWith(true, &gNoApp)).pump(true);
+    expectTrue(ndi_linux_host::resolveEventPump(lookupWith(true, &gNoApp)).tick(true, false),
+               "no app from the start: the helper is kept (plain wait)");
     expectTrue(gPumpCalls == 0, "no pump before a QCoreApplication exists");
 
     gPumpCalls = 0;
-    ndi_linux_host::resolveEventPump(lookupWith(true, nullptr)).pump(true);
+    expectTrue(ndi_linux_host::resolveEventPump(lookupWith(true, nullptr)).tick(true, false),
+               "no self symbol: the helper is kept");
     expectTrue(gPumpCalls == 0, "no pump without QCoreApplication::self");
 
     gPumpCalls = 0;
-    ndi_linux_host::resolveEventPump(lookupWith(false, &gFakeApp)).pump(true);
+    expectTrue(ndi_linux_host::resolveEventPump(lookupWith(false, &gFakeApp)).tick(true, true),
+               "no processEvents symbol: the helper is kept");
     expectTrue(gPumpCalls == 0, "no pump in a host without Qt (plain blocking wait)");
+}
+
+// Resolve quitting while the dialog is up: ~QCoreApplication clears self,
+// and the next tick (before or after a round of events) asks for the helper
+// to be closed and runs no more events.
+static void* gDyingApp = nullptr;
+static void dyingProcessEvents(int)
+{
+    ++gPumpCalls;
+    gDyingApp = nullptr; // the round ran the quit flow
+}
+static void testEventPumpAppGone()
+{
+    int app = 0;
+    gDyingApp = &app;
+    ndi_linux_host::EventPump pump = ndi_linux_host::resolveEventPump([](const char* name) -> void* {
+        if (std::strcmp(name, ndi_linux_host::kProcessEventsSymbol) == 0) {
+            return reinterpret_cast<void*>(&dyingProcessEvents);
+        }
+        return std::strcmp(name, ndi_linux_host::kAppSelfSymbol) == 0 ? &gDyingApp : nullptr;
+    });
+    gPumpCalls = 0;
+    expectTrue(!pump.tick(true, true), "the app destroyed during a round closes the helper");
+    expectTrue(gPumpCalls == 1, "after that one round");
+    expectTrue(!pump.tick(true, true), "and every later tick says so too");
+    expectTrue(gPumpCalls == 1, "without pumping a destroyed app");
+    expectTrue(!pump.tick(false, true), "off the main thread as well");
+}
+
+// An abort (the plugin closed the helper) reads as a cancel whatever the
+// helper printed or exited with: nothing written, nothing reported.
+static void testAbortedIsCancel()
+{
+    SpawnResult killed;
+    killed.status = SpawnResult::kExited;
+    killed.exitCode = 143;
+    killed.aborted = true;
+    ndi_linuxdlg::Result r = ndi_linuxdlg::interpret("zenity", killed);
+    expectTrue(r.outcome == Outcome::kCancelled && r.error.empty(), "an aborted helper is a cancel");
+
+    SpawnResult printed;
+    printed.status = SpawnResult::kExited;
+    printed.exitCode = 0;
+    printed.out = "/maps/a.exr\n";
+    printed.aborted = true;
+    expectTrue(ndi_linuxdlg::interpret("zenity", printed).outcome == Outcome::kCancelled,
+               "even one that printed a path first");
+}
+
+// Re-validating the instance after a dialog (LinuxBrowseGuard.h).
+static void testLiveInstances()
+{
+    ndi_linuxdlg::LiveInstances live;
+    int a = 0;
+    int b = 0;
+    live.add(&a);
+    const ndi_linuxdlg::LiveInstances::Token ta = live.token(&a);
+    expectTrue(live.isLive(ta), "a registered instance is live");
+    live.add(&b);
+    live.remove(&b);
+    expectTrue(live.isLive(ta), "another instance's destroy doesn't affect it");
+
+    live.remove(&a);
+    expectTrue(!live.isLive(ta), "destroyed during the dialog: not live, skip the write-back");
+
+    live.add(&a); // a new instance at the freed address
+    expectTrue(!live.isLive(ta), "a new instance reusing the address doesn't match the old token");
+    expectTrue(live.isLive(live.token(&a)), "but its own token does");
+
+    int never = 0;
+    expectTrue(!live.isLive(live.token(&never)), "an instance never registered is not live");
+    expectTrue(!live.isLive(ndi_linuxdlg::LiveInstances::Token()), "nor is an empty token");
 }
 
 int main()
@@ -450,6 +526,9 @@ int main()
     testDisplayDetection();
     testChildEnvironment();
     testEventPump();
+    testEventPumpAppGone();
+    testAbortedIsCancel();
+    testLiveInstances();
 
     if (failures) {
         std::fprintf(stderr, "%d test(s) failed\n", failures);
