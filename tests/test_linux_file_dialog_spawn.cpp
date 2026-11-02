@@ -256,6 +256,33 @@ static void testCloseAndSecondDialog()
     expectTrue(browse(buf, sizeof(buf)), "the next Browse opens normally after a close");
 }
 
+// The real gate's debounce (300 ms): a Browse right after a dialog's action
+// returned spawns nothing and reports nothing; one after the window opens.
+static void testReplayedClickDebounced()
+{
+    removeHelpers();
+    const std::string runs = gDir + "/runs";
+    writeHelper("zenity", "/usr/bin/printf x >> \"" + runs + "\"\nprintf '/maps/d.exr\\n'\n");
+    linux_file_dialog_set_debounce_ms(300);
+    std::this_thread::sleep_for(std::chrono::milliseconds(350)); // clear of the last test's dialog
+    char buf[64] = "sentinel";
+    expectTrue(browse(buf, sizeof(buf)), "the first Browse picks");
+    std::this_thread::sleep_for(std::chrono::milliseconds(400)); // loading the map
+    linux_file_dialog_action_done();
+
+    std::strcpy(buf, "sentinel");
+    expectTrue(!browse(buf, sizeof(buf)), "the replayed click right after is ignored");
+    expectStr(buf, "sentinel", "with the buffer untouched");
+    expectStr(linux_take_file_dialog_error(), "", "and no error for Stream Status");
+    expectStr(slurp(runs), "x", "and no second helper");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    expectTrue(browse(buf, sizeof(buf)), "a click after the window opens a dialog");
+    expectStr(slurp(runs), "xx", "the second helper ran");
+    linux_file_dialog_set_debounce_ms(0);
+    unlink(runs.c_str());
+}
+
 int main()
 {
     char tmpl[] = "/tmp/ndi_lfd_XXXXXX";
@@ -273,6 +300,10 @@ int main()
     setenv("LD_LIBRARY_PATH", "/opt/resolve/libs", 1);
     setenv("HOME", "/home/test", 1);
 
+    // The replayed-click debounce gets its own test; the rest browse back
+    // to back.
+    linux_file_dialog_set_debounce_ms(0);
+
     testPickAndArgv();
     testCancel();
     testKdialogFallback();
@@ -283,6 +314,7 @@ int main()
     testIdleWhileWaiting();
     testAbort();
     testCloseAndSecondDialog();
+    testReplayedClickDebounced();
 
     removeHelpers();
     unlink((gDir + "/argv").c_str());

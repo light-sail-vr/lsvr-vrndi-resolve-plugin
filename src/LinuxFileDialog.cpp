@@ -275,6 +275,13 @@ namespace {
 ndi_linuxdlg::DialogState gState;
 ndi_linuxdlg::DialogGate gDialogGate;
 
+std::int64_t monotonicMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 bool onMainThread()
 {
     return static_cast<pid_t>(syscall(SYS_gettid)) == getpid();
@@ -296,7 +303,12 @@ bool linux_open_file_dialog(const char* message, const char* extension,
     // The pump runs Resolve's non-input events while the helper is up; none
     // of them should reach another Browse, but a second dialog stacked on the
     // first is refused rather than nested.
-    const ndi_linuxdlg::DialogSlot slot(gDialogGate);
+    const ndi_linuxdlg::DialogSlot slot(gDialogGate, monotonicMs);
+    if (slot.admission() == ndi_linuxdlg::Admission::kDebounced) {
+        // A click replayed from while the last dialog was up (DialogGate).
+        gState.error.clear();
+        return false;
+    }
     if (!slot.held()) {
         gState.error = "Browse: a file dialog is already open";
         return false;
@@ -318,6 +330,16 @@ bool linux_open_file_dialog(const char* message, const char* extension,
         },
         &gState);
     return picked;
+}
+
+void linux_file_dialog_action_done()
+{
+    gDialogGate.settle(monotonicMs());
+}
+
+void linux_file_dialog_set_debounce_ms(int ms)
+{
+    gDialogGate.setDebounceMs(ms);
 }
 
 void linux_close_file_dialog()

@@ -12,6 +12,7 @@
 #include "LinuxHostEvents.h"
 
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -493,24 +494,69 @@ static void testAbortedIsCancel()
                "even one that printed a path first");
 }
 
-// One dialog at a time, released on every way out (LinuxBrowseGuard.h).
+// One dialog at a time, released on every way out, and no dialog straight
+// after one (LinuxBrowseGuard.h). The clock is faked.
+static std::int64_t gNowMs = 10000;
+static std::int64_t fakeNow()
+{
+    return gNowMs;
+}
+
 static void testDialogGate()
 {
+    using ndi_linuxdlg::Admission;
     ndi_linuxdlg::DialogGate gate;
     {
-        const ndi_linuxdlg::DialogSlot first(gate);
+        const ndi_linuxdlg::DialogSlot first(gate, fakeNow);
         expectTrue(first.held(), "the first dialog gets the gate");
-        const ndi_linuxdlg::DialogSlot second(gate);
-        expectTrue(!second.held(), "a second one while it is open is refused");
+        const ndi_linuxdlg::DialogSlot second(gate, fakeNow);
+        expectTrue(!second.held() && second.admission() == Admission::kBusy,
+                   "a second one while it is open is refused as busy");
+        gNowMs += 5000; // the user takes 5 s to pick
     }
     expectTrue(!gate.isOpen(), "the gate is free once the dialog returns");
+
+    gNowMs += 200; // ... and the plugin loads the picked map for 200 ms
+    gate.settle(gNowMs);
+    gNowMs += 10; // the click held back during the dialog replays
+    expectTrue(ndi_linuxdlg::DialogSlot(gate, fakeNow).admission() == Admission::kDebounced,
+               "a click replayed right after the action returns is debounced");
+    gNowMs += 280; // 290 ms after the action returned
+    expectTrue(ndi_linuxdlg::DialogSlot(gate, fakeNow).admission() == Admission::kDebounced,
+               "still debounced at 290 ms");
+    gNowMs += 20; // 310 ms
+    expectTrue(ndi_linuxdlg::DialogSlot(gate, fakeNow).held(), "a click 310 ms later opens a dialog");
+
+    gate.settle(gNowMs); // that dialog's action returns
+
+    // settle without a dialog since (any other param edit) moves nothing.
+    gNowMs += 1000;
+    gate.settle(gNowMs);
+    expectTrue(ndi_linuxdlg::DialogSlot(gate, fakeNow).held(),
+               "an action that ran no dialog doesn't restart the debounce");
+
+    // Without the action's settle, the helper's exit is the reference.
+    gNowMs += 1000;
+    gate.settle(gNowMs); // consume the settle the last slot left pending
+    gNowMs += 1000;
+    { const ndi_linuxdlg::DialogSlot slot(gate, fakeNow); }
+    gNowMs += 299;
+    expectTrue(ndi_linuxdlg::DialogSlot(gate, fakeNow).admission() == Admission::kDebounced,
+               "299 ms after the helper exits is debounced");
+    gNowMs += 1000;
+
     try {
-        const ndi_linuxdlg::DialogSlot slot(gate);
+        const ndi_linuxdlg::DialogSlot slot(gate, fakeNow);
         throw std::runtime_error("bad_alloc in the argv");
     } catch (const std::exception&) {
     }
     expectTrue(!gate.isOpen(), "an exception inside the dialog doesn't lock Browse out");
-    expectTrue(ndi_linuxdlg::DialogSlot(gate).held(), "and the next Browse opens");
+    gNowMs += 1000;
+    expectTrue(ndi_linuxdlg::DialogSlot(gate, fakeNow).held(), "and the next Browse opens");
+
+    ndi_linuxdlg::DialogGate undebounced(0);
+    { const ndi_linuxdlg::DialogSlot slot(undebounced, fakeNow); }
+    expectTrue(ndi_linuxdlg::DialogSlot(undebounced, fakeNow).held(), "a 0 ms window never debounces");
 }
 
 // Re-validating the instance after a dialog (LinuxBrowseGuard.h).

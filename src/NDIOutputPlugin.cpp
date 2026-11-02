@@ -3339,6 +3339,9 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
         // destroy this instance (LinuxBrowseGuard.h): after each dialog,
         // return without touching myData, the params or inArgs if it is gone.
         const ndi_linuxdlg::LiveInstances::Token browseOwner = linux_browse_live_instances().token(myData);
+        // Restarts the replayed-click debounce when this action returns,
+        // i.e. after the picked file has been loaded below.
+        const BrowseActionScope browseActionScope;
         auto browseOwnerGone = [&browseOwner] {
             if (linux_browse_live_instances().isLive(browseOwner)) return false;
             NDI_LOG_TEXT("Browse: the instance was destroyed while its file dialog was open; nothing written");

@@ -360,7 +360,8 @@ SpawnResult spawnProcess(const std::vector<std::string>& argv, const std::functi
 // helper exits, and meanwhile runs Resolve's Qt event loop for everything
 // but user input (LinuxHostEvents.h), so Resolve keeps repainting. Called
 // from Resolve's main thread (instanceChanged); a second call while one is
-// open fails.
+// open fails, and one within 300 ms of the last dialog's action returning
+// is ignored (a replayed click), both returning false.
 bool linux_open_file_dialog(const char* message, const char* extension,
                             const char* initialPath, char* outPath, size_t outPathSize);
 
@@ -368,6 +369,21 @@ bool linux_open_file_dialog(const char* message, const char* extension,
 // cancel), cleared by the read: the one line the plugin puts in Stream
 // Status, e.g. the package to install when neither helper exists.
 std::string linux_take_file_dialog_error();
+
+// The instanceChanged that may have run a dialog is returning: restarts the
+// replayed-click debounce from now (DialogGate in LinuxBrowseGuard.h). The
+// plugin holds a BrowseActionScope for the whole action.
+void linux_file_dialog_action_done();
+
+struct BrowseActionScope {
+    BrowseActionScope() = default;
+    BrowseActionScope(const BrowseActionScope&) = delete;
+    BrowseActionScope& operator=(const BrowseActionScope&) = delete;
+    ~BrowseActionScope() { linux_file_dialog_action_done(); }
+};
+
+// The debounce window, 300 ms by default; tests set 0.
+void linux_file_dialog_set_debounce_ms(int ms);
 
 // Closes the running helper, if any (SIGTERM to its process group), and has
 // the open dialog return as a cancel. The plugin's unload action calls it;
