@@ -15,6 +15,7 @@
 #include "LinuxTimelineWatch.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -117,16 +118,22 @@ void setHealthLocked(bool ok, const std::string& detail)
     gHealthDetail = detail;
 }
 
-// Spawn the helper with its stdout on a pipe. Returns false with a health
-// detail already set (caller holds gMutex).
-bool spawnHelperLocked()
+// What to launch. Planned WITHOUT gMutex: it stats files and may run the
+// python3 probe, which blocks until the probe exits, and render-thread
+// callers of currentClipPath()/healthy() must never stall behind that.
+struct LaunchPlan {
+    std::vector<std::string> argv;
+    std::vector<std::string> env;
+    bool explicitEnv = false;  // false: the helper inherits Resolve's environment
+    std::string summary;       // for the "helper started" log line
+    std::string error;         // non-empty: nothing to launch (the health detail)
+};
+
+LaunchPlan planHelperLaunch()
 {
     using namespace ndi_timelinewatch_linux;
 
-    std::vector<std::string> argv;
-    std::vector<std::string> env;
-    const std::vector<std::string>* childEnv = nullptr;  // inherit Resolve's
-    std::string launchSummary;
+    LaunchPlan plan;
     const HelperRoots roots = resolveRoots();
     const std::string fuscript = fuscriptPath(roots.fuscript);
     const std::string luaScript = bundleResource("ndi_timeline_watch.lua");
@@ -134,49 +141,77 @@ bool spawnHelperLocked()
         // -q suppresses the banner fuscript writes to stdout, which the line
         // protocol would otherwise read as clip paths; -l lua selects the
         // interpreter (same flags as macOS and Windows).
-        argv = {fuscript, "-q", "-l", "lua", luaScript};
-        launchSummary = "fuscript [" + fuscript + "] " + luaScript;
-    } else {
-        // Fallback: the Python helper under the system python3, with
-        // Resolve's scripting variables set for the child.
-        const std::string script = bundleResource("ndi_timeline_watch.py");
-        if (script.empty()) {
-            setHealthLocked(false, "helper scripts missing from the plugin bundle's Resources");
-            return false;
-        }
-        static const char* kPython = "/usr/bin/python3";
-        std::vector<std::string> parent;
-        for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
-            parent.emplace_back(*e);
-        }
-        // One environment for the probe and the helper: a python3 that only
-        // speaks under Resolve's environment (its LD_LIBRARY_PATH, say) must
-        // not pass the probe and then die as the helper.
-        env = pythonHelperEnvironment(parent, roots.scripting);
-        childEnv = &env;
-        if (!isExecutableFile(kPython) || !exitsCleanly({kPython, "--version"}, childEnv)) {
-            setHealthLocked(false, "no fuscript at " + fuscript +
-                                       " and no working /usr/bin/python3 — reinstall DaVinci "
-                                       "Resolve, install python3, or set a Manual Path clip");
-            return false;
-        }
-        argv = {kPython, script};
-        launchSummary = "python [" + std::string(kPython) + ", RESOLVE_SCRIPT_LIB=" +
-                        scriptingLibPath(roots.scripting) + "] " + script;
+        plan.argv = {fuscript, "-q", "-l", "lua", luaScript};
+        plan.summary = "fuscript [" + fuscript + "] " + luaScript;
+        return plan;
     }
+    // Fallback: the Python helper under the system python3, with Resolve's
+    // scripting variables set for the child.
+    const std::string script = bundleResource("ndi_timeline_watch.py");
+    if (script.empty()) {
+        plan.error = "helper scripts missing from the plugin bundle's Resources";
+        return plan;
+    }
+    static const char* kPython = "/usr/bin/python3";
+    std::vector<std::string> parent;
+    for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+        parent.emplace_back(*e);
+    }
+    // One environment for the probe and the helper: a python3 that only
+    // speaks under Resolve's environment (its LD_LIBRARY_PATH, say) must not
+    // pass the probe and then die as the helper.
+    plan.env = pythonHelperEnvironment(parent, roots.scripting);
+    plan.explicitEnv = true;
+    if (!isExecutableFile(kPython) || !exitsCleanly({kPython, "--version"}, &plan.env)) {
+        plan.error = "no fuscript at " + fuscript +
+                     " and no working /usr/bin/python3 — reinstall DaVinci Resolve, install "
+                     "python3, or set a Manual Path clip";
+        return plan;
+    }
+    plan.argv = {kPython, script};
+    plan.summary = "python [" + std::string(kPython) + ", RESOLVE_SCRIPT_LIB=" +
+                   scriptingLibPath(roots.scripting) + "] " + script;
+    return plan;
+}
 
+// Spawn the planned helper with its stdout on a pipe; false with *error set.
+// The caller holds gMutex and has re-checked gStop under it, so shutdown()
+// either captures this helper's pid or stops the spawn (posix_spawn itself
+// is quick: glibc returns once the child has exec'd).
+bool spawnHelperLocked(const LaunchPlan& plan, std::string* error)
+{
     pid_t pid = -1;
     int fd = -1;
-    std::string error;
-    if (!spawnPipedProcess(argv, childEnv, &pid, &fd, &error)) {
-        setHealthLocked(false, "helper spawn failed: " + error);
+    std::string why;
+    if (!ndi_timelinewatch_linux::spawnPipedProcess(plan.argv, plan.explicitEnv ? &plan.env : nullptr,
+                                                    &pid, &fd, &why)) {
+        *error = "helper spawn failed: " + why;
         return false;
     }
     gHelperPid = pid;
     gHelperFd = fd;
     setHealthLocked(false, "helper starting");  // healthy once the first line lands
-    watchLog("helper started (" + launchSummary + ")");
     return true;
+}
+
+// Wait for the helper to die, then reap it; returns describeWaitStatus's
+// phrase. The wait is outside gMutex. waitid(WNOWAIT) leaves the dead helper
+// a zombie, so its pid can't be reused while gHelperPid still names it and
+// shutdown() may still signal it; the reap and the clear then happen
+// together under the lock. Reader thread only.
+std::string reapHelper(pid_t pid)
+{
+    siginfo_t info;
+    while (waitid(P_PID, pid, &info, WEXITED | WNOWAIT) != 0 && errno == EINTR) {
+    }
+    std::string detail = "status unknown";
+    std::lock_guard<std::mutex> lock(gMutex);
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) == pid) {
+        detail = ndi_timelinewatch_linux::describeWaitStatus(status);
+    }
+    gHelperPid = -1;
+    return detail;
 }
 
 // NOTE fd ownership: only the reader thread ever closes gHelperFd (via
@@ -194,36 +229,57 @@ void readerLoop()
         ~DoneFlag() { gReaderDone.store(true); }
     } doneFlag;
     std::string lastAnnouncedError;
+    auto announce = [&lastAnnouncedError](const std::string& msg) {  // deduped
+        if (msg != lastAnnouncedError) {
+            lastAnnouncedError = msg;
+            watchLog(msg);
+        }
+    };
+    auto backoff = [] {
+        for (int i = 0; i < kRespawnBackoffSeconds * 10 && !gStop.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    };
     while (!gStop.load(std::memory_order_relaxed)) {
+        const LaunchPlan plan = planHelperLaunch();  // no lock: may block on the probe
+        std::string failure;
         int fd = -1;
         {
             std::lock_guard<std::mutex> lock(gMutex);
-            if (gHelperFd < 0 && !spawnHelperLocked()) {
-                if (gHealthDetail != lastAnnouncedError) {
-                    lastAnnouncedError = gHealthDetail;
-                    watchLog(gHealthDetail);
-                }
+            // Re-checked under the lock shutdown() sets it under: either
+            // shutdown() sees this helper's pid, or no helper is spawned
+            // after it looked.
+            if (gStop.load()) {
+                break;
             }
-            fd = gHelperFd;
+            failure = plan.error;
+            if (failure.empty() && spawnHelperLocked(plan, &failure)) {
+                fd = gHelperFd;
+            } else {
+                setHealthLocked(false, failure);
+            }
         }
         if (fd < 0) {
-            for (int i = 0; i < kRespawnBackoffSeconds * 10 && !gStop.load(); ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+            announce(failure);
+            backoff();
             continue;
         }
+        watchLog("helper started (" + plan.summary + ")");
 
         FILE* stream = fdopen(fd, "r");
         if (stream == nullptr) {
-            std::lock_guard<std::mutex> lock(gMutex);
-            close(gHelperFd);
-            gHelperFd = -1;
-            if (gHelperPid > 0) {
-                kill(gHelperPid, SIGTERM);
-                int status = 0;
-                waitpid(gHelperPid, &status, 0);
-                gHelperPid = -1;
+            close(fd);
+            pid_t pid = -1;
+            {
+                std::lock_guard<std::mutex> lock(gMutex);
+                gHelperFd = -1;
+                pid = gHelperPid;
             }
+            // Unreaped, so the pid is still ours to signal without the lock.
+            kill(pid, SIGKILL);
+            reapHelper(pid);
+            announce("fdopen() on the helper pipe failed — retrying in 30 s");
+            backoff();
             continue;
         }
         char line[4096];
@@ -235,12 +291,7 @@ void readerLoop()
             }
             if (line[0] == '!') {
                 // Status message from the helper — log deduped.
-                std::lock_guard<std::mutex> lock(gMutex);
-                const std::string msg(line + 1);
-                if (msg != lastAnnouncedError) {
-                    lastAnnouncedError = msg;
-                    watchLog(msg);
-                }
+                announce(std::string(line + 1));
                 continue;
             }
             if (line[0] == '@') {
@@ -293,29 +344,28 @@ void readerLoop()
         }
         // EOF (helper died) or shutdown. fclose also closes the fd.
         fclose(stream);
+        pid_t pid = -1;
         {
             std::lock_guard<std::mutex> lock(gMutex);
             gHelperFd = -1;
-            // The exit status is how a dying helper identifies itself — an
-            // interpreter that dies before its first protocol line leaves no
-            // other evidence in the log (issue #34).
-            std::string exitDetail = "status unknown";
-            if (gHelperPid > 0) {
-                int status = 0;
-                if (waitpid(gHelperPid, &status, 0) == gHelperPid) {
-                    exitDetail = ndi_timelinewatch_linux::describeWaitStatus(status);
-                }
-                gHelperPid = -1;
-            }
-            if (!gStop.load(std::memory_order_relaxed)) {
+            pid = gHelperPid;
+            // No more reports can arrive, though the helper may take a while
+            // to exit (reapHelper waits for it).
+            setHealthLocked(false, "helper closed its output");
+        }
+        // The exit status is how a dying helper identifies itself — an
+        // interpreter that dies before its first protocol line leaves no
+        // other evidence in the log (issue #34).
+        const std::string exitDetail = pid > 0 ? reapHelper(pid) : std::string("status unknown");
+        if (!gStop.load(std::memory_order_relaxed)) {
+            {
+                std::lock_guard<std::mutex> lock(gMutex);
                 setHealthLocked(false, "helper exited (" + exitDetail + ") — retrying");
-                watchLog("helper exited (" + exitDetail + ") — retrying in 30 s (Manual "
-                         "Path mode is unaffected)");
             }
+            watchLog("helper exited (" + exitDetail + ") — retrying in 30 s (Manual Path mode "
+                     "is unaffected)");
         }
-        for (int i = 0; i < kRespawnBackoffSeconds * 10 && !gStop.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
+        backoff();
     }
 }
 
@@ -385,8 +435,10 @@ void shutdown()
     // A helper that traps SIGTERM would otherwise pin the reader in fgets
     // and this join in plugin unload forever: escalate to SIGKILL after 2 s
     // (as macOS and Windows do). The reader still reaps it; a pid that
-    // already died and was reaped is never re-signalled (gHelperPid is
-    // cleared under the mutex before any reuse).
+    // already died and was reaped is never re-signalled (reapHelper clears
+    // gHelperPid under the mutex in the same step as the reap). The reader
+    // re-checks gStop under the mutex before spawning, so no helper appears
+    // after `helper` was captured.
     for (int i = 0; i < 20 && !gReaderDone.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -399,12 +451,21 @@ void shutdown()
     if (gThread.joinable()) {
         gThread.join();
     }
-    std::lock_guard<std::mutex> lock(gMutex);
-    if (gHelperPid > 0) {  // reader exited before reaping (spawn-window race)
-        int status = 0;
-        waitpid(gHelperPid, &status, 0);
+    // The reader reaps every helper it spawns, so this is belt and braces.
+    // Not under the lock (waitpid blocks); the reader is gone, so nobody else
+    // reaps or signals this pid.
+    pid_t leftover = -1;
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        leftover = gHelperPid;
         gHelperPid = -1;
     }
+    if (leftover > 0) {
+        kill(leftover, SIGKILL);
+        int status = 0;
+        waitpid(leftover, &status, 0);
+    }
+    std::lock_guard<std::mutex> lock(gMutex);
     gStarted = false;
     gOnChange = nullptr;
     gOnColor = nullptr;
