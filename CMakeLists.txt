@@ -304,9 +304,8 @@ endif()
 
 # --- The plugin --------------------------------------------------------------
 # Windows adds its Browse-dialog (#24) and Timeline (Auto) watcher (#25)
-# implementations; Linux its Timeline (Auto) watcher (#75). Linux has no
-# Browse dialog yet (#76): its capability macro stays undefined there, so
-# the plugin compiles the buttons out.
+# implementations; Linux its Timeline (Auto) watcher (#75) and its Browse
+# dialog (#76, NDI_LINUX_FILE_DIALOG below).
 set(NDI_PLUGIN_SOURCES src/NDIOutputPlugin.cpp)
 if(WIN32)
     list(APPEND NDI_PLUGIN_SOURCES
@@ -317,6 +316,8 @@ elseif(NDI_PLATFORM_LINUX)
     # amended by #71: libndi NEEDs the Avahi client libraries, and a
     # link-time import would hide the plugin on machines without them).
     list(APPEND NDI_PLUGIN_SOURCES src/LinuxNDIRuntime.cpp)
+    # Browse buttons spawn zenity, else kdialog (spec decision 18).
+    list(APPEND NDI_PLUGIN_SOURCES src/LinuxFileDialog.cpp)
     # Timeline (Auto) + Timeline Color = Auto (#75; NDI_TIMELINE_WATCH).
     list(APPEND NDI_PLUGIN_SOURCES src/LinuxTimelineWatch.cpp)
 endif()
@@ -359,6 +360,8 @@ target_link_libraries(NDIOutput PRIVATE ZLIB::ZLIB)
 if(NDI_PLATFORM_LINUX)
     # Gates the plugin's NDI call sites onto the dlopened API table.
     target_compile_definitions(NDIOutput PRIVATE NDI_RUNTIME_DLOPEN)
+    # The browse buttons' zenity/kdialog picker (src/LinuxFileDialog.h).
+    target_compile_definitions(NDIOutput PRIVATE NDI_LINUX_FILE_DIALOG)
     # The BRAW immersive-metadata reader (ticket #77; braw_reader above).
     target_link_libraries(NDIOutput PRIVATE braw_reader)
 endif()
@@ -440,6 +443,7 @@ set(NDI_PORTABLE_TESTS
     test_ndi_loader
     test_linux_ndi_runtime
     test_linux_gpu_path
+    test_linux_file_dialog
     test_linux_timeline_watch
     test_linux_braw_runtime
     test_stmap
@@ -540,6 +544,15 @@ elseif(NDI_PLATFORM_LINUX)
     add_executable(test_linux_log tests/test_linux_log.cpp)
     target_include_directories(test_linux_log PRIVATE src)
     add_test(NAME test_linux_log COMMAND test_linux_log)
+    # The browse dialog's real spawn against fake zenity/kdialog scripts
+    # (ticket #76; src/LinuxFileDialog.cpp). No GUI.
+    add_executable(test_linux_file_dialog_spawn
+        tests/test_linux_file_dialog_spawn.cpp
+        src/LinuxFileDialog.cpp)
+    target_include_directories(test_linux_file_dialog_spawn PRIVATE src)
+    # dlsym (the pump); threads (the close-from-another-thread test).
+    target_link_libraries(test_linux_file_dialog_spawn PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+    add_test(NAME test_linux_file_dialog_spawn COMMAND test_linux_file_dialog_spawn)
     # The Timeline (Auto) watcher's posix_spawn seam (ticket #75;
     # src/LinuxTimelineSpawn.h): pipe, descriptor closing, signal reset.
     add_executable(test_linux_timeline_spawn tests/test_linux_timeline_spawn.cpp)

@@ -106,6 +106,10 @@ static void ndiWinLog(const char* fmt, ...);
 #include "WinFileDialog.h"
 #endif
 
+#ifdef NDI_LINUX_FILE_DIALOG // defined by CMake on Linux (ticket #76)
+#include "LinuxFileDialog.h"
+#endif
+
 // Native browse-dialog seam (ticket #24): both desktop platforms pop a
 // native open dialog from the browse push-buttons, behind one contract
 // (UTF-8 in/out; cancel and every failure return false with the buffer
@@ -117,6 +121,18 @@ static void ndiWinLog(const char* fmt, ...);
 #elif defined(_WIN32)
 #define NDI_HAS_BROWSE_DIALOGS 1
 #define native_open_file_dialog win_open_file_dialog
+#elif defined(NDI_LINUX_FILE_DIALOG)
+// Linux (ticket #76): a zenity/kdialog helper process. It can also fail for
+// a reason the user can fix (neither helper installed), which
+// NDI_BROWSE_DIALOG_ERRORS surfaces in Stream Status.
+#define NDI_HAS_BROWSE_DIALOGS 1
+#define NDI_BROWSE_DIALOG_ERRORS 1
+// The dialog runs Resolve's event loop while it waits (LinuxHostEvents.h),
+// so the instance can be destroyed before it returns: instanceChanged
+// re-validates it (LinuxBrowseGuard.h).
+#define NDI_BROWSE_REENTRANT 1
+#define native_open_file_dialog linux_open_file_dialog
+#define native_take_file_dialog_error linux_take_file_dialog_error
 #endif
 
 // NDI SDK (Standard)
@@ -2637,6 +2653,9 @@ static OfxStatus onUnLoad(void)
 #ifdef NDI_TIMELINE_WATCH
     ndi_timelinewatch::shutdown();
 #endif
+#ifdef NDI_BROWSE_REENTRANT
+    linux_close_file_dialog(); // a picker left open must not outlive the plugin
+#endif
     return kOfxStatOK;
 }
 
@@ -3248,6 +3267,9 @@ static OfxStatus createInstance(OfxImageEffectHandle effect, OfxPropertySetHandl
     // Auto camera-clip mode: visible to the playhead watcher from here on
     // (the walk holds the registry mutex, so destroyInstance can't race it).
     instanceRegistryAdd(myData);
+#ifdef NDI_BROWSE_REENTRANT
+    linux_browse_live_instances().add(myData);
+#endif
 
     // Initialize NDI if enabled
     if (myData->enabled) {
@@ -3286,6 +3308,9 @@ static OfxStatus destroyInstance(OfxImageEffectHandle effect)
     NDIInstanceData *myData = getInstanceData(effect);
     if (myData) {
         instanceRegistryRemove(myData);  // before delete: the watcher walk holds the same mutex
+#ifdef NDI_BROWSE_REENTRANT
+        linux_browse_live_instances().remove(myData); // a Browse waiting on it must not write back
+#endif
         shutdownNDI(myData);
         delete myData;
     }
@@ -3312,6 +3337,22 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
         // into the matching STMap field, then fall through — the reads below
         // pick the new value up and refreshSTMaps loads the map. Cancel (or
         // any dialog failure) changes nothing.
+#ifdef NDI_BROWSE_REENTRANT
+        // The Linux dialog runs Resolve's events while it waits, and they can
+        // destroy this instance (LinuxBrowseGuard.h): after each dialog,
+        // return without touching myData, the params or inArgs if it is gone.
+        const ndi_linuxdlg::LiveInstances::Token browseOwner = linux_browse_live_instances().token(myData);
+        // Restarts the replayed-click debounce when this action returns,
+        // i.e. after the picked file has been loaded below.
+        const BrowseActionScope browseActionScope;
+        auto browseOwnerGone = [&browseOwner] {
+            if (linux_browse_live_instances().isLive(browseOwner)) return false;
+            NDI_LOG_TEXT("Browse: the instance was destroyed while its file dialog was open; nothing written");
+            return true;
+        };
+#else
+        auto browseOwnerGone = [] { return false; };
+#endif
         if (strcmp(paramName, kParamSTMapPackedBrowse) == 0 ||
             strcmp(paramName, kParamSTMapLeftBrowse) == 0 ||
             strcmp(paramName, kParamSTMapRightBrowse) == 0) {
@@ -3322,10 +3363,12 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
             char* currentPath = nullptr;
             gParamHost->paramGetValue(pathParam, &currentPath);
             char picked[4096];
-            if (native_open_file_dialog(isPacked ? "Choose the packed side-by-side STMap EXR"
-                                    : isLeft  ? "Choose the left-eye STMap EXR"
-                                              : "Choose the right-eye STMap EXR",
-                                     "exr", currentPath, picked, sizeof(picked))) {
+            const bool pickedOk = native_open_file_dialog(isPacked ? "Choose the packed side-by-side STMap EXR"
+                                                          : isLeft  ? "Choose the left-eye STMap EXR"
+                                                                    : "Choose the right-eye STMap EXR",
+                                                          "exr", currentPath, picked, sizeof(picked));
+            if (browseOwnerGone()) return kOfxStatOK;
+            if (pickedOk) {
                 gParamHost->paramSetValue(pathParam, picked);
                 NDI_LOG_TEXT((std::string("STMap browse picked: '") + picked + "'").c_str());
             }
@@ -3334,8 +3377,10 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
             char* currentPath = nullptr;
             gParamHost->paramGetValue(myData->colorLutParam, &currentPath);
             char picked[4096];
-            if (native_open_file_dialog("Choose the 3D .cube LUT for the NDI stream", "cube", currentPath,
-                                        picked, sizeof(picked))) {
+            const bool pickedOk = native_open_file_dialog("Choose the 3D .cube LUT for the NDI stream", "cube",
+                                                          currentPath, picked, sizeof(picked));
+            if (browseOwnerGone()) return kOfxStatOK;
+            if (pickedOk) {
                 gParamHost->paramSetValue(myData->colorLutParam, picked);
                 NDI_LOG_TEXT((std::string("Output Color LUT browse picked: '") + picked + "'").c_str());
             }
@@ -3344,13 +3389,28 @@ static OfxStatus instanceChanged(OfxImageEffectHandle effect, OfxPropertySetHand
             char* currentPath = nullptr;
             gParamHost->paramGetValue(myData->brawClipParam, &currentPath);
             char picked[4096];
-            if (native_open_file_dialog("Choose any BRAW clip shot on the URSA Cine Immersive, "
-                                        "or an .ilpd lens calibration file",
-                                        "braw;ilpd", currentPath, picked, sizeof(picked))) {
+            const bool pickedOk = native_open_file_dialog("Choose any BRAW clip shot on the URSA Cine Immersive, "
+                                                          "or an .ilpd lens calibration file",
+                                                          "braw;ilpd", currentPath, picked, sizeof(picked));
+            if (browseOwnerGone()) return kOfxStatOK;
+            if (pickedOk) {
                 gParamHost->paramSetValue(myData->brawClipParam, picked);
                 NDI_LOG_TEXT((std::string("Camera clip browse picked: '") + picked + "'").c_str());
             }
         }
+#ifdef NDI_BROWSE_DIALOG_ERRORS
+        // A Browse that couldn't show a picker says why (e.g. the package to
+        // install). Written to the param directly, not through
+        // statusParamValue, so the next render's unchanged stream status
+        // doesn't overwrite it; the next real status change does.
+        const std::string browseError = native_take_file_dialog_error();
+        if (!browseError.empty()) {
+            NDI_LOG_TEXT(browseError.c_str());
+            if (myData->stereoStatusParam) {
+                gParamHost->paramSetValue(myData->stereoStatusParam, browseError.c_str());
+            }
+        }
+#endif
 #endif
 
         readInstanceParams(myData);

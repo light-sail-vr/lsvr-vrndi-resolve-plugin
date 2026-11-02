@@ -260,11 +260,11 @@ Same rule as macOS: any Windows build change updates this section in the same PR
 
 ---
 
-## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending), Timeline (Auto) + Timeline Color = Auto (#75) and Camera Metadata (BRAW) projection (#77) (both: Tier 2 in Resolve pending); Browse (#76) still to come
+## Linux — STATUS: CMake build + compile-only CI (#72), first stream on the CPU path + SSH dev loop (#73), release tarball + `install.sh` (#78), CUDA GPU-native path on hardware (#74: 1080p24 verified on the box, 8K stereo pending), Timeline (Auto) + Timeline Color = Auto (#75), Browse buttons (#76) and Camera Metadata (BRAW) projection (#77); Tier 2 in Resolve still pending for #75–#77
 
 Plan and decisions: [docs/linux-port-spec.md](docs/linux-port-spec.md); work items: GitHub issues labelled `linux`. Findings go to [LEARNINGS.md](LEARNINGS.md). The same `CMakeLists.txt` drives Windows and Linux; the Makefile stays the macOS harness.
 
-**Not yet on Linux:** Browse buttons. Their capability macro (`NDI_HAS_BROWSE_DIALOGS`) is not defined on Linux, so the plugin compiles them out; the path fields still accept a typed or pasted path (Manual Path works). Ticket #76 adds them. Timeline (Auto) + Timeline Color = Auto (`NDI_TIMELINE_WATCH`, #75) and Camera Metadata (BRAW) projection (`NDI_HAS_BRAW_READER`, #77) are built on Linux: see their sections below.
+**Feature parity:** every platform feature is built on Linux: Browse buttons (`NDI_HAS_BROWSE_DIALOGS`, #76), Timeline (Auto) + Timeline Color = Auto (`NDI_TIMELINE_WATCH`, #75) and Camera Metadata (BRAW) projection (`NDI_HAS_BRAW_READER`, #77); see their sections below. What's still open is box verification (Tier 2 in Resolve, #74's 8K stereo round), not code.
 
 ### Prerequisites
 
@@ -437,6 +437,21 @@ It writes `dist/v<V>/NDIOutput-<V>-linux-x86_64.tar.gz` and `dist/v<V>/SHA256SUM
 - prints an `NVIDIA driver:` line from `/proc/driver/nvidia/version` (information only), the Resolve-restart hint (plus "Resolve is running" when it is, found by argv[0] as in `linux_remote.sh`) and the cache-reset path in the invoking user's home (`SUDO_USER`).
 
 **Tests:** `tests/test_linux_installer.sh` drives both scripts against fake roots (the test-only `NDIOUTPUT_ROOT` stands in for `/`, `NDIOUTPUT_TEST_EUID` for the uid, and a fake `ldconfig` on `PATH` for the loader cache) and `tests/test_package_linux_release.sh` checks the packaging refusals on fake staged trees (`NDIOUTPUT_TODAY` pins the date); both run in `ctest` on Linux and by hand on the Mac. `tests/linux_installer_container_test.sh <tarball> --avahi-libs yes|no [--elf-checker PATH]` runs the real install/uninstall cycle as root inside a throwaway container; linux.yml runs it on `ubuntu:24.04` and `rockylinux:8`, each with and without the Avahi client libraries. It uses no `find` or `cmp`, because Rocky 8's base image has neither and `install.sh` mustn't need them.
+
+### Browse buttons on Linux
+
+The Browse buttons (STMap packed/left/right, Camera Clip or ILPD, Output Color LUT) run a file-picker helper, because Resolve draws no browse control on file-path string params and the plugin can't link a toolkit (Resolve's private Qt is the clash spec decision 6 avoids). [src/LinuxFileDialog.h](src/LinuxFileDialog.h) runs **`zenity --file-selection`**, falling back to **`kdialog --getopenfilename`**, starting at the field's file (its folder opens with it selected), else the last file picked, else `$HOME`. It passes a file, not a folder, because zenity 4.0.1 selects a folder passed to `--filename` inside its parent instead of opening it, trailing `/` or not (LEARNINGS, 2026-11-01). The dialog has an extension filter that matches both cases (`*.exr *.EXR`). zenity 4.0.1 (Ubuntu 24.04) adds the filter but doesn't select it: the filter menu reads "(None)" and lists every file until you pick the filter there. CMake defines `NDI_LINUX_FILE_DIALOG` on Linux, and the plugin aliases `native_open_file_dialog` to it like the macOS and Windows dialogs.
+
+- **Runtime requirement:** `zenity` (GNOME, and Ubuntu's default) or `kdialog` (KDE) on `PATH`. With neither, a Browse click changes nothing and Stream Status says which package to install. A Resolve with neither `DISPLAY` nor `WAYLAND_DISPLAY` gets a Stream Status message too: zenity exits 1 without a display, which would otherwise read as a cancel.
+- **Modal, without freezing Resolve:** the click returns when the helper exits, as the macOS and Windows dialogs do. Meanwhile [src/LinuxHostEvents.h](src/LinuxHostEvents.h) runs Resolve's own Qt event loop every 30 ms with `QCoreApplication::processEvents(ExcludeUserInputEvents)`, looked up with `dlsym(RTLD_DEFAULT)` and never linked (spec decision 18). Resolve repaints and answers GNOME's "not responding" ping, while clicks and keys wait for the dialog to close. Without the symbol, without a `QCoreApplication`, or off the main thread there's no pump and Resolve just waits (and GNOME greys it out, as the first Tier 2 run showed).
+- **Re-entrancy guards** ([src/LinuxBrowseGuard.h](src/LinuxBrowseGuard.h), `NDI_BROWSE_REENTRANT`, Linux only):
+  - If Resolve destroys the instance while its dialog is open, nothing is written back.
+  - Quitting Resolve, unloading the plugin, or Resolve exiting closes the helper (SIGTERM to its process group, then SIGKILL after 2 s), and the dialog returns as a cancel.
+  - One dialog at a time.
+  - A Browse click within 300 ms of the last dialog's action is ignored, so a second click made while the dialog was open doesn't pop a second dialog.
+- **Environment:** the helper inherits Resolve's environment minus `LD_LIBRARY_PATH`, `LD_PRELOAD` and Qt's plugin and QML paths, so a GTK or Qt helper never loads Resolve's libraries. If Resolve's locale isn't UTF-8 (e.g. `LANG=C`), the helper also gets `LC_ALL=C.UTF-8`, so kdialog doesn't mangle non-ASCII paths.
+- **Session types:** verified on X11 (the box, GNOME on Ubuntu 24.04, zenity 4.0.1). **Wayland is untested** (both helpers go through xdg-desktop-portal there), and so is kdialog.
+- **Tests:** `test_linux_file_dialog` (portable, so it runs in every CMake build) covers the argv, the output parsing, cancel, the fallback and the missing-helper message with an injected spawner. It also covers the event pump's symbol lookup and guards, the UTF-8 locale rule, and the re-entrancy guards (instance registry, gate, debounce on a faked clock). `test_linux_file_dialog_spawn` (Linux only) runs the real `posix_spawnp` code against fake `zenity`/`kdialog` scripts on `PATH`. That includes the idle hook's 30 ms cadence, aborting by SIGTERM and by SIGKILL, a close from another thread, and the real debounce. Neither opens a window.
 
 ### Timeline (Auto) and Timeline Color = Auto (#75)
 

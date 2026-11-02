@@ -102,6 +102,21 @@ firewalld (Rocky/RHEL, on by default), for the zone your LAN interface is in:
 (firewalld zone rules apply to IPv4 and IPv6 alike, link-local included.)
 
 
+Browse buttons: zenity or kdialog
+---------------------------------
+The Browse buttons (STMap, LUT, Camera Clip) open a file dialog through
+zenity, or kdialog when zenity isn't installed. Ubuntu's desktop includes
+zenity. Without either, Browse does nothing and Stream Status says what to
+install; you can still type or paste the path into the field.
+    Ubuntu/Debian:      sudo apt install zenity
+    Rocky/RHEL/Alma:    sudo dnf install zenity
+    KDE desktops:       kdialog (usually already installed)
+With zenity 4.0.1 (Ubuntu 24.04) the dialog's file-type menu starts at
+"(None)" and lists every file; choose the file type there to narrow it.
+Tested on an X11 desktop session with zenity. Wayland sessions and kdialog
+are untested.
+
+
 Display: Resolve needs real NVIDIA OpenGL
 -----------------------------------------
 On a headless or remote-desktop machine, run X on the NVIDIA driver with a

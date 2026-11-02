@@ -832,6 +832,38 @@ A Tier 2 automation that waited for `pgrep -x resolve` never saw the running Res
 **Validated by:** the new test fails on the old script and passes on the fix, with both the Mac's openrsync and the box's rsync 3.2.7. A fresh `~/ndioutput-78t2` sync then packaged without `--force` (`[info] … is not a git checkout`).
 **Rule:** an rsync exclude meant for `.git` must not end in a slash; worktrees and submodules use a `.git` file. After you fix an exclude, delete the stale copy on the box yourself.
 
+### 2026-11-01 — zenity exits 1 without a display, the same code as Cancel (Linux) (#76)
+**Symptom:** found while designing the Linux Browse dialog: `env -u DISPLAY zenity --file-selection` on the box printed `Gtk-WARNING: Failed to open display` to stderr and exited **1**, the same status as Cancel or closing the window. A Browse click from a Resolve without a display would have looked like the user cancelled. Separately, the first spawn test let the box's real `/usr/bin/zenity` answer in place of the fake `kdialog` it was testing, because `/usr/bin` was on the test's `PATH`.
+**Root cause:** zenity (4.0.1) has no distinct exit status for "couldn't start GTK"; only stderr says so. Any test that puts system directories on `PATH` sees the machine's real helpers.
+**Fix:** `runDialog` (src/LinuxFileDialog.h) fails with a Stream Status message when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set, before spawning anything. `test_linux_file_dialog_spawn` puts only the fake helpers' directory on `PATH`, and its scripts call coreutils by absolute path.
+**Validated by:** the box (`exit=1` plus the warning); `test_linux_file_dialog` and `test_linux_file_dialog_spawn` green in the Rocky 8 container and on the Ubuntu host.
+**Rule:** never treat a helper's exit 1 as Cancel unless the environment could have shown a window; tests that fake a program own the whole `PATH`.
+
+### 2026-11-01 — `NDI_LINUX_DIR=~/x` unquoted is expanded on the Mac, not the box (#76)
+**Symptom:** `export NDI_LINUX_DIR=~/ndioutput-76 && scripts/linux_remote.sh sync` failed with `rsync: mkdir "/Users/matthewcelia/ndioutput-76" failed`.
+**Root cause:** the Mac's shell expands an unquoted `~/` in an assignment before `linux_remote.sh` runs, so the script got the Mac's home path. The script's own `~/x` handling (`box_path`, 2026-10-30 review entry) only sees a literal `~`.
+**Fix:** none needed in the script; quote it: `NDI_LINUX_DIR='~/ndioutput-76'`, or use a relative path (`NDI_LINUX_DIR=ndioutput-76`, which also means under the box's `$HOME`).
+**Validated by:** the quoted form synced and built in `~/ndioutput-76` on the box.
+**Rule:** pass box paths to `linux_remote.sh` quoted or relative, never as a bare `~/`.
+
+### 2026-11-01 — zenity 4.0.1: `--filename=<dir>/` selects the folder in its parent, and no filter is preselected (Linux) (#76)
+**Symptom:** Tier 2 on the box: Browse with an empty field passed `--filename=/home/matt/`, and the dialog opened in `/home` with `matt` selected rather than inside it. In every dialog the file-type menu read "(None)" and the list showed all files (`evidence.sh` in a BRAW/ILPD pick), although `--file-filter=EXR files | *.exr *.EXR` was passed.
+**Root cause:** zenity 4.0.1 (Ubuntu 24.04) passes `--filename` to `gtk_file_chooser_set_file`, which opens a file's folder with the file selected and treats a directory the same way, trailing `/` or not (`src/fileselection.c` at tag 4.0.1). Later zenity moved to `GtkFileDialog` and honours the trailing `/`. 4.0.1 also adds each `--file-filter` with `gtk_file_chooser_add_filter` but never selects one, and GTK 4.14 then filters nothing.
+**Fix:** pass a FILE: the field's value, else the last file picked in this Resolve session, and only then `$HOME/` (where 4.0.1 shows the home folder selected inside `/home`). The filter can't be selected from the command line; BUILD.md and the installer README tell users to choose it in the menu.
+**Validated by:** the Tier 2 screenshots (first frame of each dialog); unit tests for the start-file rules.
+**Rule:** check a GUI helper's argument semantics against the source of the version the target distro ships, not its `--help`.
+
+### 2026-11-01 — Linux Browse froze Resolve until the dialog closed, and GNOME offered to kill it (#76)
+**Symptom:** Tier 2 round 1 on the box (X11, GNOME, zenity 4.0.1): every Browse picked and loaded its file, but while the zenity dialog was open Resolve stopped handling events (its window no longer updated) and, after a few seconds, GNOME greyed it out with the "DaVinci Resolve is not responding — Force Quit / Wait" prompt. Picking or cancelling brought it back.
+**Root cause:** the browse button's `instanceChanged` runs on Resolve's main (Qt GUI) thread, and the first Linux dialog waited for the helper process there with a blocking `poll`/`waitpid`. Nothing ran Resolve's event loop meanwhile: no expose events, and no answer to mutter's `_NET_WM_PING`, which is how GNOME decides a window is hung. The macOS and Windows dialogs never showed this because `NSOpenPanel runModal` and `IFileOpenDialog::Show` run a nested event loop of their own; a separate helper process gives Linux nothing equivalent.
+**Fix:** while the helper runs, the plugin calls Resolve's own `QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents)` every 30 ms. It is looked up by its Qt 5.15 mangled name with `dlsym(RTLD_DEFAULT)`, with no link-time or header dependency, and if the symbol is missing, no `QCoreApplication` exists, or the call is off the main thread, the plugin keeps the old blocking wait (`src/LinuxHostEvents.h`; spec decision 18, Matt accepted the ABI dependency on 2026-11-01). Clicks and keys stay queued until the dialog closes. Pumping the host makes `instanceChanged` re-entrant, so the code review added three guards (`src/LinuxBrowseGuard.h`):
+- The instance is re-validated after the dialog (live-instance registry, pointer + generation), and nothing is written back if Resolve destroyed it meanwhile.
+- The helper is closed (SIGTERM to its process group, then SIGKILL) if the `QCoreApplication` goes away, the plugin unloads, or Resolve exits.
+- A Browse within 300 ms of the last dialog's action is ignored, so a second click made while the dialog was up doesn't replay into a second dialog.
+
+**Validated by:** unit tests only so far: `test_linux_file_dialog` (the pump's symbol lookup and guards, the app-gone and unload aborts, the gate and debounce with a faked clock, the instance registry) and `test_linux_file_dialog_spawn` (the 30 ms idle cadence against a fake helper, abort by SIGTERM and by SIGKILL, a close from another thread, the real gate's debounce). **Tier 2 round 2 in Resolve is still pending:** repaint and no GNOME prompt during the dialog, a re-pick of an STMap and a LUT, a cancel, a second click during the dialog, and closing the dialog while Resolve repaints.
+**Rule:** a plugin action that waits on anything slower than a frame on the host's GUI thread must keep the host's event loop running, and once it does, everything after the wait has to assume the host may have destroyed the instance or queued input in the meantime.
+
 ### OPEN — Windows/CUDA build failing (as of 2026-08-28)
 Commit `50eacc1` added the CMake + CUDA port ([CMakeLists.txt](CMakeLists.txt), [src/CudaGPUAcceleration.cu](src/CudaGPUAcceleration.cu), two build .bat variants) but it has not yet produced a working build. Needs a Windows machine with VS 2019+/CUDA 11+/NDI 6 Advanced SDK to iterate. Record the actual failure output here when work resumes — "failing" without the error text is unactionable.
 
