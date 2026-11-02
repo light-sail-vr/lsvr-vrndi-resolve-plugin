@@ -126,7 +126,10 @@ inline std::string bundleResourcePath(const std::string& modulePath, const std::
 // RESOLVE_SCRIPT_API/RESOLVE_SCRIPT_LIB replaced, the Modules dir put first
 // on PYTHONPATH (an inherited PYTHONPATH kept behind it), and PYTHONHOME
 // dropped — it would point the system python at some other interpreter's
-// stdlib. Everything else passes through.
+// stdlib. LD_LIBRARY_PATH and LD_PRELOAD are dropped too: Resolve's launcher
+// points them at its bundled libraries, which /usr/bin/python3 and its
+// extension modules must not load in place of the system's. Everything else
+// passes through. The watcher probes python3 with this same environment.
 inline std::vector<std::string> pythonHelperEnvironment(const std::vector<std::string>& parent,
                                                         const std::string& root)
 {
@@ -138,7 +141,8 @@ inline std::vector<std::string> pythonHelperEnvironment(const std::vector<std::s
     std::string pythonPath = scriptingModulesDir(root);
     for (const std::string& entry : parent) {
         if (keyIs(entry, "RESOLVE_SCRIPT_API") || keyIs(entry, "RESOLVE_SCRIPT_LIB") ||
-            keyIs(entry, "PYTHONHOME")) {
+            keyIs(entry, "PYTHONHOME") || keyIs(entry, "LD_LIBRARY_PATH") ||
+            keyIs(entry, "LD_PRELOAD")) {
             continue;
         }
         if (keyIs(entry, "PYTHONPATH")) {

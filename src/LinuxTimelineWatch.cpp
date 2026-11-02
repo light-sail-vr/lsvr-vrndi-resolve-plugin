@@ -145,18 +145,21 @@ bool spawnHelperLocked()
             return false;
         }
         static const char* kPython = "/usr/bin/python3";
-        if (!isExecutableFile(kPython) || !exitsCleanly({kPython, "--version"})) {
+        std::vector<std::string> parent;
+        for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+            parent.emplace_back(*e);
+        }
+        // One environment for the probe and the helper: a python3 that only
+        // speaks under Resolve's environment (its LD_LIBRARY_PATH, say) must
+        // not pass the probe and then die as the helper.
+        env = pythonHelperEnvironment(parent, roots.scripting);
+        childEnv = &env;
+        if (!isExecutableFile(kPython) || !exitsCleanly({kPython, "--version"}, childEnv)) {
             setHealthLocked(false, "no fuscript at " + fuscript +
                                        " and no working /usr/bin/python3 — reinstall DaVinci "
                                        "Resolve, install python3, or set a Manual Path clip");
             return false;
         }
-        std::vector<std::string> parent;
-        for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
-            parent.emplace_back(*e);
-        }
-        env = pythonHelperEnvironment(parent, roots.scripting);
-        childEnv = &env;
         argv = {kPython, script};
         launchSummary = "python [" + std::string(kPython) + ", RESOLVE_SCRIPT_LIB=" +
                         scriptingLibPath(roots.scripting) + "] " + script;

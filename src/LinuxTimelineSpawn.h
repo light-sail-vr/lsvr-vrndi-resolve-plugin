@@ -181,13 +181,16 @@ inline bool spawnPipedProcess(const std::vector<std::string>& argv,
 // Run a candidate to completion with its output discarded; true only for a
 // clean exit(0). /usr/bin/python3 is a real interpreter on Linux, but the
 // fallback still trusts it only after seeing it run `--version` (issue #34's
-// rule: never trust an interpreter you haven't seen speak).
-inline bool exitsCleanly(const std::vector<std::string>& argv)
+// rule: never trust an interpreter you haven't seen speak). `env` as for
+// spawnPipedProcess: pass the helper's own, so the probe tests the
+// interpreter the helper will actually get.
+inline bool exitsCleanly(const std::vector<std::string>& argv,
+                         const std::vector<std::string>* env = nullptr)
 {
     pid_t pid = -1;
     int fd = -1;
     std::string error;
-    if (!spawnPipedProcess(argv, nullptr, &pid, &fd, &error)) {
+    if (!spawnPipedProcess(argv, env, &pid, &fd, &error)) {
         return false;
     }
     char sink[256];

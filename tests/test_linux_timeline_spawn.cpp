@@ -206,6 +206,27 @@ static void testExitsCleanly()
     expectTrue(!exitsCleanly({"/bin/sh", "-c", "exit 1"}), "a candidate that exits non-zero is rejected");
     expectTrue(!exitsCleanly({"/nonexistent/python3", "--version"}),
                "a candidate that cannot spawn is rejected");
+
+    // The probe runs under the environment it is given — the helper's own —
+    // not the parent's: a candidate that only works with Resolve's
+    // LD_LIBRARY_PATH must fail the probe, not pass it and die as the helper.
+    setenv("LD_LIBRARY_PATH", "/opt/resolve/libs", 1);
+    std::vector<std::string> parent;
+    for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+        parent.emplace_back(*e);
+    }
+    unsetenv("LD_LIBRARY_PATH");
+    const std::vector<std::string> helperEnv =
+        ndi_timelinewatch_linux::pythonHelperEnvironment(parent, "/opt/resolve");
+    const std::vector<std::string> needsResolveLibs = {"/bin/sh", "-c",
+                                                       "[ \"$LD_LIBRARY_PATH\" = /opt/resolve/libs ]"};
+    const std::vector<std::string> needsHelperEnv = {
+        "/bin/sh", "-c",
+        "[ -z \"$LD_LIBRARY_PATH\" ] && [ \"$RESOLVE_SCRIPT_LIB\" = "
+        "/opt/resolve/libs/Fusion/fusionscript.so ]"};
+    expectTrue(!exitsCleanly(needsResolveLibs, &helperEnv),
+               "the probe does not see the parent's LD_LIBRARY_PATH");
+    expectTrue(exitsCleanly(needsHelperEnv, &helperEnv), "the probe runs under the helper's environment");
 }
 
 int main()

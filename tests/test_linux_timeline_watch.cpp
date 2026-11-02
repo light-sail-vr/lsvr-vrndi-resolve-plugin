@@ -194,6 +194,18 @@ static void testPythonHelperEnvironment()
         expectTrue(countKey(env, "PYTHONHOME") == 0 && hasEntry(env, "A=1"),
                    "PYTHONHOME is dropped for the system python");
     }
+    // Resolve's bundled libraries must not load into /usr/bin/python3 (its
+    // libssl, libz, libstdc++ in place of the system's).
+    {
+        const std::vector<std::string> env = pythonHelperEnvironment(
+            {"LD_LIBRARY_PATH=/opt/resolve/libs", "LD_PRELOAD=/opt/resolve/libs/libfoo.so",
+             "LD_LIBRARY_PATHX=keep", "A=1"},
+            "/opt/resolve");
+        expectTrue(countKey(env, "LD_LIBRARY_PATH") == 0 && countKey(env, "LD_PRELOAD") == 0,
+                   "LD_LIBRARY_PATH and LD_PRELOAD are dropped for the system python");
+        expectTrue(hasEntry(env, "LD_LIBRARY_PATHX=keep") && hasEntry(env, "A=1"),
+                   "only the exact keys are dropped");
+    }
 }
 
 static void testDescriptorsToClose()
