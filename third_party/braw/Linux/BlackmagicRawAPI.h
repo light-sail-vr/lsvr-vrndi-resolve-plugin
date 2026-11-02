@@ -29,8 +29,10 @@
 ** (third_party/braw/BlackmagicRawAPI.h), made for this plugin under the
 ** license above: CoreFoundation/CFPlugInCOM.h replaced by the Blackmagic
 ** LinuxCOM.h beside this file, and every CFStringRef replaced by
-** const char* (UTF-8), the Linux SDK's string type. Nothing else differs.
-** See README.md here; replace with the Linux SDK's own header when vendored.
+** const char* (UTF-8), the Linux SDK's string type. Nothing else differs,
+** so the macOS-only Metal enum values remain. Only the calls the reader
+** makes are verified against Resolve's Linux runtime; see README.md here.
+** Replace with the Linux SDK's own header when vendored.
 */
 
 #ifndef BMD_BLACKMAGICRAWAPI_H
