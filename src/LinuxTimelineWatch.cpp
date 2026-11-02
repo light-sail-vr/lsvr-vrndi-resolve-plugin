@@ -196,14 +196,17 @@ bool spawnHelperLocked(const LaunchPlan& plan, std::string* error)
 
 // Wait for the helper to die, then reap it; returns describeWaitStatus's
 // phrase. The wait is outside gMutex. waitid(WNOWAIT) leaves the dead helper
-// a zombie, so its pid can't be reused while gHelperPid still names it and
-// shutdown() may still signal it; the reap and the clear then happen
-// together under the lock. Reader thread only.
+// a zombie, so its pid — and the process group it leads, which every signal
+// goes to — can't be reused while gHelperPid still names it and shutdown()
+// may still signal it; the reap and the clear then happen together under the
+// lock. Whatever the helper forked dies with it (the SIGKILL sweep), so no
+// orphan outlives it holding Resolve's resources. Reader thread only.
 std::string reapHelper(pid_t pid)
 {
     siginfo_t info;
     while (waitid(P_PID, pid, &info, WEXITED | WNOWAIT) != 0 && errno == EINTR) {
     }
+    killpg(pid, SIGKILL);  // ESRCH when the helper forked nothing
     std::string detail = "status unknown";
     std::lock_guard<std::mutex> lock(gMutex);
     int status = 0;
@@ -218,8 +221,8 @@ std::string reapHelper(pid_t pid)
 // fclose of the FILE* wrapping it). Other threads must not close it — the
 // reader may be blocked in fgets on that fd, and a cross-thread close could
 // double-close an fd the host has since reused. Shutdown instead SIGTERMs
-// the helper; its death EOFs the pipe and unblocks the reader within one
-// heartbeat (~0.5 s).
+// the helper's process group; its death EOFs the pipe and unblocks the
+// reader within one heartbeat (~0.5 s).
 
 // Reader thread: consume helper lines, dedupe, fan out changes; respawn the
 // helper (with backoff) whenever it dies, until shutdown.
@@ -276,7 +279,7 @@ void readerLoop()
                 pid = gHelperPid;
             }
             // Unreaped, so the pid is still ours to signal without the lock.
-            kill(pid, SIGKILL);
+            killpg(pid, SIGKILL);
             reapHelper(pid);
             announce("fdopen() on the helper pipe failed — retrying in 30 s");
             backoff();
@@ -427,9 +430,11 @@ void shutdown()
         gStop.store(true);
         // Killing the helper EOFs the pipe, which unblocks the reader's
         // fgets within one heartbeat; the reader owns the fd (see above).
+        // The whole process group, so a grandchild holding the pipe's write
+        // end dies too (spawnPipedProcess makes the helper a group leader).
         helper = gHelperPid;
         if (helper > 0) {
-            kill(helper, SIGTERM);
+            killpg(helper, SIGTERM);
         }
     }
     // A helper that traps SIGTERM would otherwise pin the reader in fgets
@@ -445,7 +450,7 @@ void shutdown()
     if (!gReaderDone.load()) {
         std::lock_guard<std::mutex> lock(gMutex);
         if (gHelperPid > 0 && gHelperPid == helper) {
-            kill(gHelperPid, SIGKILL);
+            killpg(gHelperPid, SIGKILL);
         }
     }
     if (gThread.joinable()) {
@@ -461,7 +466,7 @@ void shutdown()
         gHelperPid = -1;
     }
     if (leftover > 0) {
-        kill(leftover, SIGKILL);
+        killpg(leftover, SIGKILL);
         int status = 0;
         waitpid(leftover, &status, 0);
     }

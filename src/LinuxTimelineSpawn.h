@@ -93,6 +93,10 @@ inline std::vector<std::string> procSelfFdNames()
 // and every signal at its default action: posix_spawn otherwise keeps the
 // spawning thread's mask and every ignored signal across exec, and a helper
 // that inherited a blocked SIGTERM would shrug off the watcher's shutdown.
+// The child also leads a process group of its own (pgid == its pid), so the
+// watcher can killpg() it together with anything it forked: a grandchild
+// that inherited the pipe's write end would otherwise hold it open past the
+// helper's death and pin the reader (and Resolve's quit) in fgets.
 // `env` (KEY=VALUE entries) replaces the environment; nullptr inherits ours.
 // On success *pid and *readFd are the caller's to reap and close; on failure
 // both are -1 and *error carries errno wording.
@@ -145,7 +149,9 @@ inline bool spawnPipedProcess(const std::vector<std::string>& argv,
     sigfillset(&all);
     posix_spawnattr_setsigmask(&attr, &none);
     posix_spawnattr_setsigdefault(&attr, &all);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    posix_spawnattr_setpgroup(&attr, 0);  // 0: a new group led by the child
+    posix_spawnattr_setflags(&attr,
+                             POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETPGROUP);
 
     std::vector<char*> args;
     args.reserve(argv.size() + 1);

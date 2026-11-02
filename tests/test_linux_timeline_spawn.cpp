@@ -3,7 +3,8 @@
 // with /bin/sh — lines arrive intact, stderr stays out of the protocol, the
 // exit status reaches the log wording, the child inherits none of the host's
 // descriptors (under both close strategies) and none of its blocked or
-// ignored signals, and the Python fallback's environment reaches the child.
+// ignored signals, it leads its own process group (so killpg reaches its
+// grandchildren), and the Python fallback's environment reaches the child.
 // Linux only (CMakeLists.txt); the pure discovery half is
 // tests/test_linux_timeline_watch.cpp.
 
@@ -12,6 +13,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -182,6 +184,42 @@ static void testSpawnResetsSignalState()
     pthread_sigmask(SIG_SETMASK, &old, nullptr);
 }
 
+static void testSpawnProcessGroup()
+{
+    // The helper leads its own process group, so the watcher's killpg()
+    // reaches anything it forked. A grandchild that inherited the pipe's
+    // write end would otherwise hold it open past the helper's death and pin
+    // the reader's fgets — and the join at Resolve's quit — forever.
+    pid_t pid = -1;
+    int fd = -1;
+    std::string error;
+    if (!spawnPipedProcess({"/bin/sh", "-c", "sleep 30 & echo ready; wait"}, nullptr, &pid, &fd,
+                           &error)) {
+        expectTrue(false, ("spawn for the process-group test (" + error + ")").c_str());
+        return;
+    }
+    char buf[64];
+    const ssize_t n = read(fd, buf, sizeof(buf));  // "ready": the grandchild is running
+    expectTrue(n > 0, "the helper reports its grandchild started");
+    expectTrue(getpgid(pid) == pid && getpgid(pid) != getpgrp(),
+               "the helper leads a process group of its own");
+    killpg(pid, SIGTERM);
+    pollfd p = {fd, POLLIN, 0};
+    bool eof = false;
+    for (int i = 0; i < 30 && !eof; ++i) {  // up to 3 s
+        if (poll(&p, 1, 100) > 0) {
+            eof = read(fd, buf, sizeof(buf)) == 0;
+        }
+    }
+    expectTrue(eof, "killpg() takes the grandchild holding the pipe down with the helper");
+    if (!eof) {
+        kill(-pid, SIGKILL);
+    }
+    close(fd);
+    int status = 0;
+    waitpid(pid, &status, 0);
+}
+
 static void testSpawnEnvironment()
 {
     // The Python fallback's variables reach the child; nullptr inherits ours.
@@ -238,6 +276,7 @@ int main()
     testSpawnInheritsNoHostDescriptors(CloseStrategy::Auto, "auto");
     testSpawnInheritsNoHostDescriptors(CloseStrategy::ProcFdList, "/proc/self/fd list");
     testSpawnResetsSignalState();
+    testSpawnProcessGroup();
     testSpawnEnvironment();
     testExitsCleanly();
     if (failures) {
