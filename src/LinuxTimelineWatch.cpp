@@ -94,17 +94,21 @@ bool isExecutableFile(const std::string& path)
            access(path.c_str(), X_OK) == 0;
 }
 
-// The Resolve install this process runs from (/opt/resolve on a stock
-// install), or the stock root when the host executable is no Resolve (a
-// standalone harness) or has no fuscript beside it.
-std::string resolveRoot()
+bool isRegularFile(const std::string& path)
 {
-    const std::string fromHost =
-        ndi_timelinewatch_linux::resolveRootForHostExecutable(hostExecutablePath());
-    if (isExecutableFile(ndi_timelinewatch_linux::fuscriptPath(fromHost))) {
-        return fromHost;
-    }
-    return ndi_timelinewatch_linux::kDefaultResolveRoot;
+    struct stat st;
+    return !path.empty() && stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+// The Resolve install this process runs from (/opt/resolve on a stock
+// install), separately for each helper: see helperRoots() in
+// LinuxTimelineWatch.h.
+ndi_timelinewatch_linux::HelperRoots resolveRoots()
+{
+    using namespace ndi_timelinewatch_linux;
+    const std::string fromHost = resolveRootForHostExecutable(hostExecutablePath());
+    return helperRoots(fromHost, isExecutableFile(fuscriptPath(fromHost)),
+                       isRegularFile(scriptingLibPath(fromHost)));
 }
 
 void setHealthLocked(bool ok, const std::string& detail)
@@ -123,8 +127,8 @@ bool spawnHelperLocked()
     std::vector<std::string> env;
     const std::vector<std::string>* childEnv = nullptr;  // inherit Resolve's
     std::string launchSummary;
-    const std::string root = resolveRoot();
-    const std::string fuscript = fuscriptPath(root);
+    const HelperRoots roots = resolveRoots();
+    const std::string fuscript = fuscriptPath(roots.fuscript);
     const std::string luaScript = bundleResource("ndi_timeline_watch.lua");
     if (isExecutableFile(fuscript) && !luaScript.empty()) {
         // -q suppresses the banner fuscript writes to stdout, which the line
@@ -151,11 +155,11 @@ bool spawnHelperLocked()
         for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
             parent.emplace_back(*e);
         }
-        env = pythonHelperEnvironment(parent, root);
+        env = pythonHelperEnvironment(parent, roots.scripting);
         childEnv = &env;
         argv = {kPython, script};
         launchSummary = "python [" + std::string(kPython) + ", RESOLVE_SCRIPT_LIB=" +
-                        scriptingLibPath(root) + "] " + script;
+                        scriptingLibPath(roots.scripting) + "] " + script;
     }
 
     pid_t pid = -1;

@@ -69,6 +69,45 @@ static void testPathsBesideTheRoot()
                "no root, no paths");
 }
 
+static void testHelperRoots()
+{
+    using ndi_timelinewatch_linux::helperRoots;
+    using ndi_timelinewatch_linux::HelperRoots;
+
+    // Stock install inside Resolve: both helpers anchor on it.
+    {
+        const HelperRoots r = helperRoots("/opt/resolve", true, true);
+        expectTrue(r.fuscript == "/opt/resolve" && r.scripting == "/opt/resolve",
+                   "stock install: both helpers use the host root");
+    }
+    // The Python fallback runs only when fuscript is missing, so a relocated
+    // install without fuscript must still hand the fallback ITS OWN
+    // fusionscript.so, not the stock root's (the #75 review bug: the fallback
+    // always got /opt/resolve).
+    {
+        const HelperRoots r = helperRoots("/home/x/Resolve 21", false, true);
+        expectTrue(r.scripting == "/home/x/Resolve 21",
+                   "no fuscript beside the host: the Python fallback still uses the host root");
+        expectTrue(r.fuscript == "/opt/resolve", "no fuscript beside the host: fuscript from the stock root");
+    }
+    {
+        const HelperRoots r = helperRoots("/home/x/Resolve 21", true, true);
+        expectTrue(r.fuscript == "/home/x/Resolve 21" && r.scripting == "/home/x/Resolve 21",
+                   "relocated install: both helpers use the host root");
+    }
+    // A standalone harness (/tmp/hb/harness -> /tmp) has neither piece.
+    {
+        const HelperRoots r = helperRoots("/tmp", false, false);
+        expectTrue(r.fuscript == "/opt/resolve" && r.scripting == "/opt/resolve",
+                   "neither piece beside the host: both use the stock root");
+    }
+    {
+        const HelperRoots r = helperRoots("", true, true);
+        expectTrue(r.fuscript == "/opt/resolve" && r.scripting == "/opt/resolve",
+                   "unreadable host executable: both use the stock root");
+    }
+}
+
 static void testBundleResourcePath()
 {
     using ndi_timelinewatch_linux::bundleResourcePath;
@@ -179,6 +218,7 @@ int main()
     testDescriptorsToClose();
     testResolveRootForHostExecutable();
     testPathsBesideTheRoot();
+    testHelperRoots();
     testBundleResourcePath();
     testPythonHelperEnvironment();
     if (failures) {

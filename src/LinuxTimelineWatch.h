@@ -16,8 +16,8 @@
 
 namespace ndi_timelinewatch_linux {
 
-// The stock install root, for a host whose executable path can't be read or
-// is too shallow (a standalone test harness).
+// The stock install root, for a helper whose piece isn't beside the host
+// executable's root (a standalone test harness; see helperRoots()).
 constexpr const char* kDefaultResolveRoot = "/opt/resolve";
 
 // ---- Resolve install root ------------------------------------------------------
@@ -77,6 +77,27 @@ inline std::string scriptingModulesDir(const std::string& root)
     return detail::underRoot(root, "Developer/Scripting/Modules");
 }
 
+// ---- Which root each helper anchors on -------------------------------------------
+// `hostRoot` is resolveRootForHostExecutable(/proc/self/exe). Each helper
+// takes it when the piece that helper needs is there — fuscript for the Lua
+// helper, fusionscript.so (RESOLVE_SCRIPT_LIB) for the Python fallback — and
+// the stock root otherwise (a standalone harness, an unreadable exe). The
+// two are decided separately because the Python fallback only runs when
+// fuscript is missing: tying its root to fuscript's would always hand it the
+// stock root, even inside a relocated install that has fusionscript.so.
+struct HelperRoots {
+    std::string fuscript;   // root for fuscriptPath()
+    std::string scripting;  // root for the Python fallback's environment
+};
+
+inline HelperRoots helperRoots(const std::string& hostRoot, bool fuscriptBesideHost,
+                               bool scriptingLibBesideHost)
+{
+    const bool haveHost = !hostRoot.empty();
+    return HelperRoots{haveHost && fuscriptBesideHost ? hostRoot : kDefaultResolveRoot,
+                       haveHost && scriptingLibBesideHost ? hostRoot : kDefaultResolveRoot};
+}
+
 // ---- Helper scripts in the bundle ----------------------------------------------
 // dladdr names the .ofx as Resolve dlopened it: <bundle>/Contents/
 // Linux-x86-64/NDIOutput.ofx. The helpers ride in <bundle>/Contents/
@@ -100,7 +121,8 @@ inline std::string bundleResourcePath(const std::string& modulePath, const std::
 // interpreter on Linux (no macOS shim, no Store stub), but it knows nothing
 // about Resolve: the child gets Resolve's documented scripting variables
 // (Developer/Scripting/README.txt), derived from the running install so a
-// relocated Resolve works. Built from `parent` (environ as "KEY=VALUE"):
+// relocated Resolve works (`root` is helperRoots().scripting, not the
+// fuscript root). Built from `parent` (environ as "KEY=VALUE"):
 // RESOLVE_SCRIPT_API/RESOLVE_SCRIPT_LIB replaced, the Modules dir put first
 // on PYTHONPATH (an inherited PYTHONPATH kept behind it), and PYTHONHOME
 // dropped — it would point the system python at some other interpreter's
